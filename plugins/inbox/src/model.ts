@@ -57,13 +57,17 @@ function sameAgentSession(
   recorded: AgentSessionRef | null | undefined,
   current: AgentSessionRef | null,
 ): boolean {
-  // Only compare when the mark recorded a fingerprint; marks recorded without
-  // one (older herdr, non-agent panes) fall back to seq comparison only.
-  if (!recorded) return true;
+  // A mark recorded without a fingerprint (non-agent pane, or agent without
+  // session reporting) matches only while the pane still has none — an
+  // agent session appearing later is a generation change.
+  if (!recorded) return current === null;
+  // A recorded fingerprint that temporarily disappears is not treated as a
+  // mismatch; state_change_seq still guards real generation advances.
+  if (!current) return true;
   const a = recorded.agent ?? null;
-  const b = current?.agent ?? null;
+  const b = current.agent ?? null;
   const av = recorded.value ?? null;
-  const bv = current?.value ?? null;
+  const bv = current.value ?? null;
   return a === b && av === bv;
 }
 
@@ -82,7 +86,10 @@ function markExpiredOrAdvanced(mark: MarkLike, agent: AgentInfo | undefined, now
   if (mark.until && Date.parse(mark.until) <= now.getTime()) return true;
   if (!sameAgentSession(mark.agent_session, agentSessionRef(agent))) return true;
   const seq = currentSeq(agent);
-  if (seq >= 0 && mark.seq >= 0 && seq > mark.seq) return true;
+  // seq -1 means "no agent generation observed". A mark recorded at -1 is
+  // advanced by any later real seq (e.g. an agent appearing on a pane that
+  // was organized while still a plain shell).
+  if (seq >= 0 && (mark.seq < 0 || seq > mark.seq)) return true;
   return false;
 }
 
