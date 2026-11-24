@@ -5,6 +5,7 @@ settle / snooze / restore organize model.
 
 - Plugin ID: `rebuildup.inbox`
 - Install: `herdr plugin install rebuildup/herdr-plugins/plugins/inbox`
+  (pre-release: append `--ref release-0-1-0` or a commit SHA)
 - Runtime prerequisite: [Bun](https://bun.sh) on `PATH` (plugin commands run
   `bun run src/cli.ts`; see ADR-0003 for the no-daemon/Bun decision).
 
@@ -16,9 +17,11 @@ settle / snooze / restore organize model.
   on the same generation signals.
 - `restore` returns a pane to the inbox immediately.
 - `list` emits the versioned JSON contract (`herdr-plugins.inbox/v1`) for TUI,
-  CLI, agents, and external clients such as herdr-t3.
-- A `pane.agent_status_changed` event hook keeps organize state consistent
-  and refreshes pane metadata tokens (`inbox_state`, `inbox_snoozed_until`).
+  CLI, agents, and external clients such as herdr-t3 — see
+  `docs/contracts/inbox-v1.md`.
+- Event hooks (`pane.agent_status_changed`, `pane.closed`) and a startup
+  reconcile keep organize state consistent and refresh pane metadata tokens
+  (`inbox_state`, `inbox_snoozed_until`).
 
 Organize state is user-side UI state only: it never modifies herdr agent
 execution state, and attention statuses (e.g. `blocked`) are never hidden.

@@ -10,8 +10,12 @@ The plugin is installed through the official herdr plugin mechanism:
 
 ```bash
 herdr plugin install rebuildup/herdr-plugins/plugins/inbox
+# pre-release / pinned: herdr plugin install rebuildup/herdr-plugins/plugins/inbox --ref <branch|tag|sha>
 # development: herdr plugin link <repo>/plugins/inbox
 ```
+
+The default ref is the repository's default branch; before the first release
+merge, pass `--ref release-0-1-0` (or a commit SHA) explicitly.
 
 An external client resolves the CLI as follows:
 
