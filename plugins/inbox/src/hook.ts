@@ -13,7 +13,7 @@
 
 import { reportPaneMetadata, sessionSnapshot } from "../../../packages/herdr-client/src/index";
 import { resolveEntry } from "./model";
-import { updateState } from "./state";
+import { sessionEntries, sessionKeyFor, updateState } from "./state";
 
 interface EventEnvelope {
   event?: string;
@@ -47,9 +47,12 @@ async function main(): Promise<void> {
   if (!paneId) return;
   const name = eventName(envelope);
 
+  const sessionKey = sessionKeyFor({});
+
   if (name === "pane.closed") {
     await updateState((state) => {
-      delete state.entries[paneId];
+      const entries = state.sessions[sessionKey];
+      if (entries) delete entries[paneId];
     });
     return;
   }
@@ -61,11 +64,12 @@ async function main(): Promise<void> {
 
   const now = new Date();
   const outcome = await updateState(async (state) => {
-    const entry = state.entries[paneId];
+    const entries = sessionEntries(state, sessionKey);
+    const entry = entries[paneId];
     if (!entry) return null;
     const result = resolveEntry(entry, agent, now);
     if (!entry.settled && !entry.snoozed) {
-      delete state.entries[paneId];
+      delete entries[paneId];
     }
     entry.updated_at = now.toISOString();
     return result;

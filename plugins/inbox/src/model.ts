@@ -12,7 +12,7 @@
  */
 
 import type { AgentInfo, PaneInfo } from "../../../packages/herdr-client/src/snapshot";
-import type { AgentSessionRef, InboxEntry, InboxState, SettledMark, SnoozedMark } from "./state";
+import type { AgentSessionRef, InboxEntry, SettledMark, SnoozedMark } from "./state";
 
 export type OrganizeKind = "settled" | "snoozed";
 
@@ -38,12 +38,6 @@ export interface InboxItem {
   attention: boolean;
   /** False when organize state hides the pane from the default inbox view. */
   in_inbox: boolean;
-}
-
-export interface ResolveResult {
-  state: InboxState;
-  /** Marks that were cleared during resolution (for metadata projection). */
-  cleared: boolean;
 }
 
 /** Statuses that must never be hidden by organize state. */
@@ -132,30 +126,34 @@ export function resolveEntry(
 
 /** Resolve every entry in the state document. */
 export function resolveState(
-  state: InboxState,
+  entries: Record<string, InboxEntry>,
   agents: Record<string, AgentInfo>,
   now: Date,
-): { state: InboxState; clearedPaneIds: string[] } {
+): { clearedPaneIds: string[] } {
   const clearedPaneIds: string[] = [];
-  for (const [paneId, entry] of Object.entries(state.entries)) {
+  for (const [paneId, entry] of Object.entries(entries)) {
     const result = resolveEntry(entry, agents[paneId], now);
     if (result.cleared) clearedPaneIds.push(paneId);
     if (!entry.settled && !entry.snoozed) {
-      delete state.entries[paneId];
+      delete entries[paneId];
     }
   }
-  return { state, clearedPaneIds };
+  return { clearedPaneIds };
 }
 
-function upsertEntry(state: InboxState, pane: PaneInfo, nowIso: string): InboxEntry {
-  const existing = state.entries[pane.pane_id];
+function upsertEntry(
+  entries: Record<string, InboxEntry>,
+  pane: PaneInfo,
+  nowIso: string,
+): InboxEntry {
+  const existing = entries[pane.pane_id];
   const entry: InboxEntry = existing ?? {
     pane_id: pane.pane_id,
     updated_at: nowIso,
   };
   entry.workspace_id = pane.workspace_id ?? entry.workspace_id;
   entry.updated_at = nowIso;
-  state.entries[pane.pane_id] = entry;
+  entries[pane.pane_id] = entry;
   return entry;
 }
 
@@ -167,12 +165,12 @@ function seqMark(agent: AgentInfo | undefined) {
 }
 
 export function settlePane(
-  state: InboxState,
+  entries: Record<string, InboxEntry>,
   pane: PaneInfo,
   agent: AgentInfo | undefined,
   now: Date,
 ): InboxEntry {
-  const entry = upsertEntry(state, pane, now.toISOString());
+  const entry = upsertEntry(entries, pane, now.toISOString());
   const mark: SettledMark = { at: now.toISOString(), ...seqMark(agent) };
   entry.settled = mark;
   delete entry.snoozed;
@@ -180,13 +178,13 @@ export function settlePane(
 }
 
 export function snoozePane(
-  state: InboxState,
+  entries: Record<string, InboxEntry>,
   pane: PaneInfo,
   agent: AgentInfo | undefined,
   until: Date,
   now: Date,
 ): InboxEntry {
-  const entry = upsertEntry(state, pane, now.toISOString());
+  const entry = upsertEntry(entries, pane, now.toISOString());
   const mark: SnoozedMark = {
     at: now.toISOString(),
     until: until.toISOString(),
@@ -197,9 +195,9 @@ export function snoozePane(
   return entry;
 }
 
-export function restorePane(state: InboxState, paneId: string): boolean {
-  const existed = paneId in state.entries;
-  delete state.entries[paneId];
+export function restorePane(entries: Record<string, InboxEntry>, paneId: string): boolean {
+  const existed = paneId in entries;
+  delete entries[paneId];
   return existed;
 }
 
@@ -217,7 +215,7 @@ export interface PruneOptions {
  * panes are never pruned here (marks expire via resolveEntry instead).
  */
 export function pruneState(
-  state: InboxState,
+  entries: Record<string, InboxEntry>,
   livePaneIds: ReadonlySet<string>,
   now: Date,
   options: PruneOptions = {},
@@ -226,22 +224,22 @@ export function pruneState(
   const maxEntries = options.maxEntries ?? 500;
   const removed: string[] = [];
 
-  for (const [paneId, entry] of Object.entries(state.entries)) {
+  for (const [paneId, entry] of Object.entries(entries)) {
     if (livePaneIds.has(paneId)) continue;
     const age = now.getTime() - Date.parse(entry.updated_at);
     if (Number.isFinite(age) && age > retentionMs) {
-      delete state.entries[paneId];
+      delete entries[paneId];
       removed.push(paneId);
     }
   }
 
-  const remaining = Object.keys(state.entries);
+  const remaining = Object.keys(entries);
   if (remaining.length > maxEntries) {
     const sorted = remaining
-      .map((paneId) => ({ paneId, at: state.entries[paneId]?.updated_at ?? "" }))
+      .map((paneId) => ({ paneId, at: entries[paneId]?.updated_at ?? "" }))
       .sort((a, b) => a.at.localeCompare(b.at));
     for (const { paneId } of sorted.slice(0, remaining.length - maxEntries)) {
-      delete state.entries[paneId];
+      delete entries[paneId];
       removed.push(paneId);
     }
   }
@@ -256,7 +254,7 @@ export function pruneState(
 export function buildInbox(
   panes: PaneInfo[],
   agents: Record<string, AgentInfo>,
-  state: InboxState,
+  entries: Record<string, InboxEntry>,
   now: Date,
 ): InboxItem[] {
   const items: InboxItem[] = [];
@@ -265,7 +263,7 @@ export function buildInbox(
   for (const pane of panes) {
     seen.add(pane.pane_id);
     const agent = agents[pane.pane_id];
-    const entry = state.entries[pane.pane_id];
+    const entry = entries[pane.pane_id];
     const resolved = entry
       ? resolveEntry(entry, agent, now)
       : { organize: undefined, cleared: false };
@@ -292,7 +290,7 @@ export function buildInbox(
 
   // Organize entries for panes missing from the snapshot (closed panes) are
   // retained in state but reported as absent rather than fabricated.
-  for (const [paneId, entry] of Object.entries(state.entries)) {
+  for (const [paneId, entry] of Object.entries(entries)) {
     if (seen.has(paneId)) continue;
     const resolved = resolveEntry(entry, undefined, now);
     if (resolved.organize) {

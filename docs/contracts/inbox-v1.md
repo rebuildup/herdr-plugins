@@ -57,12 +57,17 @@ Operating-system rules match herdr: unix socket on macOS/Linux, named pipe
 `\\.\pipe\<path>` on Windows (handled inside the client).
 
 **Remote hosts**: the socket API is local-only (unix socket / named pipe).
-To operate a remote herdr host, run this CLI **on that host** (e.g. via the
-existing SSH/agent-router paths in the user's environment) or expose the
-socket through an existing forward (`ssh -L`, `socat`). The CLI itself adds
-no remote transport; a GUI host and herdr host may differ, and `--session`
-must name a session that exists **on the target host** — session names are
-not globally unique.
+Plugin hooks, actions, and state always live on the herdr host. To operate
+a remote herdr host, run this CLI **on that host** — e.g. via
+`herdr --machine <label> <command>` / the existing SSH paths in the user's
+environment — or expose the socket through an existing forward
+(`ssh -L`, `socat`). The CLI itself adds no remote transport.
+
+Do **not** point a local CLI at a forwarded remote socket: the state file
+is host-local, so that would create a separate organize namespace keyed by
+the forwarded path — invisible to the remote plugin's hooks and metadata
+projection. `--session` must name a session that exists **on the target
+host**; session names are not globally unique.
 
 ## Commands
 
@@ -163,14 +168,19 @@ JSONL on stdout:
 
 `watch` is opt-in; nothing resident runs by default. Snooze expiry is
 resolved lazily at every read anyway, so contract clients never observe a
-stale "snoozed" state — `watch`/startup reconcile only refresh pane
-metadata tokens promptly.
+stale "snoozed" state. Independently, each `snooze` detaches a one-shot
+`_wake` process (internal, not part of this contract) that sleeps until the
+deadline and runs one reconcile — this keeps pane metadata tokens fresh on
+the herdr host without user action (ADR-0005). `watch`/startup reconcile
+remain the repair paths for any missed wake.
 
 ## State and config locations
 
 - State: `<plugin state dir>/state.json` — `HERDR_PLUGIN_STATE_DIR` under
   plugin runtime; `<state-herdr>/plugins/rebuildup.inbox/state.json` for
   external clients (`~/.local/state/herdr/...`, `$XDG_STATE_HOME` aware).
+  Schema v2 namespaces entries per `hostname + canonical socket path`;
+  organize state never crosses sessions or hosts.
 - Config: `<plugin config dir>/config.json` (`defaultSnooze`).
 - Updates preserve both: they live outside the installed checkout.
 

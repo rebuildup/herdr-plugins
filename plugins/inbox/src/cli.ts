@@ -9,6 +9,7 @@
  * HERDR_PLUGIN_CONTEXT_JSON.focused_pane_id (manifest action context).
  */
 
+import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import {
@@ -21,7 +22,15 @@ import {
   subscribeAgentEvents,
 } from "../../../packages/herdr-client/src/index";
 import { buildInbox, pruneState, resolveState, restorePane, settlePane, snoozePane } from "./model";
-import { type InboxEntry, loadState, PLUGIN_ID, stateFilePath, updateState } from "./state";
+import {
+  type InboxEntry,
+  loadState,
+  PLUGIN_ID,
+  sessionEntries,
+  sessionKeyFor,
+  stateFilePath,
+  updateState,
+} from "./state";
 
 const CONTRACT = "herdr-plugins.inbox/v1";
 const DEFAULT_SNOOZE_CONFIG = "config.json";
@@ -181,8 +190,9 @@ async function cmdList(options: CliOptions): Promise<void> {
   const now = new Date();
   const snapshot = await sessionSnapshot(options);
   const state = await loadState();
-  const { state: resolved } = resolveState(state, snapshot.agents ?? {}, now);
-  const items = buildInbox(snapshot.panes ?? [], snapshot.agents ?? {}, resolved, now);
+  const entries = state.sessions[sessionKeyFor(options)] ?? {};
+  resolveState(entries, snapshot.agents ?? {}, now);
+  const items = buildInbox(snapshot.panes ?? [], snapshot.agents ?? {}, entries, now);
   const inbox = items.filter((item) => item.in_inbox);
   emit({
     contract: CONTRACT,
@@ -229,19 +239,26 @@ async function cmdOrganize(
   }
 
   const warnings: string[] = [];
+  const sessionKey = sessionKeyFor(options);
   const entry = await updateState(async (state) => {
-    if (kind === "settle") return settlePane(state, pane, agent, now);
+    const entries = sessionEntries(state, sessionKey);
+    if (kind === "settle") return settlePane(entries, pane, agent, now);
     if (kind === "restore") {
-      restorePane(state, paneId);
+      restorePane(entries, paneId);
       return undefined;
     }
-    return snoozePane(state, pane, agent, until as Date, now);
+    return snoozePane(entries, pane, agent, until as Date, now);
   });
 
   warnings.push(...(await projectMetadata(paneId, entry, options)));
 
+  if (kind === "snooze" && until) {
+    const wakeWarning = spawnSnoozeWake(options, until);
+    if (wakeWarning) warnings.push(wakeWarning);
+  }
+
   const fresh = await loadState();
-  const resolvedEntry = fresh.entries[paneId];
+  const resolvedEntry = fresh.sessions[sessionKey]?.[paneId];
   emit({
     contract: CONTRACT,
     command: kind,
@@ -279,10 +296,12 @@ async function reconcileOnce(options: CliOptions): Promise<ReconcileResult> {
   const agents = snapshot.agents ?? {};
   const livePaneIds = new Set((snapshot.panes ?? []).map((p) => p.pane_id));
 
+  const sessionKey = sessionKeyFor(options);
   const mutation = await updateState((state) => {
-    const cleared = resolveState(state, agents, now).clearedPaneIds;
-    const pruned = pruneState(state, livePaneIds, now);
-    const organized = Object.values(state.entries)
+    const entries = sessionEntries(state, sessionKey);
+    const cleared = resolveState(entries, agents, now).clearedPaneIds;
+    const pruned = pruneState(entries, livePaneIds, now);
+    const organized = Object.values(entries)
       .filter(
         (entry) =>
           livePaneIds.has(entry.pane_id) &&
@@ -313,6 +332,49 @@ async function reconcileOnce(options: CliOptions): Promise<ReconcileResult> {
     projected,
     warnings,
   };
+}
+
+/**
+ * Deadline-driven wake: `snooze` detaches a one-shot `_wake` process that
+ * sleeps until the deadline, then runs one reconcile pass (expiry resolution
+ * + metadata re-projection) and exits. It is bounded (lifetime = remaining
+ * snooze), does no polling, and is redundant with lazy read-side resolution
+ * and the startup reconcile — see ADR-0005.
+ *
+ * Explicit --socket/--session flags are forwarded because the child does not
+ * inherit argv; HERDR_SOCKET_PATH/HERDR_SESSION env vars propagate naturally.
+ */
+function spawnSnoozeWake(options: CliOptions, until: Date): string | null {
+  try {
+    const script = path.join(import.meta.dir, "cli.ts");
+    const args = [process.execPath, "run", script, "_wake", "--until", until.toISOString()];
+    if (options.socketPath) args.push("--socket", options.socketPath);
+    if (options.session) args.push("--session", options.session);
+    const child = spawn(args[0] as string, args.slice(1), {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    child.unref();
+    return null;
+  } catch (err) {
+    return `snooze wake scheduler failed: ${String(err)}`;
+  }
+}
+
+const WAKE_MAX_SLEEP_MS = 2_000_000_000;
+
+/** Internal `_wake` command: sleep until the deadline, then reconcile once. */
+async function cmdWake(options: CliOptions): Promise<void> {
+  const untilSpec = flagValue(options.args, "--until");
+  if (!untilSpec) fail("_wake requires --until <iso8601>", 2);
+  const until = parseUntilSpec(untilSpec, new Date());
+  let remaining = until.getTime() - Date.now();
+  while (remaining > 0) {
+    await new Promise((resolve) => setTimeout(resolve, Math.min(remaining, WAKE_MAX_SLEEP_MS)));
+    remaining = until.getTime() - Date.now();
+  }
+  await reconcileOnce(options);
 }
 
 async function cmdReconcile(options: CliOptions): Promise<void> {
@@ -427,6 +489,8 @@ async function main(): Promise<void> {
       return cmdOrganize(options, options.command);
     case "reconcile":
       return cmdReconcile(options);
+    case "_wake":
+      return cmdWake(options);
     case "watch":
       return cmdWatch(options);
     case "capability":

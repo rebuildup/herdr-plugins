@@ -65,30 +65,41 @@ marks expire via resolution instead.
 
 ## Snooze deadline materialization
 
-No daemon runs in v0.1. Expiry is resolved lazily:
+Expiry is resolved lazily at every read, and materialized promptly by
+four complementary paths:
 
 - on any CLI invocation (`list`, `settle`, `snooze`, `restore`, `reconcile`)
 - on every `pane.agent_status_changed` / `pane.closed` event hook
 - once at server start via the manifest `startup` hook (`reconcile`)
+- a detached one-shot `_wake` process spawned by `snooze`: it sleeps on a
+  single timer until the deadline, runs one `reconcile` pass, and exits
+  (ADR-0005). No polling; lifetime is bounded by the snooze duration.
 - while `inbox watch` runs (subscription events + `--interval` tick,
-  default 60s)
+  default 60s) — opt-in only
 
 Between invocations an expired snooze remains stored but is already resolved
 as expired at read time, so no client ever observes a stale "snoozed" state.
-Metadata tokens may lag until the next hook/startup/watch pass; `reconcile`
-re-projects tokens for every organized pane, which is the repair path for
-partial projection failures.
+`_wake` failure or absence only delays metadata-token refresh; the contract
+stays correct. `reconcile` re-projects tokens for every organized pane,
+which is the repair path for partial projection failures.
 
-## Pane identity
+## Pane and session identity
 
-State is keyed by `pane_id`. herdr pane ids are unique within a session;
-named sessions are disjoint state domains because each session has its own
-socket AND the plugin state dir is shared — entries therefore record
-`workspace_id` for context but do not namespace by session name. Two named
-sessions sharing pane ids could collide; this is accepted for v0.1 because
-pane ids are random per session and collisions are practically impossible.
-Tracked as a known limitation; revisit if herdr exposes session identity in
-snapshots.
+State entries are keyed by `pane_id` **within a session namespace**. The
+session key is `hostname + canonical socket path` (the socket API exposes
+no session name; pane ids like `w1:p1` repeat across sessions, so an
+unscoped key would leak organize marks between sessions). Consequences:
+
+- Each named/default session on a host gets an isolated entry map inside
+  the shared `state.json`.
+- A state file shared across hosts (synced home directory) cannot merge
+  marks: the hostname component differs.
+- A forwarded remote socket used from another machine resolves to a
+  different socket path, so it forms a separate local namespace — which is
+  why the contract requires running the CLI **on the herdr host** (see
+  `docs/contracts/inbox-v1.md` → Remote hosts).
+- State schema v2 (`sessions` map). v1 files are discarded on load;
+  pre-release, no migration.
 
 ## Metadata projection
 

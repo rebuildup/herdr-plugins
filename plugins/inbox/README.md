@@ -49,6 +49,9 @@ next command invocation — see `docs/specs/inbox.md` for the constraint.
 
 Durable state lives only under herdr's plugin state dir
 (`HERDR_PLUGIN_STATE_DIR` at runtime; `~/.local/state/herdr/plugins/rebuildup.inbox/state.json`
-for external clients). Config (`config.json`, e.g. `defaultSnooze`) lives
-under the plugin config dir. Nothing is written inside the installed source
-tree.
+for external clients). Entries are namespaced per session (hostname +
+socket path) so organize state never leaks across sessions or hosts.
+Config (`config.json`, e.g. `defaultSnooze`) lives under the plugin config
+dir. `snooze` also detaches a one-shot wake process that restores the pane
+at its deadline without a resident daemon (ADR-0005). Nothing is written
+inside the installed source tree.

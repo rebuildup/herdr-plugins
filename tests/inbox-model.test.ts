@@ -10,7 +10,7 @@ import {
   settlePane,
   snoozePane,
 } from "../plugins/inbox/src/model";
-import { type AgentSessionRef, emptyState, type InboxState } from "../plugins/inbox/src/state";
+import type { AgentSessionRef, InboxEntry } from "../plugins/inbox/src/state";
 
 const NOW = new Date("2026-01-10T12:00:00Z");
 const LATER = new Date("2026-01-10T13:00:00Z");
@@ -33,46 +33,46 @@ function agent(seq: number, status = "done", session?: AgentSessionRef): AgentIn
   return info;
 }
 
-function stateWith(entry?: Partial<InboxState["entries"][string]>): InboxState {
-  const state = emptyState();
+function entriesWith(entry?: Partial<InboxEntry>): Record<string, InboxEntry> {
+  const entries: Record<string, InboxEntry> = {};
   if (entry) {
-    state.entries.p1 = {
+    entries.p1 = {
       pane_id: "p1",
       updated_at: NOW.toISOString(),
       ...entry,
     };
   }
-  return state;
+  return entries;
 }
 
 describe("settle", () => {
   test("settled pane is hidden until state_change_seq advances", () => {
-    const state = emptyState();
-    settlePane(state, pane("p1"), agent(5, "done"), NOW);
+    const entries: Record<string, InboxEntry> = {};
+    settlePane(entries, pane("p1"), agent(5, "done"), NOW);
     const agents = { p1: agent(5, "done") };
 
-    const items = buildInbox([pane("p1")], agents, state, NOW);
+    const items = buildInbox([pane("p1")], agents, entries, NOW);
     expect(items[0]?.in_inbox).toBe(false);
     expect(items[0]?.organize?.kind).toBe("settled");
 
     const advanced = { p1: agent(6, "working") };
-    const restored = buildInbox([pane("p1")], advanced, state, LATER);
+    const restored = buildInbox([pane("p1")], advanced, entries, LATER);
     expect(restored[0]?.in_inbox).toBe(true);
     expect(restored[0]?.organize).toBeUndefined();
   });
 
   test("settle records agent_session fingerprint", () => {
     const session = { agent: "claude", value: "sess-1" };
-    const state = emptyState();
-    settlePane(state, pane("p1"), agent(5, "done", session), NOW);
-    const entry = state.entries.p1;
+    const entries: Record<string, InboxEntry> = {};
+    settlePane(entries, pane("p1"), agent(5, "done", session), NOW);
+    const entry = entries.p1;
     expect(entry?.settled?.agent_session?.value).toBe("sess-1");
   });
 });
 
 describe("agent identity guard", () => {
   test("different agent_session clears organize marks", () => {
-    const state = stateWith({
+    const entries = entriesWith({
       settled: {
         at: NOW.toISOString(),
         seq: 5,
@@ -80,14 +80,14 @@ describe("agent identity guard", () => {
       },
     });
     const agents = { p1: agent(5, "done", { agent: "claude", value: "new" }) };
-    const result = resolveState(state, agents, NOW);
+    const result = resolveState(entries, agents, NOW);
     expect(result.clearedPaneIds).toContain("p1");
-    expect(state.entries.p1).toBeUndefined();
+    expect(entries.p1).toBeUndefined();
   });
 
   test("same agent_session with unchanged seq stays organized", () => {
     const session = { agent: "claude", value: "same" };
-    const state = stateWith({
+    const entries = entriesWith({
       settled: {
         at: NOW.toISOString(),
         seq: 5,
@@ -95,26 +95,26 @@ describe("agent identity guard", () => {
       },
     });
     const agents = { p1: agent(5, "done", session) };
-    resolveState(state, agents, NOW);
-    expect(state.entries.p1?.settled).toBeDefined();
+    resolveState(entries, agents, NOW);
+    expect(entries.p1?.settled).toBeDefined();
   });
 
   test("mark without fingerprint falls back to seq comparison", () => {
-    const state = stateWith({
+    const entries = entriesWith({
       settled: { at: NOW.toISOString(), seq: 5 },
     });
     const agents = { p1: agent(5, "done", { agent: "anything", value: "x" }) };
-    resolveState(state, agents, NOW);
-    expect(state.entries.p1?.settled).toBeDefined();
+    resolveState(entries, agents, NOW);
+    expect(entries.p1?.settled).toBeDefined();
   });
 });
 
 describe("snooze", () => {
   test("snoozed pane is hidden until deadline", () => {
-    const state = emptyState();
-    snoozePane(state, pane("p1"), agent(3, "working"), LATER, NOW);
+    const entries: Record<string, InboxEntry> = {};
+    snoozePane(entries, pane("p1"), agent(3, "working"), LATER, NOW);
 
-    const during = buildInbox([pane("p1")], { p1: agent(3, "working") }, state, NOW);
+    const during = buildInbox([pane("p1")], { p1: agent(3, "working") }, entries, NOW);
     expect(during[0]?.in_inbox).toBe(false);
     expect(during[0]?.organize).toMatchObject({
       kind: "snoozed",
@@ -124,7 +124,7 @@ describe("snooze", () => {
     const after = buildInbox(
       [pane("p1")],
       { p1: agent(3, "working") },
-      state,
+      entries,
       new Date("2026-01-10T14:00:00Z"),
     );
     expect(after[0]?.in_inbox).toBe(true);
@@ -132,30 +132,30 @@ describe("snooze", () => {
   });
 
   test("seq advance wakes snoozed pane early", () => {
-    const state = emptyState();
-    snoozePane(state, pane("p1"), agent(3, "working"), LATER, NOW);
-    const items = buildInbox([pane("p1")], { p1: agent(4, "done") }, state, NOW);
+    const entries: Record<string, InboxEntry> = {};
+    snoozePane(entries, pane("p1"), agent(3, "working"), LATER, NOW);
+    const items = buildInbox([pane("p1")], { p1: agent(4, "done") }, entries, NOW);
     expect(items[0]?.in_inbox).toBe(true);
   });
 
   test("snooze replaces settle and vice versa", () => {
-    const state = emptyState();
-    settlePane(state, pane("p1"), agent(1, "done"), NOW);
-    snoozePane(state, pane("p1"), agent(1, "done"), LATER, NOW);
-    expect(state.entries.p1?.settled).toBeUndefined();
-    expect(state.entries.p1?.snoozed).toBeDefined();
+    const entries: Record<string, InboxEntry> = {};
+    settlePane(entries, pane("p1"), agent(1, "done"), NOW);
+    snoozePane(entries, pane("p1"), agent(1, "done"), LATER, NOW);
+    expect(entries.p1?.settled).toBeUndefined();
+    expect(entries.p1?.snoozed).toBeDefined();
 
-    settlePane(state, pane("p1"), agent(1, "done"), NOW);
-    expect(state.entries.p1?.snoozed).toBeUndefined();
-    expect(state.entries.p1?.settled).toBeDefined();
+    settlePane(entries, pane("p1"), agent(1, "done"), NOW);
+    expect(entries.p1?.snoozed).toBeUndefined();
+    expect(entries.p1?.settled).toBeDefined();
   });
 });
 
 describe("attention invariant", () => {
   test("blocked pane stays in inbox even with organize marks", () => {
-    const state = emptyState();
-    settlePane(state, pane("p1"), agent(5, "blocked"), NOW);
-    const items = buildInbox([pane("p1")], { p1: agent(5, "blocked") }, state, NOW);
+    const entries: Record<string, InboxEntry> = {};
+    settlePane(entries, pane("p1"), agent(5, "blocked"), NOW);
+    const items = buildInbox([pane("p1")], { p1: agent(5, "blocked") }, entries, NOW);
     expect(items[0]?.attention).toBe(true);
     expect(items[0]?.in_inbox).toBe(true);
   });
@@ -163,20 +163,20 @@ describe("attention invariant", () => {
 
 describe("restore", () => {
   test("restore removes the entry entirely", () => {
-    const state = emptyState();
-    settlePane(state, pane("p1"), agent(5, "done"), NOW);
-    expect(restorePane(state, "p1")).toBe(true);
-    expect(state.entries.p1).toBeUndefined();
-    expect(restorePane(state, "p1")).toBe(false);
+    const entries: Record<string, InboxEntry> = {};
+    settlePane(entries, pane("p1"), agent(5, "done"), NOW);
+    expect(restorePane(entries, "p1")).toBe(true);
+    expect(entries.p1).toBeUndefined();
+    expect(restorePane(entries, "p1")).toBe(false);
   });
 });
 
 describe("missing panes", () => {
   test("organize entries for closed panes are retained but not in inbox", () => {
-    const state = stateWith({
+    const entries = entriesWith({
       settled: { at: NOW.toISOString(), seq: 5 },
     });
-    const items = buildInbox([], {}, state, NOW);
+    const items = buildInbox([], {}, entries, NOW);
     expect(items).toHaveLength(1);
     expect(items[0]?.in_inbox).toBe(false);
     expect(items[0]?.organize?.kind).toBe("settled");
@@ -202,37 +202,37 @@ describe("resolveEntry", () => {
 
 describe("pruneState", () => {
   test("drops entries for panes absent longer than retention", () => {
-    const state = emptyState();
-    state.entries.old = {
+    const entries: Record<string, InboxEntry> = {};
+    entries.old = {
       pane_id: "old",
       updated_at: "2026-01-01T00:00:00Z",
       settled: { at: "2026-01-01T00:00:00Z", seq: 1 },
     };
-    state.entries.recent = {
+    entries.recent = {
       pane_id: "recent",
       updated_at: "2026-01-10T11:00:00Z",
       settled: { at: "2026-01-10T11:00:00Z", seq: 1 },
     };
-    const removed = pruneState(state, new Set(["live"]), NOW);
+    const removed = pruneState(entries, new Set(["live"]), NOW);
     expect(removed).toEqual(["old"]);
-    expect(state.entries.old).toBeUndefined();
-    expect(state.entries.recent).toBeDefined();
+    expect(entries.old).toBeUndefined();
+    expect(entries.recent).toBeDefined();
   });
 
   test("never prunes live panes; enforces maxEntries cap", () => {
-    const state = emptyState();
+    const entries: Record<string, InboxEntry> = {};
     for (let i = 0; i < 5; i += 1) {
-      state.entries[`p${i}`] = {
+      entries[`p${i}`] = {
         pane_id: `p${i}`,
         updated_at: `2026-01-10T10:0${i}:00Z`,
         settled: { at: "2026-01-10T10:00:00Z", seq: 1 },
       };
     }
     const live = new Set(["p0", "p1", "p2", "p3", "p4"]);
-    const removed = pruneState(state, live, NOW, { maxEntries: 3 });
+    const removed = pruneState(entries, live, NOW, { maxEntries: 3 });
     expect(removed).toHaveLength(2);
     expect(removed).toEqual(["p0", "p1"]);
-    expect(Object.keys(state.entries)).toHaveLength(3);
+    expect(Object.keys(entries)).toHaveLength(3);
   });
 });
 

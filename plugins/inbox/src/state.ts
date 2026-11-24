@@ -8,12 +8,14 @@
  * or interleave state.
  */
 
+import { realpathSync } from "node:fs";
 import { mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
-import { pluginDirs } from "../../../packages/herdr-client/src/socket";
+import { pluginDirs, resolveSocketPath } from "../../../packages/herdr-client/src/socket";
 
 export const PLUGIN_ID = "rebuildup.inbox";
-export const STATE_SCHEMA_VERSION = 1;
+export const STATE_SCHEMA_VERSION = 2;
 
 const LOCK_STALE_MS = 30_000;
 const LOCK_TIMEOUT_MS = 10_000;
@@ -47,9 +49,48 @@ export interface InboxEntry {
   updated_at: string;
 }
 
+/**
+ * State is namespaced per herdr session AND per host. The session key is
+ * `hostname + canonical socket path`: pane ids are only unique within one
+ * session (`w1:p1` exists in every session), and a state file shared across
+ * hosts (synced home dir, forwarded socket) must not merge organize marks.
+ */
 export interface InboxState {
   version: typeof STATE_SCHEMA_VERSION;
-  entries: Record<string, InboxEntry>;
+  sessions: Record<string, Record<string, InboxEntry>>;
+}
+
+export function emptyState(): InboxState {
+  return { version: STATE_SCHEMA_VERSION, sessions: {} };
+}
+
+/** Inner per-session entry map, created on demand for writes. */
+export function sessionEntries(state: InboxState, sessionKey: string): Record<string, InboxEntry> {
+  const entries = state.sessions[sessionKey];
+  if (entries) return entries;
+  const created: Record<string, InboxEntry> = {};
+  state.sessions[sessionKey] = created;
+  return created;
+}
+
+/**
+ * Session discriminator for state namespacing: hostname plus the canonical
+ * (symlink-resolved) socket path the command will talk to. Socket path is
+ * the only session identity the socket API exposes; canonicalization keeps
+ * `/var` vs `/private/var` spellings of the same socket identical.
+ */
+export function sessionKeyFor(options: {
+  session?: string | undefined;
+  socketPath?: string | undefined;
+}): string {
+  const socketPath = options.socketPath ?? resolveSocketPath({ session: options.session });
+  let canonical = socketPath;
+  try {
+    canonical = realpathSync(socketPath);
+  } catch {
+    canonical = path.resolve(socketPath);
+  }
+  return `${os.hostname()} ${canonical}`;
 }
 
 export function stateFilePath(): string {
@@ -60,22 +101,18 @@ function lockPath(): string {
   return `${stateFilePath()}.lock`;
 }
 
-export function emptyState(): InboxState {
-  return { version: STATE_SCHEMA_VERSION, entries: {} };
-}
-
 export async function loadState(): Promise<InboxState> {
   try {
     const raw = await readFile(stateFilePath(), "utf8");
     const parsed = JSON.parse(raw) as Partial<InboxState>;
     if (
       parsed.version !== STATE_SCHEMA_VERSION ||
-      typeof parsed.entries !== "object" ||
-      parsed.entries === null
+      typeof parsed.sessions !== "object" ||
+      parsed.sessions === null
     ) {
       return emptyState();
     }
-    return { version: STATE_SCHEMA_VERSION, entries: parsed.entries };
+    return { version: STATE_SCHEMA_VERSION, sessions: parsed.sessions };
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return emptyState();
     throw err;
