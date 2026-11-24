@@ -42,6 +42,14 @@ export async function agentList(options: CallOptions = {}): Promise<AgentListRes
   return (result?.agents ? { agents: result.agents } : (result as AgentListResult)) ?? {};
 }
 
+// Metadata `seq` orders reports from the same source; keep it monotonic even
+// when two invocations land in the same millisecond.
+let lastMetadataSeq = 0;
+function nextMetadataSeq(): number {
+  lastMetadataSeq = Math.max(Date.now(), lastMetadataSeq + 1);
+  return lastMetadataSeq;
+}
+
 /**
  * Write plugin-owned metadata tokens onto a pane. `source` identifies the
  * reporting integration (required by herdr); tokens merge per source and a
@@ -56,7 +64,7 @@ export async function reportPaneMetadata(
     pane_id: paneId,
     source: options.source ?? "rebuildup.inbox",
     tokens,
-    seq: Date.now(),
+    seq: nextMetadataSeq(),
   };
   if (options.agent !== undefined) params.agent = options.agent;
   return request(socketFor(options), "pane.report_metadata", params, options);

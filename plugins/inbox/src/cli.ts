@@ -44,8 +44,8 @@ function parseArgs(argv: string[]): CliOptions {
     } else if (arg === "--socket") {
       options.socketPath = args[++i];
     } else if (arg === "--timeout") {
-      const value = args[++i];
-      if (value !== undefined) options.timeoutMs = Number(value);
+      const value = Number(args[++i]);
+      if (Number.isFinite(value) && value > 0) options.timeoutMs = value;
     } else {
       rest.push(arg);
     }
@@ -212,15 +212,11 @@ async function cmdOrganize(
   const pane = await findPane(snapshot, paneId);
   const agent = snapshot.agents?.[paneId];
 
-  const warnings: string[] = [];
-  const entry = await updateState(async (state) => {
-    if (kind === "settle") return settlePane(state, pane, agent, now);
-    if (kind === "restore") {
-      restorePane(state, paneId);
-      return undefined;
-    }
+  // Resolve the snooze deadline before taking the state lock: parse failures
+  // exit the process and would strand the lock file until it goes stale.
+  let until: Date | undefined;
+  if (kind === "snooze") {
     const untilSpec = flagValue(options.args, "--until") ?? flagValue(options.args, "--for");
-    let until: Date;
     if (untilSpec) {
       until = parseUntilSpec(untilSpec, now);
     } else {
@@ -230,7 +226,16 @@ async function cmdOrganize(
       }
       until = parseUntilSpec(config.defaultSnooze as string, now);
     }
-    return snoozePane(state, pane, agent, until, now);
+  }
+
+  const warnings: string[] = [];
+  const entry = await updateState(async (state) => {
+    if (kind === "settle") return settlePane(state, pane, agent, now);
+    if (kind === "restore") {
+      restorePane(state, paneId);
+      return undefined;
+    }
+    return snoozePane(state, pane, agent, until as Date, now);
   });
 
   warnings.push(...(await projectMetadata(paneId, entry, options)));
@@ -289,7 +294,10 @@ async function reconcileOnce(options: CliOptions): Promise<ReconcileResult> {
 
   const warnings: string[] = [];
   const projected: string[] = [];
+  // Only live panes can carry metadata tokens; cleared marks on absent panes
+  // need no projection (and would only produce spurious warnings).
   for (const paneId of mutation.cleared) {
+    if (!livePaneIds.has(paneId)) continue;
     warnings.push(...(await projectMetadata(paneId, undefined, options)));
     projected.push(paneId);
   }
@@ -319,8 +327,7 @@ function emitLine(payload: unknown): void {
 /**
  * Long-running reconciler. stdout is JSONL:
  *   {"contract","type":"watch.started"|"watch.reconcile"|"watch.stopped",...}
- * Stops on SIGINT/SIGTERM (exit 0), clean subscription close (exit 0), or
- * unexpected stream end / subscribe failure (exit 1).
+ * Stops on SIGINT/SIGTERM (exit 0) or unexpected stream end (exit 1).
  */
 async function cmdWatch(options: CliOptions): Promise<void> {
   const intervalSec = Number(flagValue(options.args, "--interval") ?? "60");
