@@ -83,10 +83,3 @@ export function paneAgentEntries(snapshot: SessionSnapshot): PaneAgentEntry[] {
     agent: agents[pane.pane_id] ?? ({} as AgentInfo),
   }));
 }
-
-/** Agent statuses that count as an active attention/working signal. */
-export const ATTENTION_STATUSES = new Set(["blocked", "working"]);
-
-export function isAttentionStatus(status: string | undefined): boolean {
-  return status !== undefined && ATTENTION_STATUSES.has(status);
-}

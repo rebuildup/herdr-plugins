@@ -7,6 +7,7 @@
  * matching `id` resolves the request.
  */
 
+import { createHash } from "node:crypto";
 import net from "node:net";
 import path from "node:path";
 
@@ -204,9 +205,13 @@ export function subscribe(
       }
       if (message.id === id) {
         if (message.error) {
-          // Subscription-level failure (e.g. events_lost); surface as stream end.
+          // Subscription rejected (e.g. unknown subscription type): fail the
+          // ack and end the stream rather than hanging `started` forever.
+          clearTimeout(ackTimer);
+          acknowledged = true;
           closed = true;
           socket.destroy();
+          ackReject(new HerdrRpcError(message.error));
           for (const waiter of waiters.splice(0)) {
             waiter({ value: undefined, done: true });
           }
@@ -354,8 +359,15 @@ export function pluginPathComponent(value: string): string {
   if (hasWindowsReservedStem(component)) {
     component = `%${component}`;
   }
+  if ([...component].length > PLUGIN_COMPONENT_MAX_CHARS) {
+    const hash = createHash("sha256").update(value, "utf8").digest("hex").slice(0, 12);
+    const prefix = [...component].slice(0, PLUGIN_COMPONENT_MAX_CHARS - hash.length - 1).join("");
+    return `${prefix}-${hash}`;
+  }
   return component;
 }
+
+const PLUGIN_COMPONENT_MAX_CHARS = 120;
 
 /** Mirrors herdr's Windows reserved device-name guard for path components. */
 function hasWindowsReservedStem(component: string): boolean {
