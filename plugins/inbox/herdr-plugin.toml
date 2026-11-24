@@ -1,0 +1,35 @@
+id = "rebuildup.inbox"
+name = "Inbox"
+version = "0.1.0"
+description = "Work inbox for agent panes: settle, snooze, and restore with persistent user-side organize state."
+platforms = ["linux", "macos", "windows"]
+
+# No build step: the plugin is dependency-free TypeScript executed by Bun
+# (runtime prerequisite, see plugins/inbox/README.md).
+
+[[actions]]
+id = "settle"
+title = "Inbox: settle pane"
+description = "Hide the focused agent pane from the inbox until its state changes."
+contexts = ["pane"]
+command = ["bun", "run", "src/cli.ts", "settle"]
+
+[[actions]]
+id = "restore"
+title = "Inbox: restore pane"
+description = "Return the focused agent pane to the inbox."
+contexts = ["pane"]
+command = ["bun", "run", "src/cli.ts", "restore"]
+
+[[actions]]
+id = "snooze"
+title = "Inbox: snooze pane"
+description = "Hide the focused agent pane until the configured snooze duration elapses."
+contexts = ["pane"]
+command = ["bun", "run", "src/cli.ts", "snooze"]
+
+# Event hook: keep organize state consistent with herdr agent status changes
+# (auto-restore on state_change_seq advance, agent-session mismatch, expiry).
+[[events]]
+on = "pane.agent_status_changed"
+command = ["bun", "run", "src/hook.ts"]
