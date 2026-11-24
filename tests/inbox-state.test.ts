@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
   type InboxEntry,
+  type InboxState,
   sessionEntries,
   sessionKeyFor,
-  type InboxState,
 } from "../plugins/inbox/src/state";
 
 function entry(paneId: string): InboxEntry {
