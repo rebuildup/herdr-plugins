@@ -203,6 +203,51 @@ export function restorePane(state: InboxState, paneId: string): boolean {
   return existed;
 }
 
+export interface PruneOptions {
+  /** Entries for panes absent from the snapshot are dropped after this age. Default 24h. */
+  absentRetentionMs?: number;
+  /** Hard cap on stored entries; oldest `updated_at` are dropped first. Default 500. */
+  maxEntries?: number;
+}
+
+/**
+ * Bound state growth: drop organize entries whose pane has been absent from
+ * the session snapshot longer than the retention window, then enforce a hard
+ * entry cap by evicting the oldest `updated_at` entries. Entries for live
+ * panes are never pruned here (marks expire via resolveEntry instead).
+ */
+export function pruneState(
+  state: InboxState,
+  livePaneIds: ReadonlySet<string>,
+  now: Date,
+  options: PruneOptions = {},
+): string[] {
+  const retentionMs = options.absentRetentionMs ?? 86_400_000;
+  const maxEntries = options.maxEntries ?? 500;
+  const removed: string[] = [];
+
+  for (const [paneId, entry] of Object.entries(state.entries)) {
+    if (livePaneIds.has(paneId)) continue;
+    const age = now.getTime() - Date.parse(entry.updated_at);
+    if (Number.isFinite(age) && age > retentionMs) {
+      delete state.entries[paneId];
+      removed.push(paneId);
+    }
+  }
+
+  const remaining = Object.keys(state.entries);
+  if (remaining.length > maxEntries) {
+    const sorted = remaining
+      .map((paneId) => ({ paneId, at: state.entries[paneId]?.updated_at ?? "" }))
+      .sort((a, b) => a.at.localeCompare(b.at));
+    for (const { paneId } of sorted.slice(0, remaining.length - maxEntries)) {
+      delete state.entries[paneId];
+      removed.push(paneId);
+    }
+  }
+  return removed;
+}
+
 /**
  * Build the inbox view: every live pane with agent activity plus any pane
  * carrying organize state, resolved against current agent info. Items carry

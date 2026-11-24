@@ -3,6 +3,7 @@ import type { AgentInfo, PaneInfo } from "../packages/herdr-client/src/snapshot"
 import {
   agentSessionRef,
   buildInbox,
+  pruneState,
   resolveEntry,
   resolveState,
   restorePane,
@@ -196,6 +197,42 @@ describe("resolveEntry", () => {
     expect(entry.snoozed).toBeDefined();
     expect(result.organize?.kind).toBe("snoozed");
     expect(result.cleared).toBe(true);
+  });
+});
+
+describe("pruneState", () => {
+  test("drops entries for panes absent longer than retention", () => {
+    const state = emptyState();
+    state.entries.old = {
+      pane_id: "old",
+      updated_at: "2026-01-01T00:00:00Z",
+      settled: { at: "2026-01-01T00:00:00Z", seq: 1 },
+    };
+    state.entries.recent = {
+      pane_id: "recent",
+      updated_at: "2026-01-10T11:00:00Z",
+      settled: { at: "2026-01-10T11:00:00Z", seq: 1 },
+    };
+    const removed = pruneState(state, new Set(["live"]), NOW);
+    expect(removed).toEqual(["old"]);
+    expect(state.entries.old).toBeUndefined();
+    expect(state.entries.recent).toBeDefined();
+  });
+
+  test("never prunes live panes; enforces maxEntries cap", () => {
+    const state = emptyState();
+    for (let i = 0; i < 5; i += 1) {
+      state.entries[`p${i}`] = {
+        pane_id: `p${i}`,
+        updated_at: `2026-01-10T10:0${i}:00Z`,
+        settled: { at: "2026-01-10T10:00:00Z", seq: 1 },
+      };
+    }
+    const live = new Set(["p0", "p1", "p2", "p3", "p4"]);
+    const removed = pruneState(state, live, NOW, { maxEntries: 3 });
+    expect(removed).toHaveLength(2);
+    expect(removed).toEqual(["p0", "p1"]);
+    expect(Object.keys(state.entries)).toHaveLength(3);
   });
 });
 

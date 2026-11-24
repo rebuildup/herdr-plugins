@@ -55,19 +55,29 @@ a defense-in-depth guarantee, not the primary mechanism.
   explicit: panes waiting on approval that herdr reports as `working`/`idle`
   cannot be distinguished and are treated as ordinary work.
 
+### State bounds
+
+Organize entries for panes absent from the session snapshot are retained for
+up to 24h (they may reappear), then pruned by `reconcile`/`watch`. A hard cap
+of 500 entries evicts the oldest `updated_at` first. `pane.closed` event
+hooks delete the entry immediately. Live panes are never pruned — their
+marks expire via resolution instead.
+
 ## Snooze deadline materialization
 
 No daemon runs in v0.1. Expiry is resolved lazily:
 
 - on any CLI invocation (`list`, `settle`, `snooze`, `restore`, `reconcile`)
-- on every `pane.agent_status_changed` event hook for the affected pane
+- on every `pane.agent_status_changed` / `pane.closed` event hook
+- once at server start via the manifest `startup` hook (`reconcile`)
 - while `inbox watch` runs (subscription events + `--interval` tick,
   default 60s)
 
 Between invocations an expired snooze remains stored but is already resolved
 as expired at read time, so no client ever observes a stale "snoozed" state.
-The only visible lag is metadata-token freshness, which `watch`/hooks
-refresh.
+Metadata tokens may lag until the next hook/startup/watch pass; `reconcile`
+re-projects tokens for every organized pane, which is the repair path for
+partial projection failures.
 
 ## Pane identity
 
@@ -96,12 +106,17 @@ are untouched.
 Not used in v0.1. `agent.view.set` is a single global slot; claiming it
 would conflict with other plugins and herdr-t3's own views. See ADR-0004.
 
-## Event hook
+## Event hooks and startup
 
-`[[events]] on = "pane.agent_status_changed"` runs `src/hook.ts`, which
-reads `HERDR_PLUGIN_EVENT_JSON`, resolves the affected pane against a fresh
-snapshot, persists cleared marks, and refreshes metadata tokens. Hook
-failures are logged to the plugin command log and never affect herdr.
+- `[[events]] pane.agent_status_changed` → `src/hook.ts`: resolves the
+  affected pane against a fresh snapshot, persists cleared marks, refreshes
+  metadata tokens.
+- `[[events]] pane.closed` → `src/hook.ts`: deletes the pane's organize
+  entry (closed panes must not accumulate state or leak onto reused ids).
+- `[[startup]]` → `cli.ts reconcile`: one pass at server start to
+  materialize expirations and repair tokens after restarts.
+
+Hook failures are logged to the plugin command log and never affect herdr.
 
 ## Manifest actions
 

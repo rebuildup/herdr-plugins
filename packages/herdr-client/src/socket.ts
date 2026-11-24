@@ -316,14 +316,15 @@ export function pluginDirs(
   pluginId: string,
   options: { configDir?: string; stateDir?: string } = {},
 ): { configDir: string; stateDir: string } {
+  const component = pluginPathComponent(pluginId);
   const configDir =
     process.env.HERDR_PLUGIN_CONFIG_DIR ??
     options.configDir ??
-    path.join(herdrConfigDir(), "plugins", "config", pluginId);
+    path.join(herdrConfigDir(), "plugins", "config", component);
   const stateDir =
     process.env.HERDR_PLUGIN_STATE_DIR ??
     options.stateDir ??
-    path.join(herdrStateDir(), "plugins", pluginId);
+    path.join(herdrStateDir(), "plugins", component);
   return { configDir, stateDir };
 }
 
@@ -346,8 +347,19 @@ export function pluginPathComponent(value: string): string {
       }
     }
   }
+  if (component === "") return "%plugin";
   if (component.endsWith(".")) {
     component = `${component.slice(0, -1)}%2E`;
   }
-  return component || "%plugin";
+  if (hasWindowsReservedStem(component)) {
+    component = `%${component}`;
+  }
+  return component;
+}
+
+/** Mirrors herdr's Windows reserved device-name guard for path components. */
+function hasWindowsReservedStem(component: string): boolean {
+  const stem = component.split(".")[0]?.toLowerCase() ?? "";
+  if (["con", "prn", "aux", "nul"].includes(stem)) return true;
+  return /^com[1-9]$/.test(stem) || /^lpt[1-9]$/.test(stem);
 }
