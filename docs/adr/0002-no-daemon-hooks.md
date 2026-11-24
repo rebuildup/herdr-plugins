@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted (2026-01).
+Accepted (2026-01). Amended by ADR-0005 (2026-11): a bounded one-shot
+`_wake` process may be detached for snooze deadlines; all other paths
+remain unchanged.
 
 ## Context
 
