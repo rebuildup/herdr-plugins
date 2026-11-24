@@ -20,7 +20,7 @@ import {
   sessionSnapshot,
   subscribeAgentEvents,
 } from "../../../packages/herdr-client/src/index";
-import { buildInbox, resolveState, restorePane, settlePane, snoozePane } from "./model";
+import { buildInbox, pruneState, resolveState, restorePane, settlePane, snoozePane } from "./model";
 import { type InboxEntry, loadState, PLUGIN_ID, stateFilePath, updateState } from "./state";
 
 const CONTRACT = "herdr-plugins.inbox/v1";
@@ -58,9 +58,18 @@ function emit(payload: unknown): void {
   process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
 }
 
-function fail(message: string, code = 1): never {
-  process.stderr.write(`inbox: ${message}\n`);
+function emitError(message: string, code: number): never {
+  const error = {
+    contract: CONTRACT,
+    ok: false,
+    error: { code: code === 2 ? "usage" : "error", message },
+  };
+  process.stderr.write(`${JSON.stringify(error)}\n`);
   process.exit(code);
+}
+
+function fail(message: string, code = 1): never {
+  emitError(message, code);
 }
 
 function flagValue(args: string[], name: string): string | undefined {
@@ -178,7 +187,10 @@ async function cmdList(options: CliOptions): Promise<void> {
   emit({
     contract: CONTRACT,
     generated_at: now.toISOString(),
-    session: snapshot.session ?? null,
+    session: {
+      name: options.session ?? process.env.HERDR_SESSION ?? null,
+      socket: options.socketPath ?? process.env.HERDR_SOCKET_PATH ?? null,
+    },
     state_file: stateFilePath(),
     counts: {
       total: items.length,
@@ -240,72 +252,143 @@ async function cmdOrganize(
   });
 }
 
-async function cmdReconcile(options: CliOptions): Promise<void> {
+interface ReconcileResult {
+  resolved_at: string;
+  cleared: string[];
+  pruned: string[];
+  /** Pane ids whose metadata tokens were (re)projected. */
+  projected: string[];
+  warnings: string[];
+}
+
+/**
+ * Single reconcile pass: resolve marks against the live snapshot, prune
+ * stale entries, then repair pane metadata for every organized pane and
+ * clear tokens for panes whose organize state was just removed. Metadata
+ * projection is best-effort per pane; failures are collected as warnings so
+ * a later reconcile can repair them.
+ */
+async function reconcileOnce(options: CliOptions): Promise<ReconcileResult> {
   const now = new Date();
   const snapshot = await sessionSnapshot(options);
   const agents = snapshot.agents ?? {};
-  const clearedPaneIds = await updateState(
-    (state) => resolveState(state, agents, now).clearedPaneIds,
-  );
-  const warnings: string[] = [];
-  for (const paneId of clearedPaneIds) {
-    warnings.push(...(await projectMetadata(paneId, undefined, options)));
-  }
-  emit({
-    contract: CONTRACT,
-    command: "reconcile",
-    resolved_at: now.toISOString(),
-    cleared: clearedPaneIds,
-    warnings,
+  const livePaneIds = new Set((snapshot.panes ?? []).map((p) => p.pane_id));
+
+  const mutation = await updateState((state) => {
+    const cleared = resolveState(state, agents, now).clearedPaneIds;
+    const pruned = pruneState(state, livePaneIds, now);
+    const organized = Object.values(state.entries)
+      .filter(
+        (entry) =>
+          livePaneIds.has(entry.pane_id) &&
+          (entry.settled !== undefined || entry.snoozed !== undefined),
+      )
+      .map((entry) => ({ pane_id: entry.pane_id, entry }));
+    return { cleared, pruned, organized };
   });
+
+  const warnings: string[] = [];
+  const projected: string[] = [];
+  for (const paneId of mutation.cleared) {
+    warnings.push(...(await projectMetadata(paneId, undefined, options)));
+    projected.push(paneId);
+  }
+  for (const { pane_id: paneId, entry } of mutation.organized) {
+    warnings.push(...(await projectMetadata(paneId, entry, options)));
+    projected.push(paneId);
+  }
+
+  return {
+    resolved_at: now.toISOString(),
+    cleared: mutation.cleared,
+    pruned: mutation.pruned,
+    projected,
+    warnings,
+  };
 }
 
+async function cmdReconcile(options: CliOptions): Promise<void> {
+  const result = await reconcileOnce(options);
+  emit({ contract: CONTRACT, command: "reconcile", ...result });
+}
+
+function emitLine(payload: unknown): void {
+  process.stdout.write(`${JSON.stringify(payload)}\n`);
+}
+
+/**
+ * Long-running reconciler. stdout is JSONL:
+ *   {"contract","type":"watch.started"|"watch.reconcile"|"watch.stopped",...}
+ * Stops on SIGINT/SIGTERM (exit 0), clean subscription close (exit 0), or
+ * unexpected stream end / subscribe failure (exit 1).
+ */
 async function cmdWatch(options: CliOptions): Promise<void> {
-  const intervalMs = Number(flagValue(options.args, "--interval") ?? "60") * 1000;
+  const intervalSec = Number(flagValue(options.args, "--interval") ?? "60");
+  const intervalMs = (Number.isFinite(intervalSec) && intervalSec > 0 ? intervalSec : 60) * 1000;
+
   const subscription = subscribeAgentEvents(options);
   await subscription.started;
-  process.stderr.write("inbox watch: subscribed to pane.agent_status_changed\n");
+  emitLine({ contract: CONTRACT, type: "watch.started", at: new Date().toISOString() });
 
-  const reconcile = async () => {
+  let stopping = false;
+  const stop = () => {
+    stopping = true;
+    subscription.close();
+  };
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
+
+  const tick = async (trigger: "event" | "interval", event?: unknown) => {
     try {
-      await cmdReconcileSilent(options);
+      const result = await reconcileOnce(options);
+      emitLine({
+        contract: CONTRACT,
+        type: "watch.reconcile",
+        trigger,
+        ...(event !== undefined ? { event } : {}),
+        ...result,
+      });
     } catch (err) {
-      process.stderr.write(`inbox watch: reconcile failed: ${String(err)}\n`);
+      emitLine({
+        contract: CONTRACT,
+        type: "watch.error",
+        trigger,
+        error: String(err),
+      });
     }
   };
 
-  const ticker = setInterval(() => void reconcile(), intervalMs);
+  const ticker = setInterval(() => void tick("interval"), intervalMs);
   try {
-    for await (const _event of subscription.events) {
-      await reconcile();
+    for await (const event of subscription.events) {
+      if (stopping) break;
+      await tick("event", event);
     }
   } finally {
     clearInterval(ticker);
     subscription.close();
+    process.off("SIGINT", stop);
+    process.off("SIGTERM", stop);
   }
-}
 
-async function cmdReconcileSilent(options: CliOptions): Promise<void> {
-  const now = new Date();
-  const snapshot = await sessionSnapshot(options);
-  const agents = snapshot.agents ?? {};
-  const cleared = await updateState((state) => resolveState(state, agents, now).clearedPaneIds);
-  for (const paneId of cleared) {
-    try {
-      await reportPaneMetadata(paneId, { inbox_state: null, inbox_snoozed_until: null }, options);
-    } catch {
-      // best-effort projection inside watch
-    }
-  }
+  emitLine({
+    contract: CONTRACT,
+    type: "watch.stopped",
+    reason: stopping ? "signal" : "stream_end",
+    at: new Date().toISOString(),
+  });
+  if (!stopping) process.exitCode = 1;
 }
 
 async function cmdCapability(options: CliOptions): Promise<void> {
   emit({
     contract: CONTRACT,
     plugin: PLUGIN_ID,
-    commands: ["list", "settle", "snooze", "restore", "reconcile", "watch"],
+    version: "0.1.0",
+    commands: ["list", "settle", "snooze", "restore", "reconcile", "watch", "capability"],
     actions: ["settle", "restore", "snooze"],
-    events: ["pane.agent_status_changed"],
+    events: ["pane.agent_status_changed", "pane.closed"],
+    startup: ["reconcile"],
     state_file: stateFilePath(),
     socket: options.socketPath ?? null,
   });
@@ -353,7 +436,13 @@ async function main(): Promise<void> {
 
 if (import.meta.main) {
   main().catch((err) => {
-    process.stderr.write(`inbox: ${String(err)}\n`);
+    process.stderr.write(
+      `${JSON.stringify({
+        contract: CONTRACT,
+        ok: false,
+        error: { code: "error", message: String(err) },
+      })}\n`,
+    );
     process.exit(1);
   });
 }

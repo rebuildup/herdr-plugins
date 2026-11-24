@@ -1,10 +1,14 @@
 /**
  * Event-hook entrypoint. herdr invokes this command with HERDR_PLUGIN_EVENT
- * and HERDR_PLUGIN_EVENT_JSON set. It reconciles organize state for the
- * affected pane against the live snapshot and refreshes pane metadata.
+ * and HERDR_PLUGIN_EVENT_JSON set.
  *
- * Contract: exits 0 on success; failures are logged to stderr and surfaced in
- * the plugin command log — they must never affect herdr itself.
+ * - `pane.agent_status_changed`: resolve the affected pane's organize marks
+ *   against a fresh snapshot and refresh its metadata tokens.
+ * - `pane.closed`: drop the pane's organize entry (the pane no longer
+ *   exists; a reused pane id starts with clean state).
+ *
+ * Contract: exits 0 on success; failures are logged to stderr and surfaced
+ * in the plugin command log — they must never affect herdr itself.
  */
 
 import { reportPaneMetadata, sessionSnapshot } from "../../../packages/herdr-client/src/index";
@@ -29,9 +33,17 @@ async function main(): Promise<void> {
   } catch {
     return;
   }
-  if (envelope.event !== "pane.agent_status_changed") return;
   const paneId = envelope.data?.pane_id;
   if (!paneId) return;
+
+  if (envelope.event === "pane.closed") {
+    await updateState((state) => {
+      delete state.entries[paneId];
+    });
+    return;
+  }
+
+  if (envelope.event !== "pane.agent_status_changed") return;
 
   const snapshot = await sessionSnapshot();
   const agent = snapshot.agents?.[paneId];

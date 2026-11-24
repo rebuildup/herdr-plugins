@@ -4,17 +4,61 @@ Versioned structured interface for the `rebuildup.inbox` plugin. External
 clients (herdr-t3, agents, scripts) MUST depend only on this contract, never
 on the plugin's internal state file format.
 
-## Invocation
+## Invocation and discovery
+
+The plugin is installed through the official herdr plugin mechanism:
 
 ```bash
-<plugin-cli> <command> [--session NAME] [--socket PATH] [--timeout MS]
+herdr plugin install rebuildup/herdr-plugins/plugins/inbox
+# development: herdr plugin link <repo>/plugins/inbox
 ```
 
-- `<plugin-cli>` resolves to `bun run src/cli.ts` inside the plugin root for
-  development, or the manifest action/hook context (`HERDR_PANE_ID`,
-  `HERDR_PLUGIN_CONTEXT_JSON`) for TUI actions.
-- All commands print exactly one JSON document to stdout. Diagnostics go to
-  stderr. Exit codes: `0` success, `1` handled error, `2` usage error.
+An external client resolves the CLI as follows:
+
+1. `herdr plugin list` (or the plugin registry) → installed plugin entry
+   with `plugin_root` (managed checkout `…/checkout/plugins/inbox`, or the
+   linked directory).
+2. Run `<plugin_root>/src/cli.ts` with `bun run` from any cwd — imports are
+   relative and self-contained within the checkout.
+3. Alternatively invoke manifest actions (`settle`/`restore`/`snooze`) via
+   `plugin.action.invoke` for focused-pane operations without arguments.
+
+`capability` returns machine-readable discovery:
+
+```json
+{
+  "contract": "herdr-plugins.inbox/v1",
+  "plugin": "rebuildup.inbox",
+  "version": "0.1.0",
+  "commands": ["list", "settle", "snooze", "restore", "reconcile", "watch", "capability"],
+  "actions": ["settle", "restore", "snooze"],
+  "events": ["pane.agent_status_changed", "pane.closed"],
+  "startup": ["reconcile"],
+  "state_file": "…",
+  "socket": null
+}
+```
+
+## Target selection (Host / Session)
+
+The CLI always talks to **the herdr server owning the socket it resolves**.
+Resolution order:
+
+1. `--socket PATH` (explicit; also accepts a forwarded/local socket path)
+2. `HERDR_SOCKET_PATH`
+3. `--session NAME` / `HERDR_SESSION` → `<config>/sessions/<name>/herdr.sock`
+4. default session socket `<config>/herdr.sock`
+
+Operating-system rules match herdr: unix socket on macOS/Linux, named pipe
+`\\.\pipe\<path>` on Windows (handled inside the client).
+
+**Remote hosts**: the socket API is local-only (unix socket / named pipe).
+To operate a remote herdr host, run this CLI **on that host** (e.g. via the
+existing SSH/agent-router paths in the user's environment) or expose the
+socket through an existing forward (`ssh -L`, `socat`). The CLI itself adds
+no remote transport; a GUI host and herdr host may differ, and `--session`
+must name a session that exists **on the target host** — session names are
+not globally unique.
 
 ## Commands
 
@@ -24,13 +68,28 @@ on the plugin's internal state file format.
 | `settle` | `pane_id?` | Hide pane until generation change. |
 | `snooze` | `pane_id? --until <spec>` | Hide pane until deadline; early wake on generation change. |
 | `restore` | `pane_id?` | Clear organize state. |
-| `reconcile` | — | Materialize expirations/generation changes against live snapshot. |
-| `watch` | `--interval SEC` | Long-running reconcile on agent events + interval. |
-| `capability` | — | Machine-readable capability discovery. |
+| `reconcile` | — | Resolve expirations/generation changes, prune stale entries, repair metadata. |
+| `watch` | `--interval SEC` | JSONL event stream + periodic reconcile (below). |
+| `capability` | — | Discovery document (above). |
+
+Global flags (after the command): `--session NAME`, `--socket PATH`,
+`--timeout MS` (per-request timeout, default 10000).
 
 `--until` accepts ISO 8601, `+30m`/`+2h`/`+1d`, or bare `30m`. Without
 `--until`, `snooze` reads `defaultSnooze` from the plugin config dir's
-`config.json`.
+`config.json` (used by the manifest `snooze` action, which takes no args).
+
+## Output contract
+
+- Success: exactly one JSON document on stdout (pretty-printed, except
+  `watch` which is JSONL — one compact object per line).
+- Failure: one JSON object on **stderr**,
+  `{"contract","ok":false,"error":{"code":"usage"|"error","message"}}`,
+  plus exit code `2` (usage) or `1` (handled error). Socket/transport
+  failures are errors — never an empty inbox.
+- `pane_id` may be omitted when `HERDR_PANE_ID` or
+  `HERDR_PLUGIN_CONTEXT_JSON.focused_pane_id` is set (manifest actions,
+  event-hook contexts).
 
 ## `list` output
 
@@ -38,67 +97,81 @@ on the plugin's internal state file format.
 {
   "contract": "herdr-plugins.inbox/v1",
   "generated_at": "2026-01-10T12:00:00.000Z",
-  "session": { "name": "..." },
+  "session": { "name": "default", "socket": null },
   "state_file": "/abs/path/state.json",
   "counts": { "total": 0, "inbox": 0, "attention": 0, "organized": 0 },
-  "items": [
-    {
-      "pane_id": "pane-1",
-      "workspace_id": "ws-1",
-      "tab_id": "tab-1",
-      "title": "agent title",
-      "cwd": "/path",
-      "agent_status": "done",
-      "state_change_seq": 42,
-      "agent_session": { "agent": "claude", "kind": "session", "value": "..." },
-      "organize": { "kind": "settled", "since": "..." },
-      "attention": false,
-      "in_inbox": false
-    }
-  ]
+  "items": [ { "pane_id": "…", "…": "…" } ]
 }
 ```
 
-- `organize` is absent when the pane is not organized. `kind` is `settled`
-  or `snoozed`; snoozed adds `until` (ISO 8601).
-- `attention` is true when herdr reports a status that requires user
-  attention (`blocked`). Attention items are ALWAYS `in_inbox: true` —
-  organize state never hides them.
-- `in_inbox` is false only when organize state hides a non-attention pane.
-- Items for panes missing from the live snapshot may appear with only
-  `pane_id`/`organize`/`in_inbox:false` (retained organize state for closed
-  panes); clients must not treat them as live work.
+`session.name`/`session.socket` echo the resolved target (explicit flag or
+env); they are `null` when the default socket was used implicitly. Item
+fields and `organize`/`attention`/`in_inbox` semantics are unchanged from
+v1 draft: `organize.kind` is `settled`|`snoozed` (`until` on snoozed),
+`attention` (`blocked`) forces `in_inbox: true`, and items for panes absent
+from the snapshot carry only identity/organize fields with
+`in_inbox: false`.
 
 ## Organize/mutate output
 
-`settle`/`snooze`/`restore` emit:
+`settle`/`snooze`/`restore` emit `{contract, command, pane_id,
+agent_status, state_change_seq, organize, warnings}`; `organize` is `null`
+after `restore`. `warnings` lists non-fatal issues (e.g. metadata
+projection failure) — the state mutation itself already succeeded; a later
+`reconcile`/`watch` repairs projections.
+
+## `reconcile` output
 
 ```json
 {
   "contract": "herdr-plugins.inbox/v1",
-  "command": "settle",
-  "pane_id": "pane-1",
-  "agent_status": "done",
-  "state_change_seq": 42,
-  "organize": { "kind": "settled", "since": "..." },
+  "command": "reconcile",
+  "resolved_at": "…",
+  "cleared": ["pane-id"],
+  "pruned": ["pane-id"],
+  "projected": ["pane-id"],
   "warnings": []
 }
 ```
 
-`organize` is `null` after `restore`. `warnings` carries non-fatal issues
-(e.g. metadata projection failure) — never treat warnings as success/failure
-of the state mutation itself; check `organize`.
+- `cleared`: organize marks removed by expiry/generation/identity resolution.
+- `pruned`: state entries dropped because their pane has been absent from
+  the snapshot beyond the retention window (24h) or the entry cap (500).
+- `projected`: panes whose metadata tokens were (re)written this pass —
+  organized panes get `inbox_state`/`inbox_snoozed_until`, cleared panes get
+  tokens cleared. Re-running `reconcile` is the repair path for any
+  partial projection failure.
 
-## Error contract
+## `watch` output and stop conditions
 
-Handled errors print `inbox: <message>` to stderr with exit 1; usage errors
-exit 2. Unsupported/disconnected herdr surfaces as a socket error, never as
-an empty inbox. There is no "success" response for a pane that does not
-exist in the session snapshot (`pane not found`).
+JSONL on stdout:
 
-## Session selection
+- `{"contract","type":"watch.started","at"}` once subscribed.
+- `{"contract","type":"watch.reconcile","trigger":"event"|"interval",
+  "event"?, "resolved_at","cleared","pruned","projected","warnings"}` per
+  pass — on every `pane.agent_status_changed` subscription event and every
+  `--interval` seconds (default 60).
+- `{"contract","type":"watch.error","trigger","error"}` on a failed pass
+  (watch keeps running).
+- `{"contract","type":"watch.stopped","reason","at"}` on exit;
+  `reason` is `signal` (SIGINT/SIGTERM, exit 0) or `stream_end`
+  (subscription closed unexpectedly, exit 1).
 
-`--session NAME` selects a named herdr session
-(`~/.config/herdr/sessions/<name>/herdr.sock`). `--socket PATH` overrides
-everything. `HERDR_SOCKET_PATH` / `HERDR_SESSION` are honored when flags are
-absent — matching herdr's own precedence.
+`watch` is opt-in; nothing resident runs by default. Snooze expiry is
+resolved lazily at every read anyway, so contract clients never observe a
+stale "snoozed" state — `watch`/startup reconcile only refresh pane
+metadata tokens promptly.
+
+## State and config locations
+
+- State: `<plugin state dir>/state.json` — `HERDR_PLUGIN_STATE_DIR` under
+  plugin runtime; `<state-herdr>/plugins/rebuildup.inbox/state.json` for
+  external clients (`~/.local/state/herdr/...`, `$XDG_STATE_HOME` aware).
+- Config: `<plugin config dir>/config.json` (`defaultSnooze`).
+- Updates preserve both: they live outside the installed checkout.
+
+## Versioning
+
+`contract` is semver-ish `herdr-plugins.inbox/vN`. Additive optional fields
+may appear within v1; breaking changes bump the version and clients must
+feature-detect via `capability`/`contract`.
