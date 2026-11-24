@@ -24,6 +24,16 @@ interface EventEnvelope {
   };
 }
 
+// HERDR_PLUGIN_EVENT carries the dotted hook name ("pane.closed"); the JSON
+// envelope serializes EventKind in snake_case ("pane_closed"). Accept both.
+function eventName(envelope: EventEnvelope): string {
+  const env = process.env.HERDR_PLUGIN_EVENT;
+  if (env) return env;
+  if (envelope.event === "pane_closed") return "pane.closed";
+  if (envelope.event === "pane_agent_status_changed") return "pane.agent_status_changed";
+  return envelope.event ?? "";
+}
+
 async function main(): Promise<void> {
   const raw = process.env.HERDR_PLUGIN_EVENT_JSON;
   if (!raw) return;
@@ -35,15 +45,16 @@ async function main(): Promise<void> {
   }
   const paneId = envelope.data?.pane_id;
   if (!paneId) return;
+  const name = eventName(envelope);
 
-  if (envelope.event === "pane.closed") {
+  if (name === "pane.closed") {
     await updateState((state) => {
       delete state.entries[paneId];
     });
     return;
   }
 
-  if (envelope.event !== "pane.agent_status_changed") return;
+  if (name !== "pane.agent_status_changed") return;
 
   const snapshot = await sessionSnapshot();
   const agent = snapshot.agents?.[paneId];
