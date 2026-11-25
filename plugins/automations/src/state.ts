@@ -20,7 +20,9 @@ import path from "node:path";
 import { pluginDirs, resolveSocketPath } from "../../../packages/herdr-client/src/socket";
 import {
   AutomationsError,
+  type DriverRecord,
   PLUGIN_ID,
+  parseStoredDriver,
   parseStoredRun,
   parseStoredTask,
   type RunRecord,
@@ -34,10 +36,16 @@ const LOCK_RETRY_MS = 25;
 
 export { PLUGIN_ID };
 
-/** Per-session registry: tasks by id, runs by id. */
+/** Per-session registry: tasks by id, runs by id, drivers by id (#145). */
 export interface SessionRegistry {
   tasks: Record<string, TaskRecord>;
   runs: Record<string, RunRecord>;
+  /**
+   * Firing-driver records (`watch`, `os-scheduler`) written by #145
+   * commands. Optional on disk — registries written by #144 lack the
+   * field and load as empty.
+   */
+  drivers: Record<string, DriverRecord>;
 }
 
 export interface AutomationsState {
@@ -50,7 +58,7 @@ export function emptyState(): AutomationsState {
 }
 
 export function emptyRegistry(): SessionRegistry {
-  return { tasks: {}, runs: {} };
+  return { tasks: {}, runs: {}, drivers: {} };
 }
 
 /** Per-session registry, created on demand for writes. */
@@ -113,6 +121,7 @@ export async function loadState(): Promise<AutomationsState> {
       const v = value as Partial<SessionRegistry>;
       const tasksRaw = typeof v.tasks === "object" && v.tasks !== null ? v.tasks : {};
       const runsRaw = typeof v.runs === "object" && v.runs !== null ? v.runs : {};
+      const driversRaw = typeof v.drivers === "object" && v.drivers !== null ? v.drivers : {};
       const tasks: Record<string, TaskRecord> = {};
       for (const [id, task] of Object.entries(tasksRaw)) {
         tasks[id] = parseStoredTask(task);
@@ -121,7 +130,11 @@ export async function loadState(): Promise<AutomationsState> {
       for (const [id, run] of Object.entries(runsRaw)) {
         runs[id] = parseStoredRun(run);
       }
-      sessions[key] = { tasks, runs };
+      const drivers: Record<string, DriverRecord> = {};
+      for (const [id, driver] of Object.entries(driversRaw)) {
+        drivers[id] = parseStoredDriver(driver);
+      }
+      sessions[key] = { tasks, runs, drivers };
     }
     return { version: STATE_SCHEMA_VERSION, sessions };
   } catch (err) {

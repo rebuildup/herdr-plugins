@@ -167,6 +167,35 @@ export interface TaskView extends TaskRecord {
   missed_truncated: boolean;
 }
 
+/**
+ * Driver coverage states reported on task views (contract §Task record).
+ * `none` — no driver has ever reported; `install_failed` — an
+ * `schedule install` attempt recorded an error; `stale` — a driver
+ * record exists but its evidence is gone (dead watch pid, missing OS
+ * entry).
+ */
+export const DRIVER_STATES = ["os-scheduler", "watch", "none", "install_failed", "stale"] as const;
+export type DriverState = (typeof DRIVER_STATES)[number];
+
+/**
+ * Persisted driver record (#145): written by `watch` (pid + heartbeat)
+ * and `schedule install|status` (OS entry metadata). At most one record
+ * per `driver_id` (`"watch"`, `"os-scheduler"`).
+ */
+export interface DriverRecord {
+  contract: typeof CONTRACT;
+  driver_id: string;
+  kind: "watch" | "os-scheduler";
+  /** watch: "active"; os-scheduler: "installed" | "error" | "stale". */
+  status: string;
+  detail: string;
+  pid: number | null;
+  platform: string | null;
+  entry: string | null;
+  installed_at: string | null;
+  updated_at: string;
+}
+
 export class AutomationsError extends Error {
   readonly code: string;
   readonly taskId: string | undefined;
@@ -831,21 +860,202 @@ export function nextOccurrenceAfter(task: TaskRecord, afterMs: number): number |
 }
 
 /**
- * Read-side task view: stored record plus derived `next_run_at`,
- * honest `driver` coverage (drivers land in #145 — registry reports
- * `none`), and missed-occurrence totals.
+ * `fire <task-id> --scheduled-for <ts>` validation (#145): is `ms` a
+ * genuine occurrence instant of the task's schedule? Driver-supplied
+ * values are validated, never trusted (contract §Idempotency).
+ * - interval: `schedule_anchor_at + k·every_ms`, k ≥ 1.
+ * - once: exactly `run_at`.
+ * - fixed_time: the instant round-trips through the zone wall clock —
+ *   HH:MM + weekday match AND `zonedLocalToUtc(parts) === ms` (ambiguous
+ *   DST times resolve to the first occurrence only, same rule as
+ *   `nextOccurrenceAfter`).
  */
-export function viewTask(task: TaskRecord, runs: Iterable<RunRecord>, nowMs: number): TaskView {
+export function isOccurrenceInstant(task: TaskRecord, ms: number): boolean {
+  const schedule = task.schedule;
+  switch (schedule.type) {
+    case "interval": {
+      const anchor = Date.parse(task.schedule_anchor_at);
+      const every = schedule.every_ms;
+      return ms > anchor && (ms - anchor) % every === 0;
+    }
+    case "once": {
+      return ms === Date.parse(schedule.run_at);
+    }
+    case "fixed_time": {
+      const zone = scheduleZone(schedule);
+      const { hour, minute } = parseTimeOfDay(schedule.time_of_day);
+      const parts = zonedParts(ms, zone);
+      if (parts.hour !== hour || parts.minute !== minute) return false;
+      if (schedule.weekdays !== undefined && !schedule.weekdays.includes(parts.weekday)) {
+        return false;
+      }
+      return zonedLocalToUtc(parts.year, parts.month, parts.day, hour, minute, zone) === ms;
+    }
+  }
+}
+
+export interface TickPlan {
+  /**
+   * Unresolved occurrence instants (epoch ms, ascending) still inside
+   * the driver-jitter grace — `tick` fires each through the run path.
+   */
+  fireNow: number[];
+  /**
+   * Unresolved occurrence instants at/past the grace boundary —
+   * "late" per the misfire policy (`skip` → materialize `missed`;
+   * `run_once` → fire the most recent once).
+   */
+  late: number[];
+}
+
+/**
+ * Due-occurrence scan for `tick`/`watch` (#145). An occurrence is
+ * "resolved" by ANY stored run record for `task_id + scheduled_for`
+ * (including `missed`/`skipped`/`cancelled` — the key is spent).
+ * The partition boundary is exactly the `deriveMissed` cutoff
+ * (`nowMs - MISSED_GRACE_MS`): an instant is either fireable on-time
+ * or missed-eligible, never both — reads and fires agree.
+ */
+export function tickPlan(task: TaskRecord, runs: Iterable<RunRecord>, nowMs: number): TickPlan {
+  const empty: TickPlan = { fireNow: [], late: [] };
+  if (!task.enabled) return empty;
+  const { startMs, endMs } = owedWindowMs(task, nowMs);
+  if (endMs < startMs) return empty;
+  const { instants } = collectPastInstants(task, startMs, endMs, MISSED_SCAN_LIMIT);
+  const resolved = resolvedOccurrenceKeys(runs, task.task_id);
+  const lateCutoff = nowMs - MISSED_GRACE_MS;
+  const plan: TickPlan = { fireNow: [], late: [] };
+  for (const ms of instants) {
+    if (resolved.has(new Date(ms).toISOString())) continue;
+    if (ms <= lateCutoff) plan.late.push(ms);
+    else plan.fireNow.push(ms);
+  }
+  return plan;
+}
+
+function defaultPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Derive the honest `driver.state` for task views from persisted
+ * driver records. Live `watch` (pid alive) wins; then an installed OS
+ * scheduler entry; then `install_failed`; then `stale`; else `none`.
+ * `pidAlive` is injectable for tests.
+ */
+export function resolveDriverState(
+  drivers: Iterable<DriverRecord>,
+  pidAlive: (pid: number) => boolean = defaultPidAlive,
+): { state: DriverState; detail: string } {
+  let watchLive: DriverRecord | null = null;
+  let watchDead: DriverRecord | null = null;
+  let osInstalled: DriverRecord | null = null;
+  let osError: DriverRecord | null = null;
+  let osStale: DriverRecord | null = null;
+  for (const driver of drivers) {
+    if (driver.kind === "watch") {
+      if (driver.status === "active" && driver.pid !== null && pidAlive(driver.pid)) {
+        watchLive = driver;
+      } else {
+        watchDead = driver;
+      }
+    } else if (driver.kind === "os-scheduler") {
+      if (driver.status === "installed") osInstalled = driver;
+      else if (driver.status === "error") osError = driver;
+      else osStale = driver;
+    }
+  }
+  if (watchLive !== null) {
+    return {
+      state: "watch",
+      detail: `opt-in watch process live (pid ${watchLive.pid})`,
+    };
+  }
+  if (osInstalled !== null) {
+    return {
+      state: "os-scheduler",
+      detail: osInstalled.detail || `OS scheduler entry '${osInstalled.entry ?? "?"}' installed`,
+    };
+  }
+  if (osError !== null) {
+    return { state: "install_failed", detail: osError.detail };
+  }
+  if (watchDead !== null) {
+    return {
+      state: "stale",
+      detail: `watch record exists but pid ${watchDead.pid ?? "?"} is not running`,
+    };
+  }
+  if (osStale !== null) {
+    return { state: "stale", detail: osStale.detail };
+  }
+  return {
+    state: "none",
+    detail:
+      "no firing driver reporting — occurrences resolve as missed until `schedule install` or `watch` runs",
+  };
+}
+
+/** Stored-driver parsing (state load — strict; corrupt state is an error). */
+export function parseStoredDriver(raw: unknown): DriverRecord {
+  if (!isRecord(raw)) {
+    throw new AutomationsError("state_corrupt", "stored driver is not an object");
+  }
+  const kind = raw.kind;
+  if (kind !== "watch" && kind !== "os-scheduler") {
+    throw new AutomationsError("state_corrupt", "stored driver.kind invalid");
+  }
+  const pid = raw.pid;
+  if (pid !== null && pid !== undefined && (typeof pid !== "number" || !Number.isInteger(pid))) {
+    throw new AutomationsError("state_corrupt", "stored driver.pid invalid");
+  }
+  const nullable = (v: unknown, field: string): string | null => {
+    if (v === null || v === undefined) return null;
+    if (typeof v !== "string") {
+      throw new AutomationsError("state_corrupt", `stored driver.${field} invalid`);
+    }
+    return v;
+  };
+  return {
+    contract: CONTRACT,
+    driver_id: asString(raw.driver_id, "driver.driver_id"),
+    kind,
+    status: asString(raw.status, "driver.status"),
+    detail: asString(raw.detail, "driver.detail"),
+    pid: (pid ?? null) as number | null,
+    platform: nullable(raw.platform, "platform"),
+    entry: nullable(raw.entry, "entry"),
+    installed_at: nullable(raw.installed_at, "installed_at"),
+    updated_at: asString(raw.updated_at, "driver.updated_at"),
+  };
+}
+
+/**
+ * Read-side task view: stored record plus derived `next_run_at`,
+ * honest `driver` coverage, and missed-occurrence totals. `driver`
+ * is supplied by the caller (registry resolves persisted driver
+ * records); the default reports `none`.
+ */
+export function viewTask(
+  task: TaskRecord,
+  runs: Iterable<RunRecord>,
+  nowMs: number,
+  driver?: { state: string; detail: string },
+): TaskView {
   const runList = [...runs];
   const { unresolved_total, truncated } = deriveMissed(task, runList, nowMs);
   const next = task.enabled ? nextOccurrenceAfter(task, nowMs) : null;
   return {
     ...task,
     next_run_at: next === null ? null : new Date(next).toISOString(),
-    driver: {
+    driver: driver ?? {
       state: "none",
-      detail:
-        "no firing driver reporting — `schedule install`/`watch` drivers land in #145; occurrences resolve as missed until then",
+      detail: "no firing driver reporting",
     },
     missed_total: unresolved_total,
     missed_truncated: truncated,
