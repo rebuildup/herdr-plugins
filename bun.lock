@@ -50,6 +50,10 @@
       "name": "@herdr-plugins/inbox",
       "version": "0.1.0",
     },
+    "plugins/mcp": {
+      "name": "@herdr-plugins/mcp",
+      "version": "0.1.0",
+    },
     "plugins/projects": {
       "name": "@herdr-plugins/projects",
       "version": "0.1.0",
@@ -101,6 +105,8 @@
     "@herdr-plugins/handoff": ["@herdr-plugins/handoff@workspace:plugins/handoff"],
 
     "@herdr-plugins/inbox": ["@herdr-plugins/inbox@workspace:plugins/inbox"],
+
+    "@herdr-plugins/mcp": ["@herdr-plugins/mcp@workspace:plugins/mcp"],
 
     "@herdr-plugins/projects": ["@herdr-plugins/projects@workspace:plugins/projects"],
 

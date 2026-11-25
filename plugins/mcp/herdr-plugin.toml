@@ -1,0 +1,14 @@
+id = "rebuildup.mcp"
+name = "MCP"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Local stdio MCP server exposing herdr sessions and sibling plugin contracts to outside agents (contract herdr-plugins.mcp/v1, draft)."
+platforms = ["linux", "macos", "windows"]
+
+# No build step: the plugin is dependency-free TypeScript executed by Bun
+# (runtime prerequisite, see plugins/mcp/README.md).
+#
+# No [[actions]] / [[events]] / [[startup]]: the plugin is a per-client
+# stdio MCP server spawned by the MCP client config (ADR-0002 — no
+# resident process). T1 (#135) ships discovery (`capability`) and the
+# contract skeleton; the `serve` stdio server lands in T2 (#138).
