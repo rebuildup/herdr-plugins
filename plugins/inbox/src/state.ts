@@ -8,11 +8,13 @@
  * or interleave state.
  */
 
-import { realpathSync } from "node:fs";
 import { mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
-import { pluginDirs, resolveSocketPath } from "../../../packages/herdr-client/src/socket";
+import { pluginDirs } from "../../../packages/herdr-client/src/socket";
+
+// Session discriminator shared with other plugins (herdr-client); re-exported
+// so existing `./state` imports keep working.
+export { sessionKeyFor } from "../../../packages/herdr-client/src/socket";
 
 export const PLUGIN_ID = "rebuildup.inbox";
 export const STATE_SCHEMA_VERSION = 2;
@@ -71,26 +73,6 @@ export function sessionEntries(state: InboxState, sessionKey: string): Record<st
   const created: Record<string, InboxEntry> = {};
   state.sessions[sessionKey] = created;
   return created;
-}
-
-/**
- * Session discriminator for state namespacing: hostname plus the canonical
- * (symlink-resolved) socket path the command will talk to. Socket path is
- * the only session identity the socket API exposes; canonicalization keeps
- * `/var` vs `/private/var` spellings of the same socket identical.
- */
-export function sessionKeyFor(options: {
-  session?: string | undefined;
-  socketPath?: string | undefined;
-}): string {
-  const socketPath = options.socketPath ?? resolveSocketPath({ session: options.session });
-  let canonical = socketPath;
-  try {
-    canonical = realpathSync(socketPath);
-  } catch {
-    canonical = path.resolve(socketPath);
-  }
-  return `${os.hostname()} ${canonical}`;
 }
 
 export function stateFilePath(): string {

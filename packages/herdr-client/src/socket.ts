@@ -8,7 +8,9 @@
  */
 
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 
 export interface HerdrError {
@@ -279,6 +281,28 @@ export function resolveSocketPath(options: { session?: string | undefined } = {}
   const session = options.session ?? process.env.HERDR_SESSION;
   if (session) return sessionSocketPath(session);
   return defaultSocketPath();
+}
+
+/**
+ * Session discriminator for cross-plugin state namespacing: hostname plus
+ * the canonical (symlink-resolved) socket path the command will talk to.
+ * Socket path is the only session identity the socket API exposes;
+ * canonicalization keeps `/var` vs `/private/var` spellings of the same
+ * socket identical. Shared by plugins that namespace per-session state
+ * (inbox organize marks, projects run records — #66).
+ */
+export function sessionKeyFor(options: {
+  session?: string | undefined;
+  socketPath?: string | undefined;
+}): string {
+  const socketPath = options.socketPath ?? resolveSocketPath({ session: options.session });
+  let canonical = socketPath;
+  try {
+    canonical = realpathSync(socketPath);
+  } catch {
+    canonical = path.resolve(socketPath);
+  }
+  return `${os.hostname()} ${canonical}`;
 }
 
 /** herdr config dir: $XDG_CONFIG_HOME/herdr or ~/.config/herdr (win32: %APPDATA%\herdr etc.). */

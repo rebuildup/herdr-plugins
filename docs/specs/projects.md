@@ -125,23 +125,43 @@ CLI invocations — no manifest actions.
   the echoed input line cannot match (`$?` literal), the run-id nonce
   prevents cross-run collisions, and pane text/process state is never
   used to infer success.
-- Result enum: `running | success | failed | stopped | unknown`.
-  Wait timeout leaves `running` (pane untouched, never auto-killed);
-  pane vanished before marker → `unknown`. `running` asserts only
-  "marker not yet observed" — liveness is re-checked lazily by
-  `scripts results`/`logs` via `pane.get` (one call per running run).
-- Stop: `pane.send_keys ["ctrl+c"]` → `stopGraceMs` (config default
-  2000) → bounded `pane.read` log capture → `pane.close`, all against
-  the `pane_id` recorded in `runs.json`. Target = exact/unique-prefix
-  run_id or project id (`ambiguous_run`/`run_not_found`/
-  `no_running_runs` structured errors).
+- Result enum: `running | stopping | stop_unconfirmed | success |
+  failed | stopped | unknown`. Wait timeout leaves `running` (pane
+  untouched, never auto-killed); pane vanished before marker →
+  `unknown`. `running` asserts only "marker not yet observed" —
+  liveness is re-checked lazily by `scripts results`/`logs`.
+- Ownership (#66): each record persists the ownership tuple —
+  `host` + `session_key` (`sessionKeyFor`: hostname + canonical socket
+  path, shared via herdr-client) + `pane_id` + `workspace_id`/`tab_id`
+  + `started_at`. Before ANY pane-targeted action (stop input/close,
+  results liveness, log capture, stop confirmation) the runner
+  re-validates via `pane.get`: `pane_not_found` → stale/`unknown`;
+  host/session mismatch → `foreign` (zero socket calls — pane ids
+  collide across sessions); workspace/tab/pane_id disagreement →
+  `pane_mismatch`. All yield structured `stale_pane`/`unknown` outcomes
+  with no input or close ever sent to an unproven pane. Runs schema
+  v2; v1 records load with null ownership fields (pane-context check
+  only).
+- Stop: ownership check → `pane.send_keys ["ctrl+c"]` → record
+  `stopping` + `stop_requested_at` → `stopGraceMs` (config default
+  2000) → bounded `pane.read` log capture → `pane.close` → confirm
+  within `stopConfirmMs` (config default 5000) via pane absence
+  (`pane.get` not_found) or empty `pane.process_info` foreground list.
+  Only confirmed exits record `stopped`; ctrl+c alone never counts.
+  No evidence in the window → `stop_unconfirmed` (results/logs keep
+  re-checking and promote to `stopped` once evidence appears).
+  Target = exact/unique-prefix run_id or project id
+  (`ambiguous_run`/`run_not_found`/`no_running_runs` structured
+  errors); stop actions ∈ `stopped | already_finished | pane_gone |
+  stale_pane | stop_unconfirmed`.
 - Run records: `<stateDir>/runs.json` under a dedicated
   `runs.json.lock` + tmp+rename (same discipline as `state.ts`);
-  corrupt file reads as empty. Persisted BEFORE injection.
+  schema v2, v1 readable, corrupt file reads as empty. Persisted
+  BEFORE injection.
 - Logs: bounded tail (`runLogMaxBytes`, config default 65536) stored
   at `<stateDir>/runs/<run-id>.log`; on-demand `pane.read` (500 lines)
-  when no stored log and the pane is alive. No rotation — one file per
-  run, overwritten only by re-capture of the same run.
+  for active runs only after ownership re-validation. No rotation —
+  one file per run, overwritten only by re-capture of the same run.
 - Metadata: display-only `script_<name>` token (≤32 chars, herdr token
   alphabet) projected via `pane.report_metadata` (source
   `rebuildup.projects`) on state transitions; failures ignored.

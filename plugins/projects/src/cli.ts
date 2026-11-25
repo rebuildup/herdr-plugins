@@ -16,6 +16,7 @@ import {
   type CallOptions,
   pluginDirs,
   type SessionSnapshot,
+  sessionKeyFor,
   sessionSnapshot,
 } from "../../../packages/herdr-client/src/index";
 import {
@@ -62,6 +63,8 @@ interface PluginConfig {
   runLogMaxBytes?: number | undefined;
   /** ctrl+c→close grace on `scripts stop`; default 2_000. */
   stopGraceMs?: number | undefined;
+  /** Bounded stop-exit confirmation window; default 5_000. */
+  stopConfirmMs?: number | undefined;
 }
 
 interface CliOptions extends CallOptions {
@@ -196,6 +199,10 @@ async function loadConfig(): Promise<PluginConfig> {
       stopGraceMs:
         typeof parsed.stopGraceMs === "number" && parsed.stopGraceMs >= 0
           ? parsed.stopGraceMs
+          : undefined,
+      stopConfirmMs:
+        typeof parsed.stopConfirmMs === "number" && parsed.stopConfirmMs > 0
+          ? parsed.stopConfirmMs
           : undefined,
     };
   } catch {
@@ -795,6 +802,11 @@ function runnerDeps(options: CliOptions, config: PluginConfig): RunnerDeps {
     waitTimeoutMs: config.runTimeoutMs,
     logMaxBytes: config.runLogMaxBytes,
     stopGraceMs: config.stopGraceMs,
+    stopConfirmMs: config.stopConfirmMs,
+    // Session discriminator recorded on new runs and enforced before
+    // every pane action (#66): records from another session/socket are
+    // foreign and never receive input/close through this socket.
+    sessionKey: sessionKeyFor({ session: options.session, socketPath: options.socketPath }),
   };
 }
 
@@ -915,8 +927,13 @@ async function cmdScriptsRun(options: CliOptions): Promise<void> {
 }
 
 /**
- * `scripts stop <run-id|project>` — ctrl+c the recorded pane, brief
- * grace, then close it. Only pane ids persisted in run records are
+ * `scripts stop <run-id|project>` — request stop on active runs, then
+ * confirm exit before recording `stopped` (#66). Ownership is
+ * re-validated via `pane.get` first: foreign/mismatched panes yield a
+ * `stale_pane` outcome with zero side effects. ctrl+c alone never counts
+ * as stopped — confirmation comes from pane absence or an empty
+ * foreground process list within `stopConfirmMs`; otherwise the run is
+ * `stop_unconfirmed`. Only pane ids persisted in run records are
  * addressed; nothing else in the session can be hit.
  */
 async function cmdScriptsStop(options: CliOptions): Promise<void> {
@@ -932,7 +949,8 @@ async function cmdScriptsStop(options: CliOptions): Promise<void> {
   } catch (err) {
     runnerError(err);
   }
-  if (!outcomes.some((o) => o.action === "stopped")) {
+  const HANDLED = new Set(["stopped", "stop_unconfirmed", "stale_pane", "pane_gone"]);
+  if (!outcomes.some((o) => HANDLED.has(o.action))) {
     fail(`no running runs matched: ${target}`, 1, "no_running_runs", { target });
   }
   emit({

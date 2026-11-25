@@ -358,8 +358,9 @@ injects input into panes it did not create.
 - A run record is persisted BEFORE the command is injected, so a crash
   mid-run still leaves an honest trail.
 - `pane.report_metadata` projects a display-only `script_<name>` token
-  (`running`/`success`/`failed`/`stopped`/`unknown`) on the execution
-  pane; projection failures never fail the run.
+  (`running`/`stopping`/`success`/`failed`/`stopped`/
+  `stop_unconfirmed`/`unknown`) on the execution pane; projection
+  failures never fail the run.
 
 Response: `{contract, command:"scripts run", run: ScriptRun,
 generated_at}`.
@@ -385,40 +386,87 @@ rename, dedicated `runs.json.lock`):
   "finished_at": "…",
   "exit_code": 0,
   "result": "success",
+  "host": "my-mac.local",
+  "session_key": "my-mac.local /Users/me/.config/herdr/sessions/main/herdr.sock",
+  "stop_requested_at": null,
   "log_path": "runs/run-mj3k2x-9f3ab1.log",
   "error": null
 }
 ```
 
-`result` ∈ `running | success | failed | stopped | unknown`.
-`running` means the marker was not observed within the wait — it does
-NOT assert the process is alive. `log_path`/`script_path` are relative
-to the plugin state dir (`null` when absent).
+`result` ∈ `running | stopping | stop_unconfirmed | success | failed |
+stopped | unknown`. `running` means the marker was not observed within
+the wait — it does NOT assert the process is alive. `stopping` means a
+stop was requested (ctrl+c accepted) but exit is not yet confirmed;
+`stop_unconfirmed` means the bounded confirmation window elapsed
+without evidence. `log_path`/`script_path` are relative to the plugin
+state dir (`null` when absent).
+
+**Ownership tuple (schema v2, #66).** `host` + `session_key` (the
+`sessionKeyFor` discriminator: hostname + canonical socket path) +
+`pane_id` (herdr never reuses pane ids) + `workspace_id`/`tab_id` +
+`started_at` together identify the execution surface a record may
+target. v1 records lack `host`/`session_key`/`stop_requested_at`; they
+load with those fields `null` and are verified by pane context only.
+Before ANY input/close/read (`scripts stop`, `results` liveness,
+`logs` capture, stop confirmation) the runner re-validates ownership
+via `pane.get`: a `pane_not_found`, a host/session mismatch
+(`foreign` — short-circuits before any socket call), or a
+workspace/tab/pane_id disagreement (`pane_mismatch`) yields a
+structured `stale_pane` outcome / `unknown` record and **zero side
+effects** on the pane — input and close are never sent to a pane the
+record cannot prove it owns.
 
 ## `scripts stop <run-id|project>`
 
 Stops runs owned by this plugin. The target resolves to run records: an
 exact `run_id`, a unique `run_id` prefix (`ambiguous_run` on collision),
-or a project id (all its `running` runs; `run_not_found` when nothing
-matches). For each `running` run the plugin sends `pane.send_keys
-["ctrl+c"]` to the RECORDED `pane_id` only, waits `stopGraceMs` (config,
-default 2000), captures a bounded log tail, then `pane.close`. The run
-is recorded `stopped`. Already-finished runs are reported
-`already_finished`; a vanished pane is recorded `unknown`. There is no
-way to address any pane the plugin did not create and record.
+or a project id (all its active runs; `run_not_found` when nothing
+matches). Active results are `running | stopping | stop_unconfirmed`.
+
+For each active run the plugin FIRST re-validates pane ownership
+(`pane.get` + recorded host/session/workspace/tab context — see the
+ownership tuple above). A foreign or mismatched pane produces a
+`stale_pane` outcome and no pane side effects; a vanished pane is
+`pane_gone` (`running` → `unknown`, stopping states → `stopped`, since
+pane absence after a stop request IS exit evidence).
+
+For an owned `running` run: `pane.send_keys ["ctrl+c"]` to the RECORDED
+`pane_id` only → record `stopping` + `stop_requested_at` → `stopGraceMs`
+(config, default 2000) → bounded `pane.read` log capture →
+`pane.close` → **confirmation** within `stopConfirmMs` (config, default
+5000): the pane is gone (`pane.get` → not_found) OR
+`pane.process_info` reports an empty foreground process list (shell
+regained the tty). Only then is the run recorded `stopped`.
+ctrl+c alone is NEVER treated as stopped. Without evidence inside the
+window the run is recorded `stop_unconfirmed` (request accepted,
+exit unproven); `scripts results`/`logs` keep re-checking and promote it
+to `stopped` once evidence appears. `stopping`/`stop_unconfirmed`
+records re-targeted by `scripts stop` skip the redundant ctrl+c and go
+straight to close+confirm. Already-finished runs are reported
+`already_finished`. There is no way to address any pane the plugin did
+not create and record.
 
 Response: `{contract, command:"scripts stop", outcomes:[{run, action}],
 generated_at}` where `action` ∈ `stopped | already_finished |
-pane_gone`. Fails `no_running_runs` when nothing was actually stopped.
+pane_gone | stale_pane | stop_unconfirmed`. Fails `no_running_runs` when
+no run was acted on (all `already_finished`).
 
 ## `scripts results [project]`
 
 Lists run records newest-first, optionally filtered by project id
-(`project_not_found` for unknown ids). `running` records are reconciled
-lazily: `pane.get` is re-checked per running run and a vanished pane
-flips the record to `unknown` (persisted). Socket failures leave the
-record `running` — liveness is unknown, not fabricated. One socket call
-per running run; bounded by the small number of concurrent runs.
+(`project_not_found` for unknown ids). Active records
+(`running`/`stopping`/`stop_unconfirmed`) are reconciled lazily AFTER
+ownership re-validation: `pane.get` plus the recorded host/session/
+workspace/tab context. A vanished pane flips `running` → `unknown`
+(persisted) and confirms `stopping`/`stop_unconfirmed` → `stopped`;
+`stopping` states with an empty foreground process list also promote to
+`stopped`. A foreign host/session record is never probed through the
+wrong socket — its `error` is annotated and the result preserved for
+the owning session. A pane context mismatch marks the record `unknown`
+(`stale_pane`). Socket failures leave the record unchanged — liveness
+is unknown, not fabricated. Bounded by the small number of concurrent
+runs.
 
 Response: `{contract, command:"scripts results", project_id?, runs:
 ScriptRun[], generated_at}`.
@@ -429,9 +477,11 @@ Returns the bounded log for one run (`run_id` exact or unique prefix,
 `run_not_found`/`ambiguous_run` otherwise). On completion the runner
 stores the pane read tail — capped at `runLogMaxBytes` (config, default
 65536 bytes, tail kept with a truncation marker) at
-`<stateDir>/runs/<run-id>.log`. When no log exists yet and the pane is
-still alive, a bounded `pane.read` (last 500 lines) is captured on
-demand. A `running` run whose pane is gone is marked `unknown`.
+`<stateDir>/runs/<run-id>.log`. When no log exists yet and the run is
+active, a bounded `pane.read` (last 500 lines) is captured on demand —
+only after ownership re-validation passes; foreign/mismatched panes are
+never read. A `running` run whose pane is gone is marked `unknown`; a
+stopping-state run whose pane is gone is confirmed `stopped`.
 
 Response: `{contract, command:"scripts logs", run_id, run, log_path,
 log, generated_at}` (`log` may be `null`).
@@ -454,6 +504,7 @@ ship here. #32 automations own scheduled/event-driven execution.
 `invalid_project_id`, `settings_key_not_allowed`, `t3json_invalid`,
 `invalid_script_list`, `unknown_script`, `no_repos`, plus the script
 runner kinds `repo_ambiguous`, `ambiguous_script`, `ambiguous_run`,
-`run_not_found`, `no_running_runs`, `script_run_error`. Errors may
+`run_not_found`, `no_running_runs`, `script_run_error`, `stale_pane`
+(record `error` / stop `action`, not a CLI error kind). Errors may
 carry extra fields (`project_id`, `key`, `root`, `repos`, `name`,
 `matches`, `run_id`, `target`, `path`, `reason`, `layer`).
