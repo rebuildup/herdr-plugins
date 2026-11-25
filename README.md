@@ -24,6 +24,7 @@ clients through one versioned contract.
 | [controls](plugins/controls/) | `rebuildup.controls` | Agent operation core over the herdr `agent.*` API: send / command / wait / interrupt / read / rename / start with identity echo, stale-generation guards, and per-provider launch tables (`herdr-plugins.controls/v1`). |
 | [handoff](plugins/handoff/) | `rebuildup.handoff` | Handoff/delegation records + execution: source pane/agent identity + reference payload + `native_resume`/`portable_context` strategies, cross-machine `--remote`, delegation lineage (`delegate`/`merge-back`, worktree targets) with honest status lifecycle (`herdr-plugins.handoff/v1` stable, #6 T1–T4). |
 | [textgen](plugins/textgen/) | `rebuildup.textgen` | Text generation (`herdr-plugins.textgen/v1`): six tasks over dedicated agent panes or opt-in API generators, with strict input/output boundaries. Generation only — execution stays with the caller. |
+| [mcp](plugins/mcp/) | `rebuildup.mcp` | Outside-agent MCP surface (`herdr-plugins.mcp/v1`, draft): local stdio MCP server exposing herdr sessions + plugin contracts with read-only/supervised/full access levels; remote HTTP/OAuth is upstream gap herdrdev/herdr#6199 (#30 T1). |
 
 ## Development
 
