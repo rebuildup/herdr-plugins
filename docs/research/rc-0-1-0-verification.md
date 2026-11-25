@@ -2,38 +2,70 @@
 
 Verification record for the v0.1.0 release candidate. Fixed target:
 
-- Release branch HEAD: `c84a7c1e3b448480f7c7c8f7c23ba1811c0f072e`
-  (`release-0-1-0`, includes PRs #11–#14)
-- herdr: `0.9.5` (`~/.local/share/mise/installs/herdr/0.9.5/herdr`)
-- OS: macOS (arm64). Linux/Windows plugin paths are covered by unit-level
-  path resolution and herdr's own platform handling; no dedicated runs yet.
+- Release branch HEAD: `8cba62b794b6d73f3b301aa536c76e2513d69a8b`
+  (`release-0-1-0`, includes PRs #11–#17)
+- herdr: `0.9.5` on all platforms
 - Bun: `1.4.4`
+- Platforms exercised: macOS (arm64), Linux (WSL2, Ubuntu), Windows 11
 
-## Environment
+## Environments
 
-Isolated named herdr session `plugin-rc-1` under
-`/var/tmp/herdr-plugin-rc` with dedicated `XDG_CONFIG_HOME` /
-`XDG_STATE_HOME` / `HERDR_CONFIG_PATH` (`[experimental] allow_nested`).
-The user's live session was never touched. Session stopped and deleted
-after verification.
+| Env | Host | Session | Isolation |
+| --- | --- | --- | --- |
+| macOS | local (arm64) | `plugin-rc-2` | dedicated `XDG_CONFIG_HOME`/`XDG_STATE_HOME`/`HERDR_CONFIG_PATH` under `/var/tmp/herdr-plugin-rc` |
+| Linux | `device-wsl` (WSL2, ssh) | `plugin-rc-wsl` | same layout under `/tmp/herdr-plugin-rc-wsl`, direct mise binary paths (shims blocked by untrusted mise config) |
+| Windows | `device-windows` (Windows 11, ssh/cmd) | `plugin-rc-win` | same layout under `%TEMP%\herdr-plugin-rc`; `XDG_*` honored by herdr 0.9.5 |
 
-## Results
+The user's live sessions were never touched. Remote sessions were stopped
+and deleted after verification; macOS session `plugin-rc-2` remains for
+further checks and is isolated from the default session.
+
+## Results — macOS (herdr 0.9.5, Bun 1.4.4)
 
 | Area | Method | Result |
 | --- | --- | --- |
-| Quality gates | `bun run validate:fast` (tsc strict, biome, 17 tests) | PASS |
-| Manifest validity | `herdr plugin link` / `install` manifest validation | PASS (after adding required `min_herdr_version`) |
+| Quality gates | `bun run validate:fast` (tsc strict, biome, 20 tests) | PASS |
 | `herdr plugin link` | linked `plugins/inbox`, `plugin list`, config dir reported | PASS |
-| GitHub install | `herdr plugin install rebuildup/herdr-plugins/plugins/inbox --ref release-0-1-0 --yes` → resolved `656efbd`, then updated to `c84a7c1` | PASS |
-| Manifest actions | `plugin.action.invoke` settle/restore → exit 0, structured JSON on stdout, state mutated | PASS |
-| Event hook `pane.closed` | close pane → hook ran (plugin log `succeeded`), state entry deleted | PASS (found+fixed event-name serialization bug) |
-| Event hook `pane.agent_status_changed` | simulated envelope through `hook.ts` (snapshot + resolve + metadata path) | PASS (code path); live agent transition not re-run this RC |
-| Startup hook | server restart → `reconcile` ran once (`plugin log` `event=startup`, exit 0) | PASS |
-| Disable / enable | `plugin disable`/`enable`, registry `enabled` flag toggles | PASS |
-| Update | `plugin update --yes` → new generation checkout at `c84a7c1`, old generation retained | PASS |
-| State preservation | settle state survived link→unlink→GitHub install→uninstall→reinstall→update | PASS (state dir is keyed by plugin id, outside checkout) |
-| CLI contract | `list`/`settle`/`restore`/`capability` JSON shape, `session`/`state_file` echo, structured stderr errors | PASS |
-| External client dirs | `pluginDirs()` resolves `plugins/config/<id>` and `plugins/<id>` under XDG dirs; encoding mirrors herdr | PASS |
+| GitHub install | `herdr plugin install rebuildup/herdr-plugins/plugins/inbox --ref release-0-1-0 --yes` → resolved `8cba62b` | PASS |
+| Manifest actions | `plugin.action.invoke` settle/restore → exit 0, structured JSON, state mutated | PASS |
+| Event hook `pane.closed` | real pane close → hook `succeeded`, state entry deleted | PASS (found+fixed event-name serialization bug) |
+| Event hook `pane.agent_status_changed` | **real agent transitions**: claude start → blocked, prompt-answer → idle; 3 hook deliveries `succeeded`, inbox wake observed | PASS |
+| Startup hook | server restart → `reconcile` ran once (`event=startup`, exit 0) | PASS |
+| Disable / enable | registry `enabled` flag toggles | PASS |
+| Update | `plugin update --yes` → new generation checkout, old generation retained | PASS |
+| Rollback | temp branch at `cfb65e8` → `install --ref` → old build read v2 state correctly → reinstalled `release-0-1-0` | PASS |
+| State preservation | settle state survived link→uninstall→GitHub install→update→rollback cycle | PASS (state dir keyed by plugin id, outside checkout) |
+| Real TUI operation | user-config `[[keys.command]]` `plugin_action` binds (`prefix+alt+i/o/r`) → settle/restore invoked from live TUI, `inbox_state` token projected/cleared | PASS |
+| Snooze deadline wake | `snooze --until <iso>` → detached `_wake` process observed → at deadline, without `watch`, metadata token cleared and pane returned to inbox | PASS |
+| Generation detection fix | mark recorded pre-agent-detection (`seq:-1`) → agent appears (`blocked`, `seq:2`) → pane correctly returned to inbox (PR #17) | PASS |
+| CLI contract | `list`/`settle`/`restore`/`capability` JSON, session/socket echo, structured stderr errors | PASS |
+| External client path | `herdr plugin list --json` → `plugin_root` → `bun run src/cli.ts` from arbitrary cwd; explicit `HERDR_SOCKET_PATH` targets the right session; bad pane id → structured error exit 1 | PASS |
+
+## Results — Linux / WSL2 (`device-wsl`, herdr 0.9.5, Bun 1.4.4)
+
+| Area | Result |
+| --- | --- |
+| GitHub install `--ref release-0-1-0` | PASS (resolved `8cba62b`) |
+| `capability` / `list` / `settle` CLI | PASS; state_file under isolated `XDG_STATE_HOME` |
+| Pane metadata projection | PASS (`inbox_state: settled` token via socket API) |
+| `pane.closed` hook on real close | PASS (`succeeded`, state entry removed) |
+| State schema | v2 namespaced `sessions["UUU <socket path>"]` written correctly | PASS |
+
+## Results — Windows 11 (`device-windows`, herdr 0.9.5, Bun)
+
+| Area | Result |
+| --- | --- |
+| GitHub install `--ref release-0-1-0` | PASS (resolved `8cba62b`) |
+| `capability` / `list` / `settle` CLI | PASS; state_file under `XDG_STATE_HOME` (`%TEMP%\herdr-plugin-rc\state`) |
+| Pane metadata projection | PASS (`inbox_state: settled` token) |
+| `pane.closed` hook on real close | PASS (`succeeded`, state entry removed) |
+| State schema | v2 namespaced, Windows socket path as session key | PASS |
+
+Windows notes: mise shims are unusable over non-interactive ssh when the
+mise config is untrusted; verification used direct install paths
+(`github-herdrdev-herdr\0.9.5\herdr.exe`, `~\.bun\bin\bun.exe`). Plugin
+commands (`bun run …`) resolve `bun` from the server PATH, which the
+operator controls — same requirement as any plugin.
 
 ## Defects found and fixed during RC
 
@@ -48,16 +80,28 @@ after verification.
    in `fce71af`.
 5. Snooze deadline parse ran inside the state lock; a parse failure would
    strand the lock file. Moved before lock acquisition in `fce71af`.
+6. Organize marks recorded while a pane had no detected agent session
+   (`seq:-1`, no fingerprint) never woke when an agent later appeared.
+   Fixed in `67f081f` (PR #17), verified live on macOS.
+
+## Remote execution path
+
+Verified contract: run the plugin CLI **on the herdr host** (locally or via
+the existing ssh/device route used for `device-wsl`/`device-windows`). State
+is host-local and session-namespaced (`hostname + canonical socket path`),
+so pointing a local CLI at a forwarded remote socket creates a *separate*
+namespaced view rather than corrupting host state — but the supported path
+is host-local execution. No custom transport was added; herdr-t3 and agents
+use `herdr plugin list` → `plugin_root` → CLI, or `herdr --remote`.
 
 ## Known limitations
 
-- `pane.agent_status_changed` live delivery was verified in the earlier
-  development session; this RC verified the hook code path via a simulated
-  envelope plus the identical delivery mechanism proven by `pane.closed`.
-- No resident daemon: snooze expiry materializes lazily on reads; prompt
-  metadata refresh requires `watch` (opt-in) — documented in the contract.
+- `watch` long-run soak not performed; it is opt-in and identical to the
+  read path already exercised.
+- TUI verification used configured `plugin_action` keybinds (the only TUI
+  invocation surface in plugin v1); no dedicated inbox palette exists.
 - Attention granularity limited to herdr's `agent_status` (upstream gap,
   Issue #8); Agent View is a single slot (Issue #9).
-- Remote hosts: socket API is local-only; remote operation requires running
-  the CLI on the target host or an existing socket forward (contract doc).
-- Linux/Windows installs not exercised on real hardware for this RC.
+- `pane.agent_status_changed` fires on status transitions herdr detects;
+  providers without detection integration only produce `unknown`/shell
+  states — no fabricated statuses.
