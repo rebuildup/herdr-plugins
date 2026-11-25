@@ -21,15 +21,23 @@ bun run src/cli.ts capability
 bun run src/cli.ts list [--all] [--session NAME] [--timeout MS]
 bun run src/cli.ts show <id>
 bun run src/cli.ts discover [--session NAME] [--socket PATH] [--timeout MS]
+bun run src/cli.ts register <repo-path> [--title T] [--id ID]
+bun run src/cli.ts update <id> [--title T] [--pinned|--unpinned]
+    [--archived|--unarchived] [--repo-add PATH]... [--repo-remove PATH]...
+bun run src/cli.ts archive <id> | unarchive <id> | pin <id> | unpin <id>
+bun run src/cli.ts settings get <id> [key]
+bun run src/cli.ts settings set <id> <key> <value>
+bun run src/cli.ts settings unset <id> <key>
 ```
 
 - All commands print exactly one JSON document on stdout. Handled errors
   print `{contract, ok:false, error:{code,message}}` on **stderr** and
   exit 1; usage errors exit 2.
-- v0.1.0 is **read-only**: `read_only: true`, `mutation_commands: []`.
-  Registry writes (`register`/`update`/`pin`/`archive`, settings
-  overrides, script execution) arrive in later tickets and will extend
-  v1 additively while read outputs stay unchanged.
+- Mutations are explicit-argument CLI invocations only — never manifest
+  actions. `capability` reports `read_only: false` and
+  `mutation_commands: ["register","update","archive","unarchive","pin",
+  "unpin","settings set","settings unset"]`. Read outputs are unchanged;
+  script commands (#50–#53) extend v1 additively.
 
 ## Model
 
@@ -99,7 +107,74 @@ cwds — the "what could become projects" view:
 - Requires a reachable herdr session (socket resolution identical to
   the git plugin); `list`/`show`/`capability` work without herdr.
 
+## `register <repo-path>`
+
+Creates a project from an explicit repo path (positional or `--path`).
+`--title` defaults to the repo root basename; `--id` defaults to a
+slug of the basename (`my-app`), suffixed `-2`, `-3`, … on collision.
+An explicit `--id` that already exists fails `project_exists`.
+
+The path must resolve to a non-bare git work tree (`resolveRepo`); the
+stored `repos[0].root` is the canonical worktree root and
+`repos[0].remote` the normalized remote identity (`null` without a
+remote). Re-registering a repo root already owned by any project fails
+`repo_already_registered` (with `project_id`). Non-git paths surface the
+git contract kinds (`not_a_repo`, `bare_repo`, `git_missing`, `timeout`).
+
+Response: `{contract, command:"register", project, generated_at}`.
+
+## `update <id>`
+
+Mutates title/pin/archive and repo membership in one locked write:
+
+- `--title T` — rename.
+- `--pinned` / `--unpinned`, `--archived` / `--unarchived` — mutually
+  exclusive pairs; unknown combos are usage errors.
+- `--repo-add PATH` (repeatable) — resolves the path to a git work tree
+  and appends `{root, remote, added_at}`. Adding a root owned by another
+  project fails `repo_already_registered`; adding one already in this
+  project is a no-op.
+- `--repo-remove PATH` (repeatable) — removes membership by canonical
+  root. The path may be a live repo (resolved via `resolveRepo`) or a
+  stale path canonicalized lexically, so entries can be dropped after a
+  checkout is deleted. Unknown roots fail `repo_not_found`.
+
+All checks run inside the registry lock, so concurrent updates cannot
+interleave. Unknown id → `project_not_found` (with `project_id`).
+Response: `{contract, command:"update", project, generated_at}`.
+
+## `archive` / `unarchive` / `pin` / `unpin <id>`
+
+Thin flag setters over the same locked write. `archive` is non-destructive:
+the project, its repos, and its settings are retained; `list` hides
+archived projects unless `--all`, and `show`/`settings` still resolve.
+There is no delete command. Response shape matches `update` with the
+respective `command` name.
+
+## `settings get|set|unset`
+
+Project-scoped settings overrides, stored as one JSON document per
+project at `<stateDir>/settings/<id>.json` under a dedicated lock +
+atomic rename. Values are verbatim strings; typed interpretation is the
+consumer's job (#50 scripts resolution).
+
+- `settings get <id>` → `{op:"get", project, settings:{...}}`
+- `settings get <id> <key>` → `{op:"get", project, key, value}` (`null` when unset)
+- `settings set <id> <key> <value>` → remaining args join with spaces
+- `settings unset <id> <key>` → idempotent removal
+
+Keys are allow-listed (`SETTINGS_ALLOW_LIST` in `state.ts`): currently
+`defaultProjectScripts`, `defaultThreadEnvMode`, `worktreeSubmodules`,
+`worktreeCleanup`, `display.title`, `display.iconPath` — the upstream
+project-scoped keys relevant to scripts and display. Any other key fails
+`settings_key_not_allowed`. The list extends additively; it never
+accepts arbitrary keys. A corrupt settings file reads as empty
+(overrides are non-authoritative).
+
 ## Errors
 
 `kind` values mirror the git contract: `git_missing`, `timeout`,
-`git_error`, `not_a_repo`, `bare_repo`, plus `project_not_found`.
+`git_error`, `not_a_repo`, `bare_repo`, plus `project_not_found`,
+`project_exists`, `repo_already_registered`, `repo_not_found`,
+`invalid_project_id`, `settings_key_not_allowed`. Errors may carry extra
+fields (`project_id`, `key`, `root`).
