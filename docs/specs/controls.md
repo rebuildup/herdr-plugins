@@ -1,11 +1,13 @@
 # Controls plugin (`rebuildup.controls`) — specification
 
 Scope: agent operation core over herdr's `agent.*` socket API —
-send / wait / interrupt / read / rename. Contract:
-`herdr-plugins.controls/v1` (`docs/contracts/controls-v1.md`). Design:
-ADR-0017. First ticket of the #27 Provider Controls/Composer
-decomposition (T1); #6 handoff destination control and #29 textgen
-generation-pane control are intended consumers of this surface.
+send / wait / interrupt / read / rename / start (launch-time
+controls). Contract: `herdr-plugins.controls/v1`
+(`docs/contracts/controls-v1.md`). Design: ADR-0017, ADR-0018.
+Decomposition of #27 Provider Controls/Composer: T1 core (#99),
+T2 launch-time controls (#100); #6 handoff destination control and
+#29 textgen generation-pane control are intended consumers of this
+surface.
 
 ## Purpose
 
@@ -44,6 +46,7 @@ state. herdr remains the sole execution authority.
 | `interrupt <target>` | `agent.send_keys` | yes (PTY) | PTY-level keys only — default `esc`; `--key`/`--keys` customize. No structured interrupt exists upstream. |
 | `read <target>` | `agent.read` | no | Scrollback (`--source`, `--lines`, `--format`, `--no-strip-ansi`); not structured history — see `rebuildup.conversations`. |
 | `rename <target>` | `agent.rename` | yes | `--name NAME` or `--clear`. |
+| `start <pane_id>` | `agent.start` | yes | `--agent KIND` required; `--name` (default `<kind>-<rand>`), `--model`, `--reasoning`, `--permission-mode`, `--resume`/`--resume-from`, `--arg`, `--timeout-ms` (startup readiness wait), optional `--wait*` post-launch `agent.wait`. |
 
 ## Semantics and honest limits
 
@@ -67,7 +70,20 @@ state. herdr remains the sole execution authority.
   the upstream RPC error code as `error.kind`; unreachable sessions
   surface `session_unreachable`; upstream gaps are enumerated in
   `capability.upstream_gaps` (structured interrupt, queue/steer,
-  structured approval/question dialogs, structured history).
+  structured approval/question dialogs, structured history,
+  `agent_session_path` for claude/codex).
+- **Launch options are provider-verified.** `start` maps
+  model/reasoning/permission-mode/resume to provider CLI args through
+  an explicit per-kind table (`plugins/controls/src/launch.ts`).
+  Providers without a verified mapping fail
+  `unsupported_launch_option` before `agent.start` — the plugin never
+  fabricates flags or relies on implicit provider defaults. Resume
+  argv mirrors herdr's own `agent_resume.rs` plan; `--resume-from`
+  reuses the reported `agent_session` (id/path kind checked).
+- **`--arg` is screened, not blind.** Passthrough args reject control
+  characters and a privilege-escalation denylist (bypass/never-ask/
+  danger-full-access flags); `--unsafe-args` is the explicit,
+  result-echoed opt-out (ADR-0018).
 
 ## Upstream gaps (recorded, not worked around)
 
@@ -79,13 +95,20 @@ From the #27 feasibility research (herdr 0.9.5, protocol 22):
    agents reject `agent.prompt` (shared root with #8 attention
    granularity).
 4. `agent.read` is scrollback; `agent_session_path` is discarded by
-   claude/codex adapters upstream (#89 candidate).
+   claude/codex adapters upstream (#89 candidate →
+   herdrdev/herdr#6191), so path-kind resume is unavailable for them.
 
 ## Testing
 
-`tests/controls.test.ts` runs the real CLI against a fake herdr socket
-(`net.createServer` speaking the NDJSON protocol): identity echo,
-wait-option forwarding, blocked-send rejection without an
-`agent.prompt` call, key/read/rename parameter passthrough, all three
-generation guards, `agent_not_found`, invalid-argument usage errors,
-and `session_unreachable`.
+`tests/controls.test.ts` and `tests/controls-launch.test.ts` run the
+real CLI against a fake herdr socket (`net.createServer` speaking the
+NDJSON protocol): identity echo, wait-option forwarding,
+blocked-send rejection without an `agent.prompt` call,
+key/read/rename parameter passthrough, all three generation guards,
+`agent_not_found`, invalid-argument usage errors, and
+`session_unreachable`; plus `start` coverage — per-provider arg
+mapping, unsupported-option rejection before `agent.start`, resume
+(`--resume`/`--resume-from` incl. session-kind and provider-mismatch
+checks), the `--arg` privilege denylist and `--unsafe-args` opt-out,
+control-character/flag-smuggling rejection, timeout bounds,
+post-launch `agent.wait`, and upstream `agent.start` error codes.
