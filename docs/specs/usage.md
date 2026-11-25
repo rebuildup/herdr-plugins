@@ -5,14 +5,15 @@ output / cache-read / cache-creation (+ thinking detail) — over the
 provider transcripts already normalized by `rebuildup.conversations`,
 with honest reporting of what is missing, unsupported, or stale.
 
-This is T1–T3 of #28. T1 (#90) shipped the aggregation core +
+This is the full #28 scope. T1 (#90) shipped the aggregation core +
 `herdr-plugins.usage/v1` contract; T2 (#91) added subscription
 quota/reset surfacing (`quota` command) and the credential-boundary
-ADR-0014; T3 (#92) adds the per-provider cache-token breakdown, the
+ADR-0014; T3 (#92) added the per-provider cache-token breakdown, the
 CLIProxyAPI-equivalent HTTP quota hub source (`quotaHubs` config,
 ADR-0015), and the `divergence` report comparing quota windows vs
-measured tokens. Estimated API cost vs. real billing and history
-retention remain **T4 (#93)**.
+measured tokens. T4 (#93) added the `cost` command — estimated API
+cost explicitly distinct from real billing — plus state
+retention/GC and the finalized stable contract (ADR-0016).
 
 ## Source decision (ADR-0013)
 
@@ -59,6 +60,9 @@ Plugin root resolution: explicit override (flag/env/config) → sibling
   reported, never reconciled), `no_measured_usage`, `quota_unavailable`,
   `no_data`. Hub readings are reported under `hubs` but excluded from
   `comparisons` (account identity is unverifiable).
+- `cost [--provider] [--from|--to] [--refresh]` — estimated API cost
+  per model, always labeled `estimate: true` + disclaimer, never a
+  bill (T4 / ADR-0016).
 
 ## Aggregation rules
 
@@ -160,21 +164,76 @@ span matches a reported quota window duration. Hub readings appear
 under `hubs` but are excluded from comparisons — a hub account cannot
 be proven to be the same subscription as local transcripts.
 
+## Estimated API cost (T4 / ADR-0016)
+
+`cost` reuses the `usage` aggregation, then prices each `by_model`
+bucket against a per-model rate table — the same approach as T3
+Code's `usagePricing.ts`/`UsageService.ts`, simplified to what
+aggregated totals can support honestly:
+
+- **Source**: LiteLLM `model_prices_and_context_window.json`
+  (public, unauthenticated — no credential boundary impact), fetched
+  at runtime and cached as a parsed table at
+  `pricing-cache/litellm.json` (fresh TTL 24h
+  `pricingCacheTtlSeconds`; env `HERDR_USAGE_PRICING_URL` / config
+  `pricingUrl` are test/proxy hooks). Stale tables are served flagged
+  (`status: "stale"`), never silently trusted; no table at all →
+  `status: "unavailable"` + `pricing_unavailable` warning, exit 0.
+- **Rates applied**: standard per-token input/output/cache-read/
+  cache-creation only. Speed variants, context tiers, and 1-hour
+  cache-write rates are not applied — aggregates carry no
+  per-request signal. `thinking_tokens` is never double-counted
+  (inside `output_tokens`). Lookup: user `modelPrices` override →
+  exact → bare name → date-suffix-stripped; **unknown model →
+  `unpriced`/`null`, never guessed**.
+- **Estimate ≠ billing**: `cost.estimate: true` + fixed disclaimer on
+  every payload; `provider_reported_cost_usd` stays a separate field
+  (provider-reported `cost_usd` sums, already in `totals`); the
+  estimate excludes speed premiums, context tiers, discounts, taxes,
+  and quota consumption. `estimate_complete: false` +
+  `unpriced_models[]` disclose partial coverage so a priced-only sum
+  is never mistaken for complete.
+- **User overrides**: config `modelPrices` (USD per million tokens,
+  T3's custom-price shape) price models the table lacks — counted in
+  `pricing.user_overrides`.
+
+## State retention & GC (T4 / ADR-0016)
+
+The plugin's only durable state is caches under
+`HERDR_PLUGIN_STATE_DIR`; `usage`/`cost` aggregation keeps **no**
+index (recomputed per call — the conversations event index is owned
+by `rebuildup.conversations`, ADR-0012).
+
+| path | contents | fresh TTL | retention |
+| --- | --- | --- | --- |
+| `quota-cache/<provider>.json` | provider quota windows | `quotaCacheTtlSeconds` (300s) | 30 days |
+| `quota-cache/hub-<id>.json` | hub account quota windows | same | 30 days |
+| `pricing-cache/litellm.json` | parsed LiteLLM rate table | `pricingCacheTtlSeconds` (24h) | 30 days |
+
+`gcPluginStateCache` runs best-effort on every quota/pricing
+collection: entries older than `PLUGIN_CACHE_RETENTION_SECONDS`
+(30 days), orphaned `*.tmp-*` temps, and unparseable files are
+removed. An entry inside retention is *referenced* (fresh, in-TTL,
+or stale-serve) and is never deleted; reads independently refuse
+entries past retention so a failed GC cannot resurrect ancient data.
+
 ## Concurrency / state
 
-`usage` keeps no durable state: every call re-exports and
-re-aggregates. `quota` writes only the short-term quota cache under
-`HERDR_PLUGIN_STATE_DIR` (atomic tmp+rename, best-effort). Reads never
-mutate anything — the conversations side is read-only by contract
-(`read_only: true`, `mutation_commands: []`), and quota probes are
-GET-only. Export paging is bounded (500 events/page, 2M-event safety
-cap → `export_incomplete_page_limit` warning + `source.complete:
-false`).
+`usage`/`cost` aggregation keeps no durable state: every call
+re-exports and re-aggregates. `quota`/`cost` write only the short-term
+caches under `HERDR_PLUGIN_STATE_DIR` (atomic tmp+rename,
+best-effort). Reads never mutate anything — the conversations side is
+read-only by contract (`read_only: true`, `mutation_commands: []`),
+and quota probes are GET-only; the pricing fetch is an unauthenticated
+GET of public data. Export paging is bounded (500 events/page,
+2M-event safety cap → `export_incomplete_page_limit` warning +
+`source.complete: false`).
 
-## Explicit non-goals (T4)
+## Explicit non-goals
 
-- No estimated API pricing, no cost-vs-billing distinction beyond the
-  `provider_reported_cost_usd` label, no history GC — #93.
 - No reset-credit redemption or any credential/hub mutation — out of
   scope per ADR-0014/0015.
+- No speed/context-tier pricing, no billing-API integration, no
+  tax/discount modeling — the estimate is list-price math only
+  (ADR-0016).
 - No PTY scraping, no transcript scanning, no fabricated states.

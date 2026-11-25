@@ -357,3 +357,94 @@ export interface DivergenceComparison {
   measured: DivergenceMeasured | null;
   window_alignment: DivergenceWindowAlignment;
 }
+
+// --- estimated API cost (T4 / #93) ---------------------------------------------
+
+/**
+ * Pricing-table status for the `cost` command. `ok` = fresh fetch or
+ * in-TTL cache hit; `stale` = serving a cached table older than the
+ * TTL because the source could not be reached; `unavailable` = no
+ * usable table at all — every model reports unpriced, never a
+ * fabricated zero.
+ */
+export type PricingStatus = "ok" | "stale" | "unavailable";
+
+/**
+ * User-supplied price override (config.json `modelPrices`), USD per
+ * million tokens — the same shape T3 Code exposes as custom model
+ * prices. Cache rates fall back to the input rate when omitted.
+ */
+export interface ModelPriceOverride {
+  inputCostPerMillionTokens: number;
+  outputCostPerMillionTokens: number;
+  cacheReadCostPerMillionTokens?: number;
+  cacheWriteCostPerMillionTokens?: number;
+}
+
+/** Serializable pricing provenance reported by `cost`. */
+export interface PricingInfo {
+  status: PricingStatus;
+  /** Rate-table source URL actually used (override or default). */
+  source: string;
+  /** When the table was fetched; the cache `fetched_at` on a hit. */
+  fetched_at: string | null;
+  cache: { hit: boolean; age_seconds: number | null; ttl_seconds: number };
+  /** Number of models in the loaded table (0 when unavailable). */
+  known_models: number;
+  /** Number of user `modelPrices` overrides merged into lookups. */
+  user_overrides: number;
+  /** Sanitized failure detail for non-ok statuses; null otherwise. */
+  detail: string | null;
+}
+
+/** Where a model's estimated cost came from. */
+export type CostSource =
+  /** Priced by the rate table (LiteLLM or a user `modelPrices` override). */
+  | "model_priced"
+  /** Contributed tokens but no rate exists — cost is null, never guessed. */
+  | "unpriced";
+
+/** One `by_model` row of the `cost` command. */
+export interface ModelCostEntry {
+  key: string | null;
+  events: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+  total_tokens: number;
+  thinking_tokens: number | null;
+  /** Sum of provider-reported `cost_usd`; null when none reported. */
+  provider_reported_cost_usd: number | null;
+  /** List-price estimate under the rate table; null when unpriced or
+   * the table is unavailable. An estimate, never a bill. */
+  estimated_cost_usd: number | null;
+  cost_source: CostSource;
+}
+
+/** A model that contributed tokens but has no rate-table entry. */
+export interface UnpricedModel {
+  key: string | null;
+  events: number;
+  total_tokens: number;
+}
+
+/** The `cost` block of the `cost` command payload. */
+export interface CostEstimate {
+  /** Always true — this block is an estimate by contract. */
+  estimate: true;
+  /** Fixed human-readable disclaimer (estimate ≠ billing). */
+  disclaimer: string;
+  /** Sum of `estimated_cost_usd` over priced models only; null when no
+   * model could be priced (unavailable table or all unpriced). */
+  estimated_cost_usd: number | null;
+  /** False when unpriced models contributed tokens — the total then
+   * covers priced models only and understates the true estimate. */
+  estimate_complete: boolean;
+  priced_models: number;
+  unpriced_models: UnpricedModel[];
+  /** Mirror of `totals.provider_reported_cost_usd` for side-by-side
+   * reading — provider-reported cost stays a separate figure. */
+  provider_reported_cost_usd: number | null;
+  pricing: PricingInfo;
+}

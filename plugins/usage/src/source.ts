@@ -41,7 +41,7 @@ export function pluginRoot(): string {
   const envRoot = process.env.HERDR_PLUGIN_ROOT;
   if (envRoot && envRoot !== "") return envRoot;
   // src/source.ts → plugins/usage
-  return path.resolve(import.meta.dir, "..", "..");
+  return path.resolve(import.meta.dir, "..");
 }
 
 function defaultStateDir(): string {

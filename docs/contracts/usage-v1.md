@@ -1,16 +1,19 @@
 # Contract `herdr-plugins.usage/v1`
 
-Token-usage aggregation + subscription quota CLI contract for the
-`rebuildup.usage` herdr plugin (Issue #90 T1, Issue #91 T2, Issue #92
-T3 / parent #28). Follows the same conventions as
-`herdr-plugins.conversations/v1` and the other plugin contracts.
+Token-usage aggregation + subscription quota + estimated-cost CLI
+contract for the `rebuildup.usage` herdr plugin (Issue #90 T1,
+Issue #91 T2, Issue #92 T3, Issue #93 T4 / parent #28). Follows the
+same conventions as `herdr-plugins.conversations/v1` and the other
+plugin contracts.
 
-The plugin is **read-only**: `usage` keeps no durable state and
-recomputes every aggregate from the `rebuildup.conversations`
-normalized index on each call. `quota` caches successful provider
-readings briefly under the plugin state dir (quota numbers only —
-never credentials, ADR-0014). It never reads PTY text, never scans
-provider transcripts itself, and never fabricates usage numbers.
+The plugin is **read-only**: `usage`/`cost` aggregation keeps no
+durable index and recomputes every aggregate from the
+`rebuildup.conversations` normalized index on each call. `quota`
+caches successful provider readings briefly under the plugin state
+dir (quota numbers only — never credentials, ADR-0014); `cost`
+caches the public model price list the same way (ADR-0016). It never
+reads PTY text, never scans provider transcripts itself, and never
+fabricates usage numbers.
 
 ## Data source (ADR-0013)
 
@@ -51,6 +54,9 @@ bun run src/cli.ts usage [--pane PANE] [--session-id ID] [--provider ID] \
   [--from ISO] [--to ISO] [--session NAME] [--socket PATH] [--timeout MS] \
   [--offline] [--conversations-root DIR] [--conversations-state-dir DIR]
 bun run src/cli.ts quota [--provider ID] [--refresh] [--timeout MS]
+bun run src/cli.ts cost [--pane PANE] [--session-id ID] [--provider ID] \
+  [--from ISO] [--to ISO] [--session NAME] [--socket PATH] [--timeout MS] \
+  [--offline] [--refresh] [--conversations-root DIR] [--conversations-state-dir DIR]
 bun run src/cli.ts divergence [--pane PANE] [--session-id ID] [--provider ID] \
   [--from ISO] [--to ISO] [--session NAME] [--socket PATH] [--timeout MS] \
   [--offline] [--refresh] [--conversations-root DIR] [--conversations-state-dir DIR]
@@ -81,7 +87,7 @@ bun run src/cli.ts divergence [--pane PANE] [--session-id ID] [--provider ID] \
   "version": "0.5.0",
   "read_only": true,
   "mutation_commands": [],
-  "commands": ["capability", "usage", "quota", "divergence"],
+  "commands": ["capability", "usage", "quota", "divergence", "cost"],
   "sources": [
     {
       "id": "conversations-index",
@@ -123,6 +129,14 @@ bun run src/cli.ts divergence [--pane PANE] [--session-id ID] [--provider ID] \
         "note": "hub accounts of other providers are reported per-account as unsupported"
       },
       "freshness": "shares the quota cache TTL …"
+    },
+    {
+      "id": "model-pricing",
+      "kind": "price-table",
+      "status": "available",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "freshness": "cached under the plugin state dir (default 24h TTL, 30-day retention); stale tables are flagged, never silently trusted",
+      "detail": "Estimated API cost only — list-price math over standard rates, never a bill. Unknown models report unpriced, never a guessed price. User overrides via config `modelPrices`."
     }
   ],
   "aggregation": { "dimensions": ["provider","model","host","project","session","pane"], "…": "…" },
@@ -141,7 +155,10 @@ pointer to the credential-boundary ADR. `cliproxy-api` reports
 value) and a per-provider implementation note; it implements the
 CLIProxyAPI management-API path (`auth-files` + `api-call`) for claude
 and codex accounts, with other hub providers reported per-account as
-`unsupported` (ADR-0015).
+`unsupported` (ADR-0015). `model-pricing` (T4 / #93, ADR-0016)
+describes the public LiteLLM rate table the `cost` command prices
+against — `kind: "price-table"`, `source` URL, cache freshness, and
+the estimate-not-billing disclaimer; it carries no credentials.
 
 ## `usage`
 
@@ -235,8 +252,9 @@ window, and aggregates.
 - `thinking_tokens` / `provider_reported_cost_usd` — `null` when **no**
   contributing event reported them; never zero-fabricated.
   `provider_reported_cost_usd` sums the provider-reported `cost_usd`
-  field only — it is **not** a billing amount and not an estimated API
-  price (that distinction is T4/#93 scope).
+  field only — it is **not** a billing amount. Estimated API cost is a
+  separate figure computed by the `cost` command (T4 / #93) — see
+  below; the two are never blended.
 - `excluded_untimestamped_events` — events dropped by `--from`/`--to`
   because the provider timestamp was absent/unparseable. Without a
   window they are included and this stays 0.
@@ -459,6 +477,21 @@ endpoint overrides exist only as test/proxy hooks:
 When `codexUsage` is overridden without `codexCredits`, the credits
 call is skipped (a mock must opt in explicitly).
 
+### State retention & GC (T4 / #93, ADR-0016)
+
+Every plugin cache entry — `quota-cache/<provider>.json`,
+`quota-cache/hub-<id>.json`, `pricing-cache/litellm.json` — shares one
+retention window: **30 days** (`PLUGIN_CACHE_RETENTION_SECONDS`). An
+entry is *referenced* while its payload timestamp is inside
+retention, so fresh reads, in-TTL hits, and stale-serve-on-failure
+are never collected. `gcPluginStateCache` runs best-effort on every
+quota/pricing collection and removes only entries **older** than
+retention, orphaned `*.tmp-*` write temps, and unparseable files.
+Reads independently refuse entries past retention, so a failed GC
+can never resurrect ancient data. `usage`/`cost` aggregation itself
+keeps no index — totals are recomputed per call; the conversations
+event index is owned by `rebuildup.conversations`.
+
 ### Quota hubs (T3 / #92, ADR-0015)
 
 `quotaHubs` in `config.json` declares CLIProxyAPI-compatible hubs:
@@ -498,6 +531,130 @@ emitted, or passed to subprocesses; expired tokens report
 `docs/adr/0014-usage-quota-credential-boundary.md`. Hub sources follow
 the parallel boundary in
 `docs/adr/0015-usage-hub-credential-boundary.md`.
+
+## `cost`
+
+Estimated API cost report (T4 / #93, ADR-0016). Runs the same
+aggregation as `usage` (same selectors/window), then prices each
+`by_model` bucket against a per-model rate table. The estimate is
+**always labeled as an estimate — never a bill**.
+
+```bash
+bun run src/cli.ts cost [--pane PANE] [--session-id ID] [--provider ID] \
+  [--from ISO] [--to ISO] [--session NAME] [--socket PATH] [--timeout MS] \
+  [--offline] [--refresh] [<source flags>]
+```
+
+```json
+{
+  "contract": "herdr-plugins.usage/v1",
+  "command": "cost",
+  "window": { "from": null, "to": null },
+  "filters": { "pane_id": null, "session_id": null, "provider": null },
+  "cost": {
+    "estimate": true,
+    "disclaimer": "estimated_cost_usd is a list-price ESTIMATE … not a bill, invoice, or subscription charge …",
+    "estimated_cost_usd": 0.0002784,
+    "estimate_complete": false,
+    "priced_models": 1,
+    "unpriced_models": [
+      { "key": "gpt-6-test", "events": 1, "total_tokens": 156 }
+    ],
+    "provider_reported_cost_usd": 0.0123,
+    "pricing": {
+      "status": "ok",
+      "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "fetched_at": "…",
+      "cache": { "hit": false, "age_seconds": null, "ttl_seconds": 86400 },
+      "known_models": 7175,
+      "user_overrides": 0,
+      "detail": null
+    },
+    "by_model": [
+      {
+        "key": "claude-test-1",
+        "events": 2,
+        "input_tokens": 30,
+        "output_tokens": 12,
+        "cache_read_input_tokens": 3,
+        "cache_creation_input_tokens": 2,
+        "total_tokens": 47,
+        "thinking_tokens": 1,
+        "provider_reported_cost_usd": 0.0123,
+        "estimated_cost_usd": 0.0002784,
+        "cost_source": "model_priced"
+      }
+    ]
+  },
+  "totals": { "…": "same UsageTotals as `usage`" },
+  "breakdowns": { "…": "same UsageBreakdowns as `usage`" },
+  "coverage": { "…": "same UsageCoverage as `usage`" },
+  "sessions": [ "…" ],
+  "source": { "…": "same source block as usage" },
+  "warnings": ["unpriced_models"],
+  "generated_at": "…"
+}
+```
+
+### Estimate semantics
+
+- `cost.estimate` is always `true` and `disclaimer` is a fixed string
+  stating the figure is a list-price estimate, not a bill — it
+  excludes speed premiums, context-tier repricing, provider
+  discounts, taxes, and quota consumption.
+- `estimated_cost_usd` sums `cost.by_model[].estimated_cost_usd` over
+  **priced models only**; `null` when nothing could be priced.
+  `estimate_complete: false` discloses that unpriced models
+  contributed tokens, so a partial total is never mistaken for a
+  complete one. `unpriced_models[]` lists them (`{key, events,
+  total_tokens}`; `key: null` = the event reported no model).
+- `cost_source` per model row: `model_priced` (rate table or user
+  override produced a price) or `unpriced` (`estimated_cost_usd:
+  null` — **never a guessed price**).
+- `provider_reported_cost_usd` appears both per row and at cost
+  level, mirroring `totals` — provider-reported cost is a separate
+  figure and is never blended into the estimate.
+- `pricing` reports provenance: `status` (`ok` fresh/in-TTL hit,
+  `stale` cached table served because the source failed — flagged,
+  `unavailable` no usable table), `source` URL, `fetched_at`,
+  `cache.{hit,age_seconds,ttl_seconds}`, `known_models`, and
+  `user_overrides` (config `modelPrices` entries applied).
+
+### Pricing table (ADR-0016)
+
+The rate table is LiteLLM's public
+`model_prices_and_context_window.json` (same upstream T3 Code
+prices from), fetched at runtime and cached at
+`<state>/pricing-cache/litellm.json` — fresh TTL 24h (config
+`pricingCacheTtlSeconds`), shared 30-day retention. Lookup order per
+model: user `modelPrices` override → exact normalized key → bare
+name (provider prefix dropped) → date-suffix-stripped variants.
+Speed/context-tier rates are not applied (aggregates carry no
+per-request signal); 1-hour cache writes price at the standard
+cache-creation rate. `thinking_tokens` is never double-counted —
+providers report it inside `output_tokens`.
+
+User overrides (config.json, USD per million tokens):
+
+```json
+{
+  "modelPrices": {
+    "my-model": {
+      "inputCostPerMillionTokens": 3,
+      "outputCostPerMillionTokens": 15,
+      "cacheReadCostPerMillionTokens": 0.3,
+      "cacheWriteCostPerMillionTokens": 3.75
+    }
+  }
+}
+```
+
+Source override for tests/proxies: env `HERDR_USAGE_PRICING_URL` or
+config `pricingUrl` (env wins). An unavailable table is data, not an
+error: `pricing.status: "unavailable"`, every model `unpriced`,
+`estimated_cost_usd: null`, `pricing_unavailable` warning, exit 0.
+Stale tables add `pricing_table_stale`; unpriced contributors add
+`unpriced_models` to `warnings[]`.
 
 ## `divergence`
 
@@ -580,13 +737,15 @@ errors (exit 2) for bad `--from`/`--to`. A missing conversations
 ## Versioning
 
 `herdr-plugins.usage/v1` is **stable** as of plugin v0.5.0: command
-surface (`capability`/`usage`/`quota`/`divergence`), totals/breakdown/
-cache-token/coverage and quota/hub/divergence report shapes, and error
-`kind` taxonomy are the v1 contract. Additive fields may appear
-anywhere; clients must ignore unknown fields. `sources`, `breakdowns`
-dimensions, `coverage.providers`, `cache_tokens.providers`, quota
-`windows`/`hubs`/`accounts`, divergence `comparisons`/`verdicts`, and
-provider `status` values extend additively.
+surface (`capability`/`usage`/`quota`/`divergence`/`cost`),
+totals/breakdown/cache-token/coverage, cost-estimate, quota/hub, and
+divergence report shapes, and error `kind` taxonomy are the v1
+contract. Additive fields may appear anywhere; clients must ignore
+unknown fields. `sources`, `breakdowns` dimensions,
+`coverage.providers`, `cache_tokens.providers`, `cost.by_model`,
+quota `windows`/`hubs`/`accounts`, divergence
+`comparisons`/`verdicts`, provider `status` values, and pricing
+`status` values extend additively.
 
 A breaking change — removing/renaming a command or field, changing an
 error `kind`'s meaning, altering dedup/window semantics — bumps to
