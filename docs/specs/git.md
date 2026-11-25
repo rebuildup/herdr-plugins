@@ -1,11 +1,11 @@
 # Git plugin (`rebuildup.git`) — specification
 
 Stage 1 scope: read-only Git status/diff for herdr panes, extended in
-v0.2.0 with a structured per-file change list (`files`) and
-pathspec-limited, machine-readable diffs. Commit history, branch
-comparison, mutation operations (staging, commit, push), and PR
-integration are later stages tracked by Issues #23–#25 (tickets
-#36–#39); Checkpoint integration is Issue #4.
+v0.2.0 with a structured per-file change list (`files`),
+pathspec-limited and machine-readable diffs, commit history (`log`),
+and merge-base branch comparison (`compare`). Mutation operations
+(staging, commit, push) and PR integration are later stages tracked by
+Issues #24/#25 (tickets #37–#39); Checkpoint integration is Issue #4.
 
 ## Purpose
 
@@ -37,15 +37,17 @@ only runs read-only `git` commands and projects display metadata.
 | `status` | Repo identity + branch/upstream/ahead-behind + change counts. |
 | `files` | Structured per-file change list (porcelain `-z`). |
 | `diff` | Patch, `--stat`, `--name-status`, or `--numstat` for worktree, index (`--staged`), or revisions; `--path` pathspec filter. |
+| `log` | Structured commit history with filters and paging. |
+| `compare` | Merge-base diff between two revisions (default: HEAD vs upstream). |
 | `project` | Compute `status` for a pane and project pane metadata tokens. |
 
-`status`/`files`/`diff`/`project` accept `--session`, `--socket`,
-`--timeout` (overrides `config.json` `timeoutMs`, default 10000) and
-`diff` accepts `--max-bytes` (default 262144). `files`/`diff` accept
-repeatable `--path <pathspec>` values, passed to git after `--`; values
-starting with `-` are rejected. All output is a single JSON document;
-errors are `{ok:false,error:{code,message}}` on stderr with exit 1
-(2 for usage).
+All commands accept `--session`, `--socket`, `--timeout` (overrides
+`config.json` `timeoutMs`, default 10000); `diff`/`compare` accept
+`--max-bytes` (default 262144, `config.json` `diffMaxBytes`).
+`files`/`diff`/`log` accept repeatable `--path <pathspec>` values, passed
+to git after `--`; values starting with `-` are rejected. All output is a
+single JSON document; errors are `{ok:false,error:{code,message}}` on
+stderr with exit 1 (2 for usage).
 
 ## Change accounting
 
@@ -99,6 +101,28 @@ Output formats (exactly one per invocation):
 `--path <pathspec>` (repeatable) appends `-- <path>...` to the git
 invocation, combining freely with `--staged` and revisions. Revisions
 remain positional argv elements; option-like values are rejected.
+
+## Commit history (`log`)
+
+`log` runs `git log` with a NUL/record-separated custom format and returns
+structured commits: `sha`, `parents[]`, `author`/`committer`
+(`name`/`email`/ISO-8601 `date`), and `subject`. Filters map to git
+options: `--all`, `--first-parent`, `--author`, `--grep`, `--since`,
+`--until`, and `--path` pathspecs. Paging is `--limit` (default 50, max
+1000) plus `--skip`; the result reports `has_more` by fetching one extra
+commit. There is no arbitrary revision-range argument in v1 — use
+`compare` for branch diffs.
+
+## Branch comparison (`compare`)
+
+`compare [base [head]]` diffs `head` against the **merge-base** of `base`
+and `head` (three-dot semantics, matching "what did this branch change").
+With no arguments, `base` is the current branch's upstream and `head` is
+`HEAD`; a missing upstream is a structured `git_error`, not an empty
+diff. The result carries `merge_base`, `ahead`/`behind` (head-only vs
+base-only commit counts), the changed-file list (`--name-status -z`
+parsed: `status`/`path`/`old_path`), `stat`, and a byte-capped `patch`
+with `patch_truncated`/`patch_bytes`.
 
 ## Metadata projection
 

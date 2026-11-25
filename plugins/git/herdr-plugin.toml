@@ -23,6 +23,20 @@ contexts = ["pane"]
 command = ["bun", "run", "src/cli.ts", "files"]
 
 [[actions]]
+id = "log"
+title = "Git: pane commit history"
+description = "Show recent commits of the focused pane's repository as JSON."
+contexts = ["pane"]
+command = ["bun", "run", "src/cli.ts", "log"]
+
+[[actions]]
+id = "compare"
+title = "Git: pane branch comparison"
+description = "Compare the focused pane's branch against its base as JSON."
+contexts = ["pane"]
+command = ["bun", "run", "src/cli.ts", "compare"]
+
+[[actions]]
 id = "project"
 title = "Git: project pane metadata"
 description = "Refresh git_branch/git_changes pane metadata tokens for the focused pane."

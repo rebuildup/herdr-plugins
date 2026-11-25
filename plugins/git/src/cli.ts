@@ -19,8 +19,10 @@ import {
   sessionSnapshot,
 } from "../../../packages/herdr-client/src/index";
 import {
+  collectCompare,
   collectDiff,
   collectFiles,
+  collectLog,
   collectStatus,
   type DiffFormat,
   type DiffRequest,
@@ -354,6 +356,136 @@ async function cmdDiff(options: CliOptions): Promise<void> {
   }
 }
 
+const LOG_VALUE_FLAGS = ["--limit", "--skip", "--author", "--grep", "--since", "--until", "--path"];
+
+function positiveIntFlag(args: string[], name: string): number | undefined {
+  const raw = flagValue(args, name);
+  if (raw === undefined) return undefined;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0) {
+    fail(`invalid ${name}: ${raw}`, 2);
+  }
+  return value;
+}
+
+async function cmdLog(options: CliOptions): Promise<void> {
+  const config = await loadConfig();
+  const paneId = await resolvePaneId(options.args, LOG_VALUE_FLAGS);
+  const snapshot = await sessionSnapshot(options);
+  const pane = await findPane(snapshot, paneId);
+  const cwd = paneCwd(pane);
+
+  const pathspec = flagValues(options.args, "--path");
+  for (const p of pathspec) {
+    if (p.startsWith("-")) fail(`invalid --path value (option-like rejected): ${p}`, 2);
+  }
+  const limit = positiveIntFlag(options.args, "--limit");
+  if (limit === 0) fail("--limit must be >= 1", 2);
+  const skip = positiveIntFlag(options.args, "--skip");
+
+  let repoRoot: string;
+  try {
+    repoRoot = (await resolveRepo(cwd, { timeoutMs: effectiveTimeoutMs(options, config) })).root;
+  } catch (err) {
+    if (err instanceof GitError) fail(err.message, 1, err.kind);
+    throw err;
+  }
+
+  try {
+    const result = await collectLog(
+      repoRoot,
+      {
+        limit,
+        skip,
+        all: hasFlag(options.args, "--all"),
+        firstParent: hasFlag(options.args, "--first-parent"),
+        author: flagValue(options.args, "--author"),
+        grep: flagValue(options.args, "--grep"),
+        since: flagValue(options.args, "--since"),
+        until: flagValue(options.args, "--until"),
+        pathspec: pathspec.length > 0 ? pathspec : undefined,
+      },
+      { timeoutMs: effectiveTimeoutMs(options, config) },
+    );
+    emit({
+      contract: CONTRACT,
+      command: "log",
+      pane_id: paneId,
+      repo_root: repoRoot,
+      limit: limit ?? 50,
+      skip: skip ?? 0,
+      commits: result.commits,
+      has_more: result.hasMore,
+      generated_at: new Date().toISOString(),
+    });
+  } catch (err) {
+    if (err instanceof GitError) fail(err.message, 1, err.kind);
+    throw err;
+  }
+}
+
+async function cmdCompare(options: CliOptions): Promise<void> {
+  const config = await loadConfig();
+  const paneId = await resolvePaneId(options.args, ["--max-bytes"]);
+  const snapshot = await sessionSnapshot(options);
+  const pane = await findPane(snapshot, paneId);
+  const cwd = paneCwd(pane);
+
+  const pos = positionals(options.args, ["--max-bytes"]);
+  const revs = pos.slice(1);
+  if (revs.length > 2) fail("compare accepts at most two revisions (base head)", 2);
+  for (const rev of revs) {
+    if (rev.startsWith("-")) {
+      fail(`invalid revision (option-like value rejected): ${rev}`, 2);
+    }
+  }
+  const maxBytesRaw = flagValue(options.args, "--max-bytes");
+  const maxBytes = maxBytesRaw ? Number(maxBytesRaw) : undefined;
+  if (maxBytesRaw && (!Number.isFinite(maxBytes) || (maxBytes as number) <= 0)) {
+    fail(`invalid --max-bytes: ${maxBytesRaw}`, 2);
+  }
+
+  let repoRoot: string;
+  try {
+    repoRoot = (await resolveRepo(cwd, { timeoutMs: effectiveTimeoutMs(options, config) })).root;
+  } catch (err) {
+    if (err instanceof GitError) fail(err.message, 1, err.kind);
+    throw err;
+  }
+
+  try {
+    const result = await collectCompare(
+      repoRoot,
+      {
+        base: revs[0],
+        head: revs[1],
+        maxBytes: (maxBytes as number | undefined) ?? config.diffMaxBytes ?? DEFAULT_DIFF_MAX_BYTES,
+      },
+      { timeoutMs: effectiveTimeoutMs(options, config) },
+    );
+    emit({
+      contract: CONTRACT,
+      command: "compare",
+      pane_id: paneId,
+      repo_root: repoRoot,
+      base: result.base,
+      head: result.head,
+      merge_base: result.mergeBase,
+      ahead: result.ahead,
+      behind: result.behind,
+      files: result.files,
+      stat: result.stat,
+      patch: result.patch.output,
+      patch_truncated: result.patch.truncated,
+      patch_bytes: result.patch.bytes,
+      generated_at: new Date().toISOString(),
+    });
+  } catch (err) {
+    if (err instanceof GitError) fail(err.message, 1, err.kind);
+    throw err;
+  }
+}
+
 async function cmdProject(options: CliOptions): Promise<void> {
   const config = await loadConfig();
   const paneId = await resolvePaneId(options.args);
@@ -423,7 +555,7 @@ async function cmdCapability(options: CliOptions): Promise<void> {
     contract: CONTRACT,
     plugin: PLUGIN_ID,
     version: PLUGIN_VERSION,
-    commands: ["capability", "status", "diff", "files", "project"],
+    commands: ["capability", "status", "files", "diff", "log", "compare", "project"],
     read_only: true,
     requires: { git: true, bun: true },
     defaults: {
@@ -440,6 +572,9 @@ Usage:
   git diff <pane_id> [--staged] [--stat|--name-status|--numstat]
       [--path PATH]... [--max-bytes N] [rev [rev]]
   git files <pane_id> [--path PATH]... [--session NAME]
+  git log <pane_id> [--limit N] [--skip N] [--all] [--first-parent]
+      [--author X] [--grep X] [--since X] [--until X] [--path PATH]...
+  git compare <pane_id> [base [head]] [--max-bytes N]
   git project <pane_id> [--session NAME]
   git capability
 
@@ -456,6 +591,10 @@ async function main(): Promise<void> {
       return cmdDiff(options);
     case "files":
       return cmdFiles(options);
+    case "log":
+      return cmdLog(options);
+    case "compare":
+      return cmdCompare(options);
     case "project":
       return cmdProject(options);
     case "capability":
