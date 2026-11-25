@@ -45,6 +45,22 @@ export type CreatedBy = (typeof CREATED_BY)[number];
 export const STATE_SCHEMA_VERSION = 1;
 
 /**
+ * Advisory render metadata recorded at register time (contract
+ * `meta`). For `kind:"html"` the plugin records that consumers must
+ * render the document inside an isolated context; sandbox/CSP/network
+ * policy is always the client's responsibility (ADR-0024 §4). The
+ * plugin never executes or renders content itself.
+ */
+export interface ArtifactMeta {
+  render?: {
+    /** HTML documents must be rendered in an isolated context. */
+    isolation: "required";
+    /** Enforcement point for sandbox/CSP/network policy. */
+    policy: "client";
+  };
+}
+
+/**
  * One durable artifact record — the contract's artifact record
  * (docs/contracts/artifacts-v1.md §Artifact record). `storage.ref` is
  * state-relative for `state_copy` (`artifacts/<id>/<name>`) and the
@@ -81,6 +97,8 @@ export interface ArtifactRecord {
   refs?: string[] | undefined;
   /** Structured warnings recorded at register (e.g. mime_mismatch, oversize). */
   warnings?: string[] | undefined;
+  /** Advisory metadata (e.g. html render isolation notice). */
+  meta?: ArtifactMeta | undefined;
 }
 
 function asString(value: unknown): string | undefined {
@@ -179,13 +197,29 @@ export function parseArtifactRecord(value: unknown): ArtifactRecord | null {
   if (refs !== undefined) record.refs = refs;
   const warnings = asStringArray(v.warnings);
   if (warnings !== undefined) record.warnings = warnings;
+  const meta = parseArtifactMeta(v.meta);
+  if (meta !== undefined) record.meta = meta;
   return record;
 }
 
-/** Planned registry commands not yet implemented (T3 #142 / T4 #143). */
-export const PLANNED_COMMANDS = ["verify", "deliver", "gc"] as const;
+/**
+ * Tolerant meta parser: `meta` is advisory, derived data, so a
+ * malformed persisted value is dropped rather than quarantining the
+ * whole record.
+ */
+function parseArtifactMeta(value: unknown): ArtifactMeta | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const render = (value as Record<string, unknown>).render;
+  if (typeof render !== "object" || render === null) return undefined;
+  const r = render as Record<string, unknown>;
+  if (r.isolation !== "required" || r.policy !== "client") return undefined;
+  return { render: { isolation: "required", policy: "client" } };
+}
 
-/** Implemented commands in this revision (T1 capability/help + T2 registry core). */
+/** Planned registry commands not yet implemented (T4 #143). */
+export const PLANNED_COMMANDS = ["deliver", "gc"] as const;
+
+/** Implemented commands in this revision (T1 capability/help + T2 registry core + T3 verify). */
 export const IMPLEMENTED_COMMANDS = [
   "capability",
   "help",
@@ -193,5 +227,6 @@ export const IMPLEMENTED_COMMANDS = [
   "list",
   "get",
   "search",
+  "verify",
   "delete",
 ] as const;

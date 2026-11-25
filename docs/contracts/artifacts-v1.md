@@ -9,7 +9,8 @@ Specification: [`docs/specs/artifacts.md`](../specs/artifacts.md).
 
 **Status: DRAFT.** T1 (#136) shipped `capability`/`help`; T2 (#141)
 implements the registry core `register`/`list`/`get`/`search`/`delete`;
-`verify`/`deliver`/`gc` remain planned for T3–T4 (#142/#143). The
+T3 (#142) adds kind-specific validation, richer search filters, and
+`verify`; `deliver`/`gc` remain planned for T4 (#143). The
 contract is versioned `herdr-plugins.artifacts/v1` from the start;
 fields may be added additively, removals/renames require a version
 bump.
@@ -28,16 +29,19 @@ bump.
 cd <plugin_root>
 bun run src/cli.ts capability          # implemented (T1)
 bun run src/cli.ts help                # implemented (T1)
-# --- registry core (implemented T2 #141) ---
+# --- registry core (T2 #141) + verify (T3 #142) ---
 bun run src/cli.ts register --path FILE [--kind KIND] [--storage state_copy|path_ref]
                                  [--title TEXT] [--pane PANE] [--created-by CREATED_BY]
                                  [--ref REF ...] | --stdin
-bun run src/cli.ts list    [--kind KIND] [--pane PANE] [--session NAME] [--limit N]
+bun run src/cli.ts list    [--kind KIND] [--pane PANE] [--agent SESSION] [--created-by CREATED_BY]
+                           [--session NAME] [--limit N]
 bun run src/cli.ts get     <artifact_id>
-bun run src/cli.ts search  <query> [--kind KIND] [--pane PANE] [--session NAME] [--since ISO] [--limit N]
-bun run src/cli.ts delete  <artifact_id> [--force]
-# --- planned (T3 #142 / T4 #143) ---
+bun run src/cli.ts search  <query> [--kind KIND] [--pane PANE] [--agent SESSION]
+                           [--created-by CREATED_BY] [--session NAME]
+                           [--since ISO] [--until ISO] [--limit N]
 bun run src/cli.ts verify  [<artifact_id>]
+bun run src/cli.ts delete  <artifact_id> [--force]
+# --- planned (T4 #143) ---
 bun run src/cli.ts deliver --pane PANE|--agent PANE <artifact_id>
 bun run src/cli.ts gc      [--older-than ISO] [--dry-run]
 ```
@@ -46,8 +50,8 @@ bun run src/cli.ts gc      [--older-than ISO] [--dry-run]
   errors print `{contract, ok:false, error:{code,message,kind?}}` on
   **stderr** and exit 1; usage errors exit 2.
 - `capability`/`help` work without a reachable herdr session.
-  Registry commands (`register`/`list`/`get`/`search`/`delete`) resolve
-  the live session via `session.snapshot` for host/session/owner
+  Registry commands (`register`/`list`/`get`/`search`/`verify`/`delete`)
+  resolve the live session via `session.snapshot` for host/session/owner
   identity and `owner_stale` reporting; unreachable session →
   `kind:"session_unreachable"` exit 1.
 - `register` accepts `--path FILE` or `--stdin` (bytes on stdin;
@@ -56,6 +60,24 @@ bun run src/cli.ts gc      [--older-than ISO] [--dry-run]
   when omitted. `--ref` is repeatable and lands in `refs` (additive
   back-references). `delete` refuses records with non-empty `refs`
   unless `--force` is passed (`referenced`).
+- Kind validation at `register` (T3): `kind:"html"` is the only
+  refusal kind — path sources must resolve to a `.html`/`.htm` name
+  and the bytes must open like a document (`<!doctype html`/`<html`
+  after optional whitespace/BOM, upstream `HtmlRender` rules);
+  `image`/`pdf`/`file`/`other` never refuse on content — a concrete
+  sniffed MIME that disagrees with the kind family reports
+  `mime_mismatch`, and one that disagrees with the filename extension
+  reports `extension_mime_mismatch` (generic `text/plain` /
+  `application/octet-stream` sniffs report neither). `kind:"html"`
+  records carry `meta.render` (`{isolation:"required",policy:"client"}`)
+  as the render-time notice; sandbox/CSP remains a client duty.
+- `list`/`search` owner filters: `--pane` (exact `owner.pane_id`),
+  `--agent` (exact `owner.agent_session`), `--created-by` (exact
+  `owner.created_by`), `--session` (record session name). `search`
+  adds `--since`/`--until` ISO-8601 bounds on `created_at` (invalid
+  values are usage errors) and free-text matching over identity,
+  kind/mime, filename, owner fields, host, session, and `refs` —
+  metadata only, never payload bytes.
 
 ## `capability`
 
@@ -115,9 +137,19 @@ atomic-rename discipline (AGENTS §4):
   "oversize": false,
   "created_at": "ISO-8601",
   "refs": ["optional back-references: conversations event, handoff payload, checkpoint — additive"],
-  "warnings": ["optional structured warnings, e.g. mime_mismatch, owner_stale"]
+  "warnings": ["optional structured warnings, e.g. mime_mismatch, extension_mime_mismatch, oversize, owner_stale"],
+  "meta": {
+    "render": { "isolation": "required", "policy": "client" }
+  }
 }
 ```
+
+`meta` is optional advisory metadata. It is present only for
+`kind:"html"` and records the render-isolation notice: consumers must
+render HTML inside an isolated context and own sandbox/CSP/network
+policy (`policy:"client"`); the plugin never executes or renders
+content (ADR-0024 §4). Malformed persisted `meta` is dropped on read,
+never quarantines the record.
 
 ### Identity and scoping
 
@@ -149,6 +181,55 @@ also report top-level `orphans` (payload dirs with no index record)
 and `corrupt` (index ids whose records failed parsing). None of these
 are failures — they are honest degradation, per AGENTS §4.
 
+## Verification (`verify`, T3 #142)
+
+`verify [<artifact_id>]` re-checks records against the filesystem —
+entity existence, sha256 re-hash, size, re-sniffed MIME, storage-layout
+consistency, and oversize-flag consistency. It is a read-only health
+report: per-artifact `status` is `ok`, `corrupt`, or `missing`, and
+the command exits 0 even when artifacts are unhealthy (usage/session
+errors still exit 1/2).
+
+```json
+{
+  "contract": "herdr-plugins.artifacts/v1",
+  "ok": true,
+  "command": "verify",
+  "results": [
+    {
+      "artifact_id": "art-…",
+      "status": "ok | corrupt | missing",
+      "issues": ["sha256_mismatch", "…"],
+      "checks": {
+        "payload_exists": true,
+        "sha256_match": true,
+        "size_match": true,
+        "mime_match": true
+      },
+      "artifact": { "…annotated record, same shape as get…" }
+    }
+  ],
+  "summary": { "total": 1, "ok": 1, "corrupt": 0, "missing": 0 },
+  "orphans": [],
+  "corrupt": []
+}
+```
+
+Status rules: `missing` — payload absent, not a regular file, or
+unsafe (symlink inside the artifacts tree); issue
+`storage_ref_missing`. `corrupt` — payload present but a check failed
+or record metadata is inconsistent; issue codes: `sha256_mismatch`,
+`size_mismatch`, `mime_drift`, `storage_ref_invalid` (state_copy
+`resolved_path` does not match the index layout),
+`oversize_flag_inconsistent` (flag disagrees with current size vs the
+kind cap). `ok` — all checks pass. Register-time warnings are
+historical facts and are not re-reported as verify issues; `path_ref`
+drift (the external file changed after register) surfaces as
+`corrupt` with `sha256_mismatch`/`size_mismatch`. With no
+`artifact_id`, every index record is verified and `summary` counts
+the three statuses; `orphans`/`corrupt` report index-level
+inconsistencies exactly like `list`/`search`.
+
 ## Error model
 
 ```json
@@ -164,6 +245,7 @@ on stderr, exit 1. Planned `error.code` values (draft):
 | `path_outside_root` / `traversal_denied` | `invalid` | path-traversal / symlink escape attempt |
 | `too_large` | `invalid` | state_copy exceeds per-kind cap |
 | `mime_mismatch` | `invalid` on refusal | sniffed type disagrees with declared kind; refusal only for `kind:"html"`, warning otherwise |
+| `invalid_html` | `invalid` | `kind:"html"` path source whose resolved name is not `.html`/`.htm` (upstream `HtmlRender` file rule) |
 | `source_not_found` / `source_not_file` / `source_unreadable` | `not_found` / `invalid` / `unavailable` | register source missing, not a regular file, or unreadable |
 | `storage_ref_missing` (`missing_ref`) | reported on reads (`missing_ref: true` + `storage_ref_missing` warning) | path_ref target vanished/unreadable, or state_copy payload missing/symlinked |
 | `owner_stale` | `stale` | owner identity no longer matches live snapshot (warning, not failure, on reads) |

@@ -5,8 +5,10 @@ responsibility boundary, storage policy, v1 attachment definition, and
 the draft contract skeleton `herdr-plugins.artifacts/v1`. T2 (#141)
 implements the registry core: `register`/`list`/`get`/`search`/`delete`
 with identity, traversal guards, size caps, leading-byte MIME sniff,
-sha256, and honest missing/stale reporting. Deeper kind validation
-lands in T3 (#142), delivery/integration in T4 (#143). Design:
+sha256, and honest missing/stale reporting. T3 (#142) deepens
+kind-specific validation (upstream `HtmlRender`/`attachmentStore`
+rules), extends search filters, and adds `verify` integrity checks.
+Delivery/integration lands in T4 (#143). Design:
 ADR-0024. Contract: `docs/contracts/artifacts-v1.md` (**draft**).
 
 ## Purpose
@@ -63,11 +65,48 @@ attachment API exists in protocol 22; none is fabricated.
 
 ## Safety boundary (ADR-0024 §4)
 
-The plugin validates HTML *shape* (extension + `<!doctype html>`/
-`<html>` prefix, upstream `HtmlRender` rules) and records metadata
-only. It never executes, renders, or proxies content. Render-time
+The plugin validates HTML *shape* — upstream `HtmlRender` rules:
+resolved `.html`/`.htm` file name for path sources plus document-start
+bytes (`<!doctype html`/`<html>` after optional whitespace/BOM,
+anchored; a doctype buried mid-document does not qualify) — and
+records metadata only, including `meta.render`
+(`{isolation:"required",policy:"client"}`) as the render-isolation
+notice. It never executes, renders, or proxies content. Render-time
 sandbox/CSP/network isolation is a herdr-t3 requirement; contract
 notes state this normatively.
+
+## Kind validation (T3 #142)
+
+- `html` is the only refusal kind: non-`.html`/`.htm` path names fail
+  `invalid_html`; non-document leading bytes fail `mime_mismatch`
+  (both `kind:"invalid"`). `--stdin` html is judged on content alone.
+- `image`/`pdf`/`file`/`other` never refuse on content. A concrete
+  sniffed MIME (not `text/plain`/`application/octet-stream`) that
+  disagrees with the kind family → `mime_mismatch` warning; one that
+  disagrees with the filename extension → `extension_mime_mismatch`
+  warning. Both are structured strings in `warnings[]`, surfaced on
+  `get`/`list`/`search`/`verify`.
+
+## Verification (`verify`, T3 #142)
+
+`verify [<artifact_id>]` re-checks entity existence, sha256 re-hash,
+size, re-sniffed MIME, storage-layout consistency, and oversize-flag
+consistency. Per-artifact `status` is `ok`/`corrupt`/`missing` with
+structured `issues` (`sha256_mismatch`, `size_mismatch`, `mime_drift`,
+`storage_ref_invalid`, `oversize_flag_inconsistent`,
+`storage_ref_missing`); the command exits 0 — it is a report, not a
+gate. No id verifies the whole index and returns `summary` counts plus
+the same `orphans`/`corrupt` index-level fields as `list`/`search`.
+
+## Search (T3 #142)
+
+`search <query>` filters by kind, owner (`--pane`, `--agent` =
+`owner.agent_session`, `--created-by`), record `--session`, and
+`--since`/`--until` ISO-8601 period bounds (invalid timestamps are
+usage errors). Free text matches metadata only — artifact id, title,
+kind, mime, filename, owner fields, host, session, `refs`
+(conversation/handoff back-references) — never payload bytes. `list`
+shares the kind/owner/session filters.
 
 ## Identity, traversal, and limits (acceptance criteria)
 
@@ -105,5 +144,12 @@ convention as `rebuildup.conversations`).
   external files never removed for `path_ref`). All registry commands
   resolve `session.snapshot` and fail `session_unreachable` when the
   socket is down.
-- T3 (#142) / T4 (#143): `verify`, stricter validation, `deliver`,
-  `gc` — still `contract_draft`.
+- T3 (#142): kind-specific validation (anchored html document-start +
+  `.html`/`.htm` path rule → `invalid_html`/`mime_mismatch` refusals;
+  `mime_mismatch`/`extension_mime_mismatch` warnings for other kinds;
+  `meta.render` isolation notice on html records), search filters
+  (`--agent`/`--created-by`/`--until`, ISO-validated bounds, metadata
+  free-text incl. `refs`), and `verify` (`ok`/`corrupt`/`missing`
+  integrity re-check: existence, sha256, size, mime, storage-layout
+  and oversize-flag consistency).
+- T4 (#143): `deliver`, `gc` — still `contract_draft`.

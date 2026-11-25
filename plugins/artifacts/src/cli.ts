@@ -6,8 +6,9 @@
  *
  * T1 (#136) shipped `capability`/`help`; T2 (#141) implements the
  * registry core: `register` (state_copy default / opt-in path_ref),
- * `list`, `get`, `search`, `delete`. `verify`/`deliver`/`gc` remain
- * contract_draft until T3–T4 (#142/#143).
+ * `list`, `get`, `search`, `delete`; T3 (#142) adds kind-specific
+ * validation, richer search filters, and `verify` (integrity
+ * re-check). `deliver`/`gc` remain contract_draft until T4 (#143).
  *
  * Registry commands resolve the live session via `session.snapshot`
  * for host/session/owner identity and owner_stale reporting; an
@@ -46,6 +47,7 @@ import {
   RegistryError,
   registerArtifact,
   searchArtifacts,
+  verifyArtifacts,
 } from "./registry";
 
 interface CliOptions extends CallOptions {
@@ -140,6 +142,16 @@ function flagInt(flags: Map<string, string | true>, name: string): number | unde
   return value;
 }
 
+/** ISO-8601 filter bound; invalid input is a usage error, not silent. */
+function flagIso(flags: Map<string, string | true>, name: string): string | undefined {
+  const raw = flagValue(flags, name);
+  if (raw === undefined) return undefined;
+  if (Number.isNaN(Date.parse(raw))) {
+    usageFail(`--${name} must be an ISO-8601 timestamp`);
+  }
+  return raw;
+}
+
 function usageFail(message: string): never {
   fail(message, 2);
 }
@@ -183,9 +195,11 @@ function cmdCapability(): void {
       path_ref_oversize: "warn",
     },
     notes: [
-      "Contract is DRAFT: T2 (#141) implements register/list/get/search/delete; verify/deliver/gc remain contract_draft until T3-T4 (#142/#143).",
+      "Contract is DRAFT: T2 (#141) implements register/list/get/search/delete; T3 (#142) adds verify + kind validation + search filters; deliver/gc remain contract_draft until T4 (#143).",
       "Plugin never executes or renders artifact content; render-time sandbox/CSP/network isolation is a herdr-t3 requirement (ADR-0024, docs/contracts/artifacts-v1.md).",
       "state_copy (default) enforces per-kind caps at register; path_ref records oversize as a warning flag and reports vanished targets as missing_ref.",
+      "kind validation: html refuses non-.html/.htm path names and non-document leading bytes (upstream HtmlRender rules); image/pdf/file/other report mime_mismatch / extension_mime_mismatch warnings instead of refusing.",
+      "verify re-checks payload existence, sha256, size, mime, and metadata consistency; per-artifact status is ok|corrupt|missing (honest report, exit 0).",
       "Registry commands resolve the live session via session.snapshot; unreachable session fails with session_unreachable.",
       "v1 attachment delivery is the artifact's stable absolute path inside agent.prompt/pane.send_text text; no structured attachment API exists in herdr protocol 22 (upstream gap candidate, ADR-0024).",
       "SnapShots (OS capture), browser import, and MCP Apps UI are out of plugin scope: herdr-t3/desktop or upstream-blocked on #30 (ADR-0024 section 5).",
@@ -285,13 +299,15 @@ async function cmdRegister(options: CliOptions): Promise<void> {
 
 async function cmdList(options: CliOptions): Promise<void> {
   const parsed = parseFlags(options.args, {
-    valued: ["kind", "pane", "session", "limit"],
+    valued: ["kind", "pane", "agent", "created-by", "session", "limit"],
   });
   if (parsed.positionals.length > 0) usageFail(`unexpected argument: ${parsed.positionals[0]}`);
   const snapshot = await snapshotOrFail(options);
   const result = await listArtifacts({
     kind: parseKind(flagValue(parsed.flags, "kind")),
     paneId: flagValue(parsed.flags, "pane"),
+    agentSession: flagValue(parsed.flags, "agent"),
+    createdBy: parseCreatedBy(flagValue(parsed.flags, "created-by")),
     session: flagValue(parsed.flags, "session"),
     limit: flagInt(parsed.flags, "limit"),
     snapshot,
@@ -326,7 +342,7 @@ async function cmdGet(options: CliOptions): Promise<void> {
 
 async function cmdSearch(options: CliOptions): Promise<void> {
   const parsed = parseFlags(options.args, {
-    valued: ["kind", "pane", "session", "since", "limit"],
+    valued: ["kind", "pane", "agent", "created-by", "session", "since", "until", "limit"],
   });
   const query = parsed.positionals[0];
   if (query === undefined || parsed.positionals.length !== 1) {
@@ -337,8 +353,11 @@ async function cmdSearch(options: CliOptions): Promise<void> {
     query,
     kind: parseKind(flagValue(parsed.flags, "kind")),
     paneId: flagValue(parsed.flags, "pane"),
+    agentSession: flagValue(parsed.flags, "agent"),
+    createdBy: parseCreatedBy(flagValue(parsed.flags, "created-by")),
     session: flagValue(parsed.flags, "session"),
-    since: flagValue(parsed.flags, "since"),
+    since: flagIso(parsed.flags, "since"),
+    until: flagIso(parsed.flags, "until"),
     limit: flagInt(parsed.flags, "limit"),
     snapshot,
   });
@@ -346,6 +365,24 @@ async function cmdSearch(options: CliOptions): Promise<void> {
     contract: CONTRACT,
     ok: true,
     command: "search",
+    session: sessionName(snapshot, options),
+    ...result,
+    generated_at: now(),
+  });
+}
+
+async function cmdVerify(options: CliOptions): Promise<void> {
+  const parsed = parseFlags(options.args, {});
+  const id = parsed.positionals[0];
+  if (parsed.positionals.length > 1) {
+    usageFail("verify accepts at most one artifact_id");
+  }
+  const snapshot = await snapshotOrFail(options);
+  const result = await verifyArtifacts({ artifactId: id, snapshot });
+  emit({
+    contract: CONTRACT,
+    ok: true,
+    command: "verify",
     session: sessionName(snapshot, options),
     ...result,
     generated_at: now(),
@@ -384,7 +421,7 @@ async function main(): Promise<void> {
         plugin: PLUGIN_ID,
         version: PLUGIN_VERSION,
         usage:
-          "bun run src/cli.ts <capability|help|register|list|get|search|delete> " +
+          "bun run src/cli.ts <capability|help|register|list|get|search|verify|delete> " +
           `— planned: ${PLANNED_COMMANDS.join("|")}`,
       });
       return;
@@ -400,13 +437,16 @@ async function main(): Promise<void> {
     case "search":
       await cmdSearch(options);
       return;
+    case "verify":
+      await cmdVerify(options);
+      return;
     case "delete":
       await cmdDelete(options);
       return;
     default:
       if ((PLANNED_COMMANDS as readonly string[]).includes(options.command)) {
         fail(
-          `command '${options.command}' is part of the draft contract but not implemented yet (T3-T4: #142/#143)`,
+          `command '${options.command}' is part of the draft contract but not implemented yet (T4: #143)`,
           1,
           "contract_draft",
           { command: options.command },
