@@ -9,24 +9,28 @@ Provider transcript indexer for herdr panes
 herdr plugin install rebuildup/herdr-plugins/plugins/conversations
 ```
 
-Prerequisites: herdr ≥ 0.9.0, Bun on `PATH`. `index`/`refresh`/`sessions`
+Prerequisites: herdr ≥ 0.9.0, Bun on `PATH`. `index`/`refresh`
 additionally need a reachable herdr session (`--session`/`--socket` or
-the default socket); `capability` works offline.
+the default socket); `capability`, `sessions --offline`, `history`,
+`search`, `show`, and `usage --offline` work without one (live-binding
+checks degrade to `live: null`).
 
 ## What it does
 
 Reads provider-owned session transcripts — never PTY text — and
 normalizes them into structured events:
 
-- **claude** (v1): `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`
-  (honors `CLAUDE_CONFIG_DIR`). Emits `turn`, `user_message`,
-  `assistant_message` (with `model` + `usage` token fields),
-  `tool_call`, `tool_result`, and `system` events. Every event carries
-  the herdr identity observed at index time (host, session,
-  workspace/tab/pane, `agent_session`, `state_change_seq`).
-- **codex / opencode**: declared in `capability` as `unsupported`
-  (adapters land in #87); panes running them are reported in
-  `skipped`, never fabricated.
+- **claude** (supported): `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`
+  (honors `CLAUDE_CONFIG_DIR`).
+- **codex** (supported): rollout JSONL under `$CODEX_HOME/sessions/**`
+  (honors `CODEX_HOME`), matched by session id.
+- **opencode** (supported): SQLite `opencode.db` under
+  `$OPENCODE_DATA_DIR`/`$XDG_DATA_HOME/opencode`, opened read-only.
+
+Every event carries the herdr identity observed at index time (host,
+session, workspace/tab/pane, `agent_session`, `state_change_seq`)
+plus `turn_index`; `assistant_message` events carry `model` + `usage`
+token fields for #28.
 
 Transcript resolution follows the T3 `usageTranscriptReader`
 mechanism: `agent_session.value` (a session **id**, not a path) +
@@ -36,9 +40,10 @@ ADR-0012.
 
 Indexing is incremental: a byte-offset cursor plus an FNV-1a guard
 detects in-place rewrites; only newline-terminated lines commit;
-unterminated tails wait for the next scan. State and the append-only
-event log live only under `HERDR_PLUGIN_STATE_DIR`
-(single-writer lock + atomic rename).
+unterminated tails wait for the next scan (opencode rescans rewrite
+its event log atomically each run). State and the append-only event
+log live only under `HERDR_PLUGIN_STATE_DIR` (single-writer lock +
+atomic rename).
 
 ## Usage
 
@@ -48,14 +53,31 @@ bun run src/cli.ts capability
 bun run src/cli.ts index [--session NAME] [--socket PATH] [--timeout MS]
 bun run src/cli.ts refresh   # alias of index
 bun run src/cli.ts sessions [--offline]
+bun run src/cli.ts history (--pane PANE | --session-id ID) [--limit N] [--cursor OFF] [--offline]
+bun run src/cli.ts search <query> [--pane PANE] [--session-id ID] [--provider ID] [--type TYPE] [--limit N] [--cursor CUR] [--offline]
+bun run src/cli.ts usage [--pane PANE] [--session-id ID] [--provider ID] [--limit N] [--cursor CUR] [--offline]
+bun run src/cli.ts show <event-id|tool:ID|turn:N> [--pane PANE] [--session-id ID] [--provider ID] [--offline]
 ```
 
 - `index`/`refresh` → `{indexed: [...], skipped: [...]}` — skipped
   entries carry explicit reasons (`unsupported_provider`,
-  `unknown_provider`, `no_agent_session`, `transcript_missing`).
+  `unknown_provider`, `no_agent_session`, `transcript_missing`,
+  `session_not_found`, `unsupported_layout`).
 - `sessions` → indexed transcripts with identity binding, live
-  binding, and `stale`/`stale_reason` (`agent_session_changed` when a
-  pane id was reused by a different agent generation).
+  binding, `stale`/`stale_reason` (`agent_session_changed` when a
+  pane id was reused by a different agent generation), and read-time
+  `transcript_present`.
+- `history`/`search`/`usage` → bounded pages with opaque cursors;
+  safe across index updates (append-only logs neither duplicate nor
+  skip; rewritten logs are flagged via `restarted_sessions`).
+- `search` → case-insensitive substring match over `text`,
+  `tool_name`, `subtype`, `model`; results carry session/event
+  references.
+- `usage` → pages only events carrying provider `usage` (the read
+  surface for #28; aggregation stays consumer-side).
+- `show` → structured fetch by stable `event_id`, `tool:<id>`, or
+  `turn:<n>`; missing transcripts/events are reported explicitly,
+  never fabricated.
 
 Full contract: `docs/contracts/conversations-v1.md`.
 Spec: `docs/specs/conversations.md`. Design: ADR-0012.

@@ -12,7 +12,7 @@
  * verdict against a live snapshot. No PTY text is ever read.
  */
 
-import { open, stat } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -39,6 +39,15 @@ import {
 import { resolveOpenCodeTranscript, scanOpenCodeSession } from "./opencode";
 import { isSupported, PROVIDERS, providerDescriptor } from "./providers";
 import {
+  decodeOffsetCursor,
+  encodeOffsetCursor,
+  matchAll,
+  type PagedScanResult,
+  readEventPage,
+  type ScanTarget,
+  scanPagedSessions,
+} from "./read";
+import {
   appendEvents,
   eventsFilePath,
   loadState,
@@ -63,6 +72,10 @@ interface CliOptions extends CallOptions {
   limit: number | undefined;
   /** `history --cursor` (opaque byte offset). */
   cursor: string | undefined;
+  /** `search`/`show`/`usage --provider` filter. */
+  provider: string | undefined;
+  /** `search --type` event-type filter. */
+  type: string | undefined;
 }
 
 function parseArgs(argv: string[]): CliOptions {
@@ -76,6 +89,8 @@ function parseArgs(argv: string[]): CliOptions {
     sessionId: undefined,
     limit: undefined,
     cursor: undefined,
+    provider: undefined,
+    type: undefined,
   };
   const rest: string[] = [];
   for (let i = 0; i < args.length; i += 1) {
@@ -91,6 +106,10 @@ function parseArgs(argv: string[]): CliOptions {
       if (Number.isFinite(value) && value > 0) options.limit = value;
     } else if (arg === "--cursor") {
       options.cursor = args[++i];
+    } else if (arg === "--provider") {
+      options.provider = args[++i];
+    } else if (arg === "--type") {
+      options.type = args[++i];
     } else if (arg === "--socket") {
       options.socketPath = args[++i];
     } else if (arg === "--timeout") {
@@ -138,7 +157,7 @@ async function cmdCapability(): Promise<void> {
     version: PLUGIN_VERSION,
     read_only: false,
     mutation_commands: ["index", "refresh"],
-    commands: ["capability", "index", "refresh", "sessions", "history"],
+    commands: ["capability", "index", "refresh", "sessions", "history", "search", "show", "usage"],
     providers: PROVIDERS,
     event_types: [
       "turn",
@@ -151,7 +170,7 @@ async function cmdCapability(): Promise<void> {
     notes: [
       "Transcript resolution uses agent_session.value (session id) + pane cwd + provider-known directories; agent_session_path is not exposed by herdr AgentInfo (upstream gap, ADR-0012).",
       "PTY text is never read; unsupported providers and missing transcripts are reported explicitly.",
-      "Normalized events are appended to <stateDir>/events/<provider>:<session>.jsonl; `history` pages them, search/pagination refinements land in T3 (#88).",
+      "Normalized events are appended to <stateDir>/events/<provider>:<session>.jsonl; `history`/`search`/`usage` page them with opaque cursors, `show` resolves stable event/tool/turn references (T3 #88).",
       "opencode sessions are fully rescanned and their event log rewritten on each index (SQLite rows are mutable); file-backed providers scan incrementally.",
     ],
     generated_at: now(),
@@ -536,42 +555,53 @@ async function cmdIndex(options: CliOptions): Promise<void> {
   });
 }
 
+interface LiveContext {
+  liveByPane: Map<string, LiveBinding>;
+  liveSession: string | null;
+}
+
+/**
+ * Best-effort live snapshot for staleness checks; unreachable socket
+ * or `--offline` degrades to null — never a fabricated verdict.
+ */
+async function liveContext(options: CliOptions): Promise<LiveContext | null> {
+  if (hasFlag(options.args, "--offline")) return null;
+  try {
+    const config = await loadConfig();
+    const callOptions: CallOptions = {
+      session: options.session,
+      socketPath: options.socketPath,
+    };
+    if (options.timeoutMs !== undefined || config.timeoutMs !== undefined) {
+      callOptions.timeoutMs = effectiveTimeoutMs(options, config);
+    }
+    const snapshot = await sessionSnapshot(callOptions);
+    const liveByPane = new Map<string, LiveBinding>();
+    for (const { pane, agent } of paneAgentEntries(snapshot)) {
+      liveByPane.set(pane.pane_id, {
+        pane_id: pane.pane_id,
+        agent_session_value: agentSessionValue(agent),
+        state_change_seq:
+          typeof agent.state_change_seq === "number" ? agent.state_change_seq : null,
+      });
+    }
+    return { liveByPane, liveSession: herdrSessionName(snapshot, options) };
+  } catch {
+    return null;
+  }
+}
+
 async function cmdSessions(options: CliOptions): Promise<void> {
   const state = await loadState();
-  const offline = hasFlag(options.args, "--offline");
+  const live = await liveContext(options);
+  const liveByPane = live?.liveByPane ?? new Map<string, LiveBinding>();
+  const liveSession = live?.liveSession ?? null;
 
-  // Live bindings for staleness checks; unreachable socket degrades to
-  // `live: null` + no stale verdict — never a fabricated one.
-  let liveByPane = new Map<string, LiveBinding>();
-  let liveSession: string | null = null;
-  if (!offline) {
-    try {
-      const config = await loadConfig();
-      const callOptions: CallOptions = {
-        session: options.session,
-        socketPath: options.socketPath,
-      };
-      if (options.timeoutMs !== undefined || config.timeoutMs !== undefined) {
-        callOptions.timeoutMs = effectiveTimeoutMs(options, config);
-      }
-      const snapshot = await sessionSnapshot(callOptions);
-      liveSession = herdrSessionName(snapshot, options);
-      for (const { pane, agent } of paneAgentEntries(snapshot)) {
-        liveByPane.set(pane.pane_id, {
-          pane_id: pane.pane_id,
-          agent_session_value: agentSessionValue(agent),
-          state_change_seq:
-            typeof agent.state_change_seq === "number" ? agent.state_change_seq : null,
-        });
-      }
-    } catch {
-      liveByPane = new Map();
-    }
-  }
-
-  const sessions = Object.values(state.sessions)
-    .sort((a, b) => (b.last_event_at ?? "").localeCompare(a.last_event_at ?? ""))
-    .map((record) => {
+  const records = Object.values(state.sessions).sort((a, b) =>
+    (b.last_event_at ?? "").localeCompare(a.last_event_at ?? ""),
+  );
+  const sessions = await Promise.all(
+    records.map(async (record) => {
       const paneId = record.identity?.pane_id ?? null;
       const live = paneId !== null ? (liveByPane.get(paneId) ?? null) : null;
       const { stale, reason } = bindingIsStale(record, live ?? undefined);
@@ -594,9 +624,11 @@ async function cmdSessions(options: CliOptions): Promise<void> {
         first_event_at: record.first_event_at,
         last_event_at: record.last_event_at,
         last_indexed_at: record.last_indexed_at,
+        transcript_present: await pathExists(record.transcript_path),
       };
       return entry;
-    });
+    }),
+  );
 
   emit({
     contract: CONTRACT,
@@ -607,11 +639,31 @@ async function cmdSessions(options: CliOptions): Promise<void> {
   });
 }
 
-// --- history ----------------------------------------------------------------
+// --- read APIs: history / search / show / usage (T3 #88) --------------------
 
 const DEFAULT_HISTORY_LIMIT = 200;
 const MAX_HISTORY_LIMIT = 1_000;
-const HISTORY_READ_CHUNK = 256 * 1024;
+const DEFAULT_SEARCH_LIMIT = 50;
+const MAX_SEARCH_LIMIT = 500;
+const MAX_SHOW_RESULTS = 200;
+
+const EVENT_TYPES = [
+  "turn",
+  "user_message",
+  "assistant_message",
+  "tool_call",
+  "tool_result",
+  "system",
+] as const;
+
+/** Fields `search` matches against (lowercased substring, see spec). */
+const SEARCHABLE_FIELDS = ["text", "tool_name", "subtype", "model"] as const;
+
+async function pathExists(p: string): Promise<boolean> {
+  return stat(p)
+    .then(() => true)
+    .catch(() => false);
+}
 
 /** Pick the session record a `history` invocation refers to. */
 function resolveHistoryRecord(
@@ -644,121 +696,35 @@ function resolveHistoryRecord(
   return { error: "history requires --pane PANE or --session-id PROVIDER:ID" };
 }
 
-interface EventPage {
-  events: Record<string, unknown>[];
-  /** Byte offset of the first unprocessed byte; pass back as --cursor. */
-  next_cursor: number;
-  has_more: boolean;
-  malformed_lines: number;
-  duplicates_skipped: number;
-  present: boolean;
-  size: number;
-}
-
-/**
- * Read up to `limit` normalized events starting at byte `offset`.
- * Only newline-terminated lines are consumed; a partial tail is left
- * for the next page. Malformed lines are skipped and counted; repeated
- * event_ids inside one page are dropped and counted — the index is
- * append-only, so a duplicate means a rewrite raced the read.
- */
-async function readEventPage(
-  key: string,
-  offset: number,
-  limit: number,
-): Promise<EventPage | { error: string }> {
-  const file = eventsFilePath(key);
-  let handle: Awaited<ReturnType<typeof open>>;
-  try {
-    handle = await open(file, "r");
-  } catch {
-    return {
-      events: [],
-      next_cursor: offset,
-      has_more: false,
-      malformed_lines: 0,
-      duplicates_skipped: 0,
-      present: false,
-      size: 0,
-    };
-  }
-  try {
-    const { size } = await handle.stat();
-    if (offset > size) {
-      await handle.close();
-      return {
-        error: `cursor ${offset} beyond events file size ${size} (rewritten? restart without --cursor)`,
-      };
-    }
-    const events: Record<string, unknown>[] = [];
-    const seen = new Set<string>();
-    let malformed = 0;
-    let duplicates = 0;
-    let pending = Buffer.alloc(0);
-    let pendingStart = offset;
-    let position = offset;
-    let eof = offset >= size;
-    const chunk = Buffer.allocUnsafe(HISTORY_READ_CHUNK);
-
-    for (;;) {
-      if (events.length >= limit) break;
-      let newline = pending.indexOf(0x0a);
-      while (newline === -1 && !eof) {
-        const { bytesRead } = await handle.read(chunk, 0, chunk.length, position);
-        if (bytesRead === 0) {
-          eof = true;
-        } else {
-          position += bytesRead;
-          pending =
-            pending.length === 0
-              ? Buffer.from(chunk.subarray(0, bytesRead))
-              : Buffer.concat([pending, Buffer.from(chunk.subarray(0, bytesRead))]);
-        }
-        newline = pending.indexOf(0x0a);
-      }
-      if (newline === -1) break;
-      let lineBuf = pending.subarray(0, newline);
-      if (lineBuf.length > 0 && lineBuf[lineBuf.length - 1] === 0x0d) {
-        lineBuf = lineBuf.subarray(0, lineBuf.length - 1);
-      }
-      pendingStart += newline + 1;
-      pending = pending.subarray(newline + 1);
-      const line = lineBuf.toString("utf8");
-      if (line.trim() === "") continue;
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(line);
-      } catch {
-        malformed += 1;
-        continue;
-      }
-      const eventId =
-        typeof parsed === "object" && parsed !== null
-          ? (parsed as Record<string, unknown>).event_id
-          : undefined;
-      if (typeof eventId === "string") {
-        if (seen.has(eventId)) {
-          duplicates += 1;
-          continue;
-        }
-        seen.add(eventId);
-      }
-      events.push(parsed as Record<string, unknown>);
-    }
-    await handle.close();
-    return {
-      events,
-      next_cursor: pendingStart,
-      has_more: pendingStart < size,
-      malformed_lines: malformed,
-      duplicates_skipped: duplicates,
-      present: true,
-      size,
-    };
-  } catch (err) {
-    await handle.close().catch(() => undefined);
-    return { error: err instanceof Error ? err.message : "read_failed" };
-  }
+/** Session block shared by history/search/show/usage responses. */
+async function sessionReadEntry(
+  record: SessionRecord,
+  live: LiveBinding | null,
+  liveSession: string | null,
+): Promise<Record<string, unknown>> {
+  const { stale, reason } = bindingIsStale(record, live ?? undefined);
+  return {
+    key: record.key,
+    provider: record.provider,
+    provider_status: providerDescriptor(record.provider)?.status ?? "unknown",
+    session_id: record.session_id,
+    cwd: record.cwd,
+    transcript_path: record.transcript_path,
+    status: record.status,
+    error: record.error,
+    identity: record.identity,
+    live,
+    live_session: liveSession,
+    stale,
+    stale_reason: reason,
+    event_count: record.event_count,
+    turn_count: record.turn_count,
+    first_event_at: record.first_event_at,
+    last_event_at: record.last_event_at,
+    last_indexed_at: record.last_indexed_at,
+    transcript_present: await pathExists(record.transcript_path),
+    events_present: await pathExists(eventsFilePath(record.key)),
+  };
 }
 
 async function cmdHistory(options: CliOptions): Promise<void> {
@@ -769,6 +735,7 @@ async function cmdHistory(options: CliOptions): Promise<void> {
       resolved.error,
       resolved.error.startsWith("history requires") ? 2 : 1,
       "session_not_found",
+      { hint: "run `index` to build the transcript index, or check the selector" },
     );
   }
   const { record, note } = resolved;
@@ -783,43 +750,11 @@ async function cmdHistory(options: CliOptions): Promise<void> {
     offset = parsed;
   }
 
-  // Best-effort live binding for the staleness verdict; unreachable
-  // socket degrades to live:null — never a fabricated verdict.
-  let live: LiveBinding | null = null;
-  let liveSession: string | null = null;
-  if (!hasFlag(options.args, "--offline")) {
-    try {
-      const config = await loadConfig();
-      const callOptions: CallOptions = {
-        session: options.session,
-        socketPath: options.socketPath,
-      };
-      if (options.timeoutMs !== undefined || config.timeoutMs !== undefined) {
-        callOptions.timeoutMs = effectiveTimeoutMs(options, config);
-      }
-      const snapshot = await sessionSnapshot(callOptions);
-      liveSession = herdrSessionName(snapshot, options);
-      const paneId = record.identity?.pane_id ?? null;
-      if (paneId !== null) {
-        for (const { pane, agent } of paneAgentEntries(snapshot)) {
-          if (pane.pane_id === paneId) {
-            live = {
-              pane_id: pane.pane_id,
-              agent_session_value: agentSessionValue(agent),
-              state_change_seq:
-                typeof agent.state_change_seq === "number" ? agent.state_change_seq : null,
-            };
-            break;
-          }
-        }
-      }
-    } catch {
-      live = null;
-    }
-  }
-  const { stale, reason } = bindingIsStale(record, live ?? undefined);
+  const liveCtx = await liveContext(options);
+  const paneId = record.identity?.pane_id ?? null;
+  const live = paneId !== null ? (liveCtx?.liveByPane.get(paneId) ?? null) : null;
 
-  const page = await readEventPage(record.key, offset, limit);
+  const page = await readEventPage(record.key, offset, limit, matchAll);
   if ("error" in page) {
     fail(page.error, 1, "cursor_invalid");
   }
@@ -827,39 +762,293 @@ async function cmdHistory(options: CliOptions): Promise<void> {
   emit({
     contract: CONTRACT,
     command: "history",
-    session: {
-      key: record.key,
-      provider: record.provider,
-      provider_status: providerDescriptor(record.provider)?.status ?? "unknown",
-      session_id: record.session_id,
-      cwd: record.cwd,
-      transcript_path: record.transcript_path,
-      status: record.status,
-      error: record.error,
-      identity: record.identity,
-      live,
-      live_session: liveSession,
-      stale,
-      stale_reason: reason,
-      event_count: record.event_count,
-      turn_count: record.turn_count,
-      first_event_at: record.first_event_at,
-      last_event_at: record.last_event_at,
-      last_indexed_at: record.last_indexed_at,
-    },
+    session: await sessionReadEntry(record, live, liveCtx?.liveSession ?? null),
     selector_note: note,
-    events: page.events,
+    events: page.matches.map((m) => m.event),
     page: {
       limit,
       offset,
-      returned: page.events.length,
-      next_cursor: String(page.next_cursor),
+      returned: page.matches.length,
+      next_cursor: String(page.next_offset),
       has_more: page.has_more,
       malformed_lines: page.malformed_lines,
       duplicates_skipped: page.duplicates_skipped,
       events_present: page.present,
       events_size: page.size,
     },
+    generated_at: now(),
+  });
+}
+
+// --- search / usage / show ---------------------------------------------------
+
+/**
+ * Select the session records a read command covers. `--pane`,
+ * `--session-id`, and `--provider` combine as AND filters; with none
+ * given every indexed session is covered. Order is by record key so
+ * cursor paging is deterministic across invocations.
+ */
+function selectRecords(
+  state: { sessions: Record<string, SessionRecord> },
+  options: CliOptions,
+): { records: SessionRecord[]; note: string | null } | { error: string } {
+  let records = Object.values(state.sessions);
+  let note: string | null = null;
+  if (options.pane !== undefined) {
+    const before = records.length;
+    records = records.filter((r) => r.identity?.pane_id === options.pane);
+    if (records.length === 0) {
+      return { error: `no indexed session for pane ${options.pane}` };
+    }
+    if (before > records.length) note = "filtered_by_pane";
+  }
+  if (options.sessionId !== undefined) {
+    const ref = options.sessionId;
+    const exact = state.sessions[ref];
+    if (exact) {
+      records = records.filter((r) => r.key === exact.key);
+    } else {
+      records = records.filter((r) => r.session_id === ref);
+    }
+    if (records.length === 0) {
+      return { error: `no indexed session for ${ref}` };
+    }
+    if (records.length > 1) note = "ambiguous_session_id";
+  }
+  if (options.provider !== undefined) {
+    records = records.filter((r) => r.provider === options.provider);
+    if (records.length === 0) {
+      return { error: `no indexed session for provider ${options.provider}` };
+    }
+  }
+  records.sort((a, b) => a.key.localeCompare(b.key));
+  return { records, note };
+}
+
+function positionalArgs(options: CliOptions): string[] {
+  return options.args.filter((a) => a !== "--offline");
+}
+
+function readLimit(options: CliOptions, fallback: number, max: number): number {
+  return Math.min(Math.floor(options.limit ?? fallback), max);
+}
+
+/**
+ * Shared paging driver for `search`/`usage`: resolves records, decodes
+ * the opaque per-session offset cursor, scans, and emits the common
+ * envelope. `matcher` returns the matched field names or null.
+ */
+async function runPagedRead(
+  options: CliOptions,
+  command: string,
+  extra: Record<string, unknown>,
+  matcher: Parameters<typeof scanPagedSessions>[2],
+  limit: number,
+): Promise<void> {
+  const state = await loadState();
+  const selected = selectRecords(state, options);
+  if ("error" in selected) {
+    fail(selected.error, 1, "session_not_found", {
+      hint: "run `index` to build the transcript index, or check the selector",
+    });
+  }
+  const { records, note } = selected;
+
+  let decoded: Record<string, number> = {};
+  if (options.cursor !== undefined) {
+    const parsed = decodeOffsetCursor(options.cursor);
+    if (parsed === null) {
+      fail(`invalid --cursor: ${options.cursor}`, 2);
+    }
+    decoded = parsed;
+  }
+
+  const liveCtx = await liveContext(options);
+  const targets: ScanTarget[] = records.map((r) => ({
+    key: r.key,
+    offset: decoded[r.key] ?? 0,
+  }));
+  const scan = await scanPagedSessions(targets, limit, matcher);
+  if ("error" in scan) {
+    fail(scan.error, 1, "read_failed");
+  }
+  const page: PagedScanResult = scan;
+
+  const sessions = await Promise.all(
+    records.map(async (record) => {
+      const paneId = record.identity?.pane_id ?? null;
+      const live = paneId !== null ? (liveCtx?.liveByPane.get(paneId) ?? null) : null;
+      return sessionReadEntry(record, live, liveCtx?.liveSession ?? null);
+    }),
+  );
+
+  emit({
+    contract: CONTRACT,
+    command,
+    ...extra,
+    selector_note: note,
+    results: page.matches.map((m) => ({
+      session_key: m.key,
+      event_id: m.event.event_id ?? null,
+      type: m.event.type ?? null,
+      timestamp: m.event.timestamp ?? null,
+      turn_index: m.event.turn_index ?? null,
+      matched_fields: m.fields,
+      event: m.event,
+    })),
+    page: {
+      limit,
+      returned: page.matches.length,
+      next_cursor: page.has_more ? encodeOffsetCursor(page.offsets) : null,
+      has_more: page.has_more,
+      malformed_lines: page.malformed_lines,
+      duplicates_skipped: page.duplicates_skipped,
+      restarted_sessions: page.restarted,
+    },
+    sessions,
+    ...(state.sessions && Object.keys(state.sessions).length === 0
+      ? { hint: "no indexed sessions; run `index` to build the transcript index" }
+      : {}),
+    generated_at: now(),
+  });
+}
+
+async function cmdSearch(options: CliOptions): Promise<void> {
+  const query = positionalArgs(options).join(" ").trim();
+  if (query === "") {
+    fail("search requires a query", 2);
+  }
+  if (options.type !== undefined && !(EVENT_TYPES as readonly string[]).includes(options.type)) {
+    fail(`invalid --type: ${options.type} (expected one of ${EVENT_TYPES.join(", ")})`, 2);
+  }
+  const needle = query.toLowerCase();
+  const typeFilter = options.type;
+  // Case-insensitive substring match over the searchable payload
+  // fields; no tokenization in v1 (see docs/specs/conversations.md).
+  const matcher = (event: Record<string, unknown>): string[] | null => {
+    if (typeFilter !== undefined && event.type !== typeFilter) return null;
+    const fields: string[] = [];
+    for (const field of SEARCHABLE_FIELDS) {
+      const value = event[field];
+      if (typeof value === "string" && value.toLowerCase().includes(needle)) {
+        fields.push(field);
+      }
+    }
+    return fields.length > 0 ? fields : null;
+  };
+  await runPagedRead(
+    options,
+    "search",
+    {
+      query,
+      filters: {
+        pane_id: options.pane ?? null,
+        session_id: options.sessionId ?? null,
+        provider: options.provider ?? null,
+        type: typeFilter ?? null,
+      },
+    },
+    matcher,
+    readLimit(options, DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT),
+  );
+}
+
+async function cmdUsage(options: CliOptions): Promise<void> {
+  // Read surface for #28: pages only events carrying provider-reported
+  // usage; aggregation stays consumer-side.
+  const matcher = (event: Record<string, unknown>): string[] | null =>
+    typeof event.usage === "object" && event.usage !== null ? ["usage"] : null;
+  await runPagedRead(
+    options,
+    "usage",
+    {
+      filters: {
+        pane_id: options.pane ?? null,
+        session_id: options.sessionId ?? null,
+        provider: options.provider ?? null,
+      },
+    },
+    matcher,
+    readLimit(options, DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT),
+  );
+}
+
+async function cmdShow(options: CliOptions): Promise<void> {
+  const ref = positionalArgs(options).join(" ").trim();
+  if (ref === "") {
+    fail("show requires a reference (event id, tool:<id>, or turn:<n>)", 2);
+  }
+
+  const turnMatch = /^turn:(\d+)$/.exec(ref);
+  const toolMatch = /^tool:(.+)$/.exec(ref);
+  let matcher: Parameters<typeof scanPagedSessions>[2];
+  let resolvedKind: string;
+  if (turnMatch) {
+    const turnIndex = Number(turnMatch[1]);
+    resolvedKind = "turn_index";
+    matcher = (event) => (event.turn_index === turnIndex ? ["turn_index"] : null);
+  } else if (toolMatch) {
+    const toolId = toolMatch[1] as string;
+    resolvedKind = "tool_use_id";
+    matcher = (event) => (event.tool_use_id === toolId ? ["tool_use_id"] : null);
+  } else {
+    resolvedKind = "event_id";
+    matcher = (event) => {
+      if (event.event_id === ref) return ["event_id"];
+      if (event.tool_use_id === ref) return ["tool_use_id"];
+      return null;
+    };
+  }
+
+  const state = await loadState();
+  const selected = selectRecords(state, options);
+  if ("error" in selected) {
+    fail(selected.error, 1, "session_not_found", {
+      hint: "run `index` to build the transcript index, or check the selector",
+    });
+  }
+  const { records, note } = selected;
+
+  const liveCtx = await liveContext(options);
+  const targets: ScanTarget[] = records.map((r) => ({ key: r.key, offset: 0 }));
+  const scan = await scanPagedSessions(targets, MAX_SHOW_RESULTS, matcher);
+  if ("error" in scan) {
+    fail(scan.error, 1, "read_failed");
+  }
+
+  // A bare ref may match tool_use_id when no event_id matched; report
+  // the kind actually observed rather than the assumed one.
+  const observed = new Set(scan.matches.flatMap((m) => m.fields));
+  const kind =
+    resolvedKind === "event_id" && !observed.has("event_id") && observed.has("tool_use_id")
+      ? "tool_use_id"
+      : resolvedKind;
+
+  const sessions = await Promise.all(
+    records.map(async (record) => {
+      const paneId = record.identity?.pane_id ?? null;
+      const live = paneId !== null ? (liveCtx?.liveByPane.get(paneId) ?? null) : null;
+      return sessionReadEntry(record, live, liveCtx?.liveSession ?? null);
+    }),
+  );
+
+  emit({
+    contract: CONTRACT,
+    command: "show",
+    ref,
+    resolved: { kind },
+    selector_note: note,
+    results: scan.matches.map((m) => ({
+      session_key: m.key,
+      matched_fields: m.fields,
+      event: m.event,
+    })),
+    matched: scan.matches.length,
+    truncated: scan.has_more,
+    sessions,
+    ...(Object.keys(state.sessions).length === 0
+      ? { hint: "no indexed sessions; run `index` to build the transcript index" }
+      : {}),
     generated_at: now(),
   });
 }
@@ -876,6 +1065,12 @@ async function main(): Promise<void> {
       return cmdSessions(options);
     case "history":
       return cmdHistory(options);
+    case "search":
+      return cmdSearch(options);
+    case "show":
+      return cmdShow(options);
+    case "usage":
+      return cmdUsage(options);
     case "help":
     case "--help":
     case "-h":
@@ -884,7 +1079,7 @@ async function main(): Promise<void> {
         plugin: PLUGIN_ID,
         version: PLUGIN_VERSION,
         usage:
-          "bun run src/cli.ts <capability|index|refresh|sessions|history> [--session NAME] [--session-id ID] [--pane PANE] [--limit N] [--cursor OFF] [--socket PATH] [--timeout MS] [--offline]",
+          "bun run src/cli.ts <capability|index|refresh|sessions|history|search|show|usage> [--session NAME] [--session-id ID] [--pane PANE] [--provider ID] [--type TYPE] [--limit N] [--cursor CUR] [--socket PATH] [--timeout MS] [--offline]",
       });
       return;
     default:

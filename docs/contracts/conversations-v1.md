@@ -29,6 +29,9 @@ bun run src/cli.ts index [--session NAME] [--socket PATH] [--timeout MS]
 bun run src/cli.ts refresh   # alias of index
 bun run src/cli.ts sessions [--offline]
 bun run src/cli.ts history (--pane PANE | --session-id ID) [--limit N] [--cursor OFF] [--offline]
+bun run src/cli.ts search <query> [--pane PANE] [--session-id ID] [--provider ID] [--type TYPE] [--limit N] [--cursor CUR] [--offline]
+bun run src/cli.ts usage [--pane PANE] [--session-id ID] [--provider ID] [--limit N] [--cursor CUR] [--offline]
+bun run src/cli.ts show <ref> [--pane PANE] [--session-id ID] [--provider ID] [--offline]
 ```
 
 - All commands print exactly one JSON document on stdout. Handled
@@ -52,7 +55,7 @@ bun run src/cli.ts history (--pane PANE | --session-id ID) [--limit N] [--cursor
   "version": "0.1.0",
   "read_only": false,
   "mutation_commands": ["index", "refresh"],
-  "commands": ["capability", "index", "refresh", "sessions", "history"],
+  "commands": ["capability", "index", "refresh", "sessions", "history", "search", "show", "usage"],
   "providers": [
     { "id": "claude", "status": "supported", "formats": ["claude-jsonl"] },
     { "id": "codex", "status": "supported", "formats": ["codex-rollout-jsonl"] },
@@ -275,7 +278,8 @@ Lists indexed transcripts, newest activity first:
       "turn_count": 1,
       "first_event_at": "…",
       "last_event_at": "…",
-      "last_indexed_at": "…"
+      "last_indexed_at": "…",
+      "transcript_present": true
     }
   ],
   "count": 1,
@@ -293,6 +297,11 @@ Lists indexed transcripts, newest activity first:
   valid; consumers must not apply a stale index to the new generation.
 - `status` ∈ `ok | missing | error`; `error` carries the scanner's
   failure kind when not `ok`.
+- `transcript_present` — read-time `stat` of `transcript_path`:
+  `false` means the provider-side transcript was deleted or rotated
+  out from under the index (session removal / provider retention).
+  The indexed events remain readable history; the record's `status`
+  only changes on the next `index` run — never silently rewritten.
 
 ## `history`
 
@@ -324,7 +333,7 @@ Response:
 {
   "contract": "herdr-plugins.conversations/v1",
   "command": "history",
-  "session": { "…": "same shape as a sessions[] entry" },
+  "session": { "…": "same shape as a sessions[] entry, plus events_present" },
   "selector_note": null,
   "events": [ { "…": "ConversationEvent" } ],
   "page": {
@@ -348,22 +357,148 @@ for the next page. Malformed event lines are skipped and counted in
 dropped and counted in `page.duplicates_skipped`. A missing events
 file yields `events: []` with `events_present: false` and the
 record's `status`/`error` surfaced — never fabricated events.
+Selector misses carry `error.hint` suggesting `index`; an entirely
+empty index returns the hint on successful empty reads.
+
+## `search`
+
+Searches normalized event payloads across indexed sessions:
+
+```bash
+bun run src/cli.ts search "fix the bug" [--session-id claude:<uuid>] [--provider codex] [--type assistant_message] [--limit 50] [--cursor CUR] [--offline]
+```
+
+- Query is the positional argument (may contain spaces). Matching is
+  a **case-insensitive substring** match over the searchable payload
+  fields `text`, `tool_name`, `subtype`, `model`; v1 does no token
+ ization or stemming (spec: `docs/specs/conversations.md`). Each
+  result reports `matched_fields`.
+- `--type` restricts to one event type (`turn`, `user_message`,
+  `assistant_message`, `tool_call`, `tool_result`, `system`); other
+  values are a usage error (exit 2).
+- Session coverage: `--pane`, `--session-id` (record key or bare
+  session id), and `--provider` combine as AND filters; none → all
+  indexed sessions. Sessions are scanned in record-key order so
+  cursor paging is deterministic.
+- `--limit` defaults to 50, capped at 500.
+
+Response:
+
+```json
+{
+  "contract": "herdr-plugins.conversations/v1",
+  "command": "search",
+  "query": "fix the bug",
+  "filters": { "pane_id": null, "session_id": null, "provider": null, "type": null },
+  "selector_note": null,
+  "results": [
+    {
+      "session_key": "claude:<uuid>",
+      "event_id": "u-1",
+      "type": "user_message",
+      "timestamp": "…",
+      "turn_index": 1,
+      "matched_fields": ["text"],
+      "event": { "…": "full ConversationEvent" }
+    }
+  ],
+  "page": {
+    "limit": 50,
+    "returned": 1,
+    "next_cursor": "eyJ2IjoxLCJvIjp7…",
+    "has_more": false,
+    "malformed_lines": 0,
+    "duplicates_skipped": 0,
+    "restarted_sessions": []
+  },
+  "sessions": [ { "…": "same shape as a sessions[] entry, plus events_present" } ],
+  "generated_at": "…"
+}
+```
+
+### Paging contract (search / usage)
+
+`page.next_cursor` is an **opaque** token (base64url JSON) encoding
+the per-session byte offsets of event logs not yet fully consumed.
+Pass it back verbatim as `--cursor`; a malformed token is a usage
+error (exit 2). Because file-backed event logs are append-only,
+index updates between pages only append new events — paging neither
+duplicates nor skips matches. When a log was rewritten smaller
+(opencode rescan), the affected session restarts at offset 0 and its
+key appears in `page.restarted_sessions` (duplicates possible,
+explicitly flagged). Sessions whose events file is missing
+contribute no matches; their `sessions[]` entry shows
+`events_present: false` with the record's `status`/`error`.
+
+## `usage`
+
+Pages only events carrying provider-reported `usage` (the read
+surface #28 consumes; aggregation stays consumer-side). Same
+selectors, cursor, and envelope as `search`, minus `query`/`filters.type`;
+`matched_fields` is always `["usage"]`.
+
+## `show`
+
+Resolves a stable structured reference to the underlying event(s):
+
+```bash
+bun run src/cli.ts show <ref> [--session-id claude:<uuid>] [--provider codex] [--offline]
+```
+
+`<ref>` forms:
+
+- bare value — union of exact `event_id` and exact `tool_use_id`
+  matches across the selected sessions; `resolved.kind` reports
+  which kind matched (`event_id` wins when both appear).
+- `tool:<tool_use_id>` — the `tool_call`/`tool_result` pair(s) for
+  that call id.
+- `turn:<n>` — every event with `turn_index == n` (the `turn`
+  boundary marker included).
+
+```json
+{
+  "contract": "herdr-plugins.conversations/v1",
+  "command": "show",
+  "ref": "tool-1",
+  "resolved": { "kind": "tool_use_id" },
+  "selector_note": null,
+  "results": [ { "session_key": "…", "matched_fields": ["tool_use_id"], "event": { "…": "ConversationEvent" } } ],
+  "matched": 2,
+  "truncated": false,
+  "sessions": [ { "…": "same shape as a sessions[] entry, plus events_present" } ],
+  "generated_at": "…"
+}
+```
+
+Results are capped at 200 across all selected sessions; `truncated:
+true` means more matches exist — narrow with `--session-id`/`--pane`.
+Approval/user-input style references are **not** derivable: provider
+transcripts do not record them and `pane.agent_status_changed` is too
+coarse (same upstream gap as #8) — nothing is fabricated.
 
 ## Errors
 
 `kind` values: `session_unreachable` (herdr socket unreachable for
-`index`; live checks in `sessions`/`history` are *not* errors — they
-degrade to `live: null`), `session_not_found` (`history` selector
-matched no indexed record), `cursor_invalid` (`--cursor` beyond the
-events file — rewritten log), plus scanner-reported
+`index`; live checks in `sessions`/`history`/`search`/`show`/`usage`
+are *not* errors — they degrade to `live: null`),
+`session_not_found` (a `--pane`/`--session-id`/`--provider` selector
+matched no indexed record; `error.hint` suggests `index`),
+`cursor_invalid` (`history --cursor` beyond the events file —
+rewritten log), `read_failed` (event-log read error during
+`search`/`show`/`usage`), plus scanner-reported
 `transcript_missing`, `open_failed`, `read_failed`, `sqlite_*`
 surfaced per-session in `skipped` / `sessions[].error`. Usage errors
-exit 2.
+exit 2 (including a malformed `search`/`usage` cursor token and an
+invalid `--type`).
 
 ## Out of scope (v1)
 
-- Search, filtering, and richer pagination — T3 (#88); `history`
-  provides ordered byte-cursor paging only.
+- Ranked/full-text search — v1 is bounded case-insensitive substring
+  matching over `text`, `tool_name`, `subtype`, `model`; tokenization
+  and relevance ranking are deferred.
+- Approval/user-input event references — not derivable from provider
+  transcripts; `pane.agent_status_changed` granularity is an upstream
+  gap shared with #8.
 - opencode pre-SQLite `storage/**.json` file layout and codex
   `.jsonl.zst` archived rollouts — explicit `unsupported_layout` /
   `transcript_missing`, never decompressed or guessed.
