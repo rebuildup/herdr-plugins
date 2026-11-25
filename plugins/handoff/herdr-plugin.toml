@@ -1,6 +1,6 @@
 id = "rebuildup.handoff"
 name = "Handoff"
-version = "0.1.0"
+version = "0.2.0"
 min_herdr_version = "0.9.0"
 description = "Handoff / delegation foundation: versioned handoff records binding a source pane/agent generation to a payload of references (conversations, checkpoints, excerpts) plus a status lifecycle."
 platforms = ["linux", "macos", "windows"]
@@ -8,6 +8,7 @@ platforms = ["linux", "macos", "windows"]
 # No build step: the plugin is dependency-free TypeScript executed by Bun
 # (runtime prerequisite, see plugins/handoff/README.md).
 #
-# No [[actions]] / [[events]] / [[startup]] yet: T1 (#103) ships the
-# payload contract, state store, and read-side commands only. Execution
-# (workspace/pane creation, agent.start, status transitions) is T2 (#104).
+# No [[actions]] / [[events]] / [[startup]]: the plugin is CLI-only.
+# T1 (#103) shipped the payload contract, state store, and read-side
+# commands; T2 (#104) adds same-host execute/resume-info. Cross-machine
+# handoff is T3 (#105).

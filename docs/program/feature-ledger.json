@@ -300,10 +300,10 @@
         "docs/orchestration-v2/provider-switching-and-context.md"
       ],
       "classification": "plugin",
-      "issues": [6, 103],
+      "issues": [6, 103, 104],
       "depends_on": ["conversations", "checkpoints"],
       "acceptance": "モデル/Provider 間の作業移管、サブタスク委譲、親子関係、並列作業・worktree handoff、継続/再開、移管結果追跡。既存 Agent Router と project-init の委譲・権限・正本参照を再利用し routing は再実装しない。",
-      "verification": "T1 (#103) 実装済み: plugins/handoff (contract herdr-plugins.handoff/v1: create/list/status/capability)、docs/contracts/handoff-v1.md、docs/specs/handoff.md、ADR-0017 (Agent Router 境界・read-only 調査)。payload は参照+bounded excerpt、stale identity は read-side 報告のみ・適用しない。残り: #104 local 実行 / #105 cross-machine / #106 委譲・lineage (#30/#32 境界は #106 で確定)。"
+      "verification": "T1 (#103) + T2 (#104) 実装済み: plugins/handoff (contract herdr-plugins.handoff/v1: create/list/status/execute/resume-info/capability)、docs/contracts/handoff-v1.md、docs/specs/handoff.md、ADR-0017 (Agent Router 境界・read-only 調査) + ADR-0018 (local execution)。payload は参照+bounded excerpt、stale identity は execute の pre-mutation gate で拒否。T2: 同一 host 内 handoff 実行 (workspace.create/tab.create + agent.start + agent.prompt 注入)、native_resume→portable_context fallback、pending→ready→delivered→done/failed/superseded を observed status で追跡 (--cleanup-on-failure は plugin 作成 pane のみ)。残り: #105 cross-machine / #106 委譲・lineage (#30/#32 境界は #106 で確定)。"
     },
     {
       "id": "mcp-outside-agents",

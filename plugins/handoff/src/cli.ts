@@ -1,14 +1,15 @@
 /**
  * rebuildup.handoff CLI — the versioned structured interface for the
  * handoff/delegation plugin (contract `herdr-plugins.handoff/v1`,
- * issue #103 / parent #6 T1).
+ * issues #103/#104 / parent #6 T1+T2).
  *
- * T1 scope: payload contract + state + read-side commands. `create`
- * records a handoff (source identity + reference payload + strategy +
- * optional target hint); `list`/`status` enumerate and inspect records
- * with honest staleness and missing_ref reporting. Execution
- * (workspace/pane creation, agent.start, status transitions) is T2
- * (#104) and deliberately absent here.
+ * T1 scope (#103): `create` records a handoff (source identity +
+ * reference payload + strategy + optional target hint); `list`/`status`
+ * enumerate and inspect records with honest staleness and missing_ref
+ * reporting. T2 (#104) adds `execute` (same-host target surface creation
+ * via herdr API + `agent.start` + payload prompt injection + status
+ * transitions) and `resume-info` (provider native-resume capability).
+ * Cross-machine handoff is T3 (#105).
  *
  * All commands emit a single JSON document on stdout; diagnostics go to
  * stderr. Exit code 0 on success, 1 on handled errors, 2 on usage.
@@ -21,6 +22,17 @@ import {
   type SessionSnapshot,
   sessionSnapshot,
 } from "../../../packages/herdr-client/src/index";
+import {
+  checkTarget,
+  type ExecuteFlags,
+  type ExecuteResult,
+  executeHandoff,
+  HandoffExecError,
+  type HandoffTransport,
+  herdrTransport,
+  MAX_PROMPT_CHARS,
+  reconcileDelivered,
+} from "./execute";
 import {
   boundedExcerpt,
   buildTransferIdentity,
@@ -41,6 +53,7 @@ import {
   type TargetSpec,
 } from "./model";
 import { missingRefCount, type RefDeps, resolvePayloadRefs } from "./refs";
+import { listResumeProviders, resumeInfo } from "./resume";
 import { loadState, PLUGIN_ID, sessionKeyFor, stateFilePath, updateState } from "./state";
 
 interface CliOptions extends CallOptions {
@@ -75,18 +88,15 @@ function emit(payload: unknown): void {
   process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
 }
 
-function emitError(message: string, code: number): never {
-  const error = {
-    contract: CONTRACT,
-    ok: false,
-    error: { code: code === 2 ? "usage" : "error", message },
+function fail(message: string, code = 1, kind?: string, extra?: Record<string, unknown>): never {
+  const error: Record<string, unknown> = {
+    code: code === 2 ? "usage" : "error",
+    message,
   };
-  process.stderr.write(`${JSON.stringify(error)}\n`);
+  if (kind !== undefined) error.kind = kind;
+  if (extra !== undefined) Object.assign(error, extra);
+  process.stderr.write(`${JSON.stringify({ contract: CONTRACT, ok: false, error })}\n`);
   process.exit(code);
-}
-
-function fail(message: string, code = 1): never {
-  emitError(message, code);
 }
 
 /** Repeatable value flags: --name v1 --name v2. */
@@ -114,6 +124,7 @@ function hasFlag(args: string[], name: string): boolean {
 const VALUE_FLAGS = new Set([
   "--strategy",
   "--provider",
+  "--model",
   "--note",
   "--conversation",
   "--checkpoint",
@@ -121,6 +132,7 @@ const VALUE_FLAGS = new Set([
   "--requirement",
   "--target-pane",
   "--target-workspace",
+  "--wait-ms",
   "--status",
   "--limit",
 ]);
@@ -318,6 +330,7 @@ async function cmdList(options: CliOptions): Promise<void> {
       state_change_seq: record.transfer.state_change_seq,
     },
     target: record.target,
+    target_pane_id: record.execution?.target?.pane_id ?? null,
     ref_count: record.payload.refs.length,
     has_excerpt: record.payload.excerpt !== undefined,
     // Staleness is only meaningful against the record's own session
@@ -345,8 +358,8 @@ async function cmdStatus(options: CliOptions, deps: RefDeps = {}): Promise<void>
   if (pos.length !== 1) fail("status requires exactly one <handoff-id>", 2);
   const id = pos[0] as string;
 
-  const state = await loadState();
-  const record = state.handoffs[id];
+  let state = await loadState();
+  let record = state.handoffs[id];
   if (record === undefined) {
     fail(`handoff not found: ${id}`, 1);
   }
@@ -354,7 +367,22 @@ async function cmdStatus(options: CliOptions, deps: RefDeps = {}): Promise<void>
   const resolveRefs = !hasFlag(options.args, "--no-resolve-refs");
   const snapshot = await snapshotOrNull(options);
   const currentKey = snapshot !== null ? sessionKeyFor(options) : null;
+
+  // Lazy delivered→done reconciliation: the target pane's raw
+  // agent_status inside THIS session's snapshot is the only evidence;
+  // observed state is persisted, never assumed.
+  if (record.status === "delivered" && !hasFlag(options.args, "--no-reconcile")) {
+    const updated = await reconcileDelivered(id, {
+      snapshot,
+      sessionKey: currentKey ?? undefined,
+    });
+    if (updated !== null) record = updated;
+    state = await loadState();
+    record = state.handoffs[id] ?? record;
+  }
+
   const transferCheck = checkTransfer(record, snapshot, currentKey ?? undefined);
+  const targetCheck = checkTarget(record, snapshot, currentKey ?? undefined);
   const resolved = resolveRefs ? await resolvePayloadRefs(record.payload, deps) : null;
 
   emit({
@@ -362,9 +390,100 @@ async function cmdStatus(options: CliOptions, deps: RefDeps = {}): Promise<void>
     command: "status",
     handoff: record,
     transfer_check: transferCheck,
+    target_check: targetCheck,
     payload_resolution: resolved,
     missing_refs: resolved === null ? null : missingRefCount(resolved),
     state_file: stateFilePath(),
+    generated_at: new Date().toISOString(),
+  });
+}
+
+// --- execute / resume-info (T2, #104) -------------------------------------------
+
+function parseNonNegativeMs(raw: string | undefined, flag: string): number | undefined {
+  if (raw === undefined) return undefined;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) {
+    fail(`${flag} must be a non-negative number, got: ${raw}`, 2);
+  }
+  return value;
+}
+
+async function cmdExecute(
+  options: CliOptions,
+  deps: { transport?: HandoffTransport } = {},
+): Promise<void> {
+  const pos = positional(options.args);
+  if (pos.length !== 1) fail("execute requires exactly one <handoff-id>", 2);
+  const id = pos[0] as string;
+
+  const flags: ExecuteFlags = {
+    targetPane: flagValue(options.args, "--target-pane"),
+    targetWorkspace: flagValue(options.args, "--target-workspace"),
+    newWorkspace: hasFlag(options.args, "--new-workspace"),
+    provider: flagValue(options.args, "--provider"),
+    model: flagValue(options.args, "--model"),
+    cleanupOnFailure: hasFlag(options.args, "--cleanup-on-failure"),
+    waitMs: parseNonNegativeMs(flagValue(options.args, "--wait-ms"), "--wait-ms"),
+    dryRun: hasFlag(options.args, "--dry-run"),
+  };
+
+  const transport = deps.transport ?? herdrTransport(options);
+  const sessionKey = sessionKeyFor(options);
+
+  let result: ExecuteResult;
+  try {
+    result = await executeHandoff(id, flags, { transport, sessionKey });
+  } catch (err) {
+    if (err instanceof HandoffExecError) {
+      fail(err.message, err.kind === "usage" ? 2 : 1, err.kind, err.extra);
+    }
+    throw err;
+  }
+
+  if (result.outcome === "dry_run") {
+    emit({
+      contract: CONTRACT,
+      command: "execute",
+      dry_run: true,
+      handoff: result.record,
+      plan: result.plan,
+      decision: result.decision,
+      prompt_text: result.prompt_text,
+      generated_at: new Date().toISOString(),
+    });
+    return;
+  }
+  if (result.outcome === "failed") {
+    fail(
+      `handoff execution failed at step "${result.error?.step ?? "?"}": ${result.error?.message ?? "unknown"}`,
+      1,
+      "execution_failed",
+      { handoff: result.record, step: result.error?.step ?? null },
+    );
+  }
+  emit({
+    contract: CONTRACT,
+    command: "execute",
+    outcome: result.outcome,
+    handoff: result.record,
+    state_file: stateFilePath(),
+    generated_at: new Date().toISOString(),
+  });
+}
+
+async function cmdResumeInfo(options: CliOptions): Promise<void> {
+  const provider = flagValue(options.args, "--provider");
+  const providers = provider !== undefined ? [resumeInfo(provider)] : listResumeProviders();
+  emit({
+    contract: CONTRACT,
+    command: "resume-info",
+    providers,
+    notes: [
+      "native_resume=supported means the provider CLI documents session resume via agent.start args; the session id comes from transfer.agent_session.value.",
+      "unknown/unsupported providers fall back to portable_context at execute time — resume is never guessed.",
+      "agent_session_path-dependent providers are a known upstream gap (#5 survey, #89); they report unsupported until the path is public.",
+    ],
     generated_at: new Date().toISOString(),
   });
 }
@@ -375,19 +494,28 @@ async function cmdCapability(options: CliOptions): Promise<void> {
   emit({
     contract: CONTRACT,
     plugin: PLUGIN_ID,
-    version: "0.1.0",
-    commands: ["create", "list", "status", "capability"],
+    version: "0.2.0",
+    commands: ["create", "list", "status", "execute", "resume-info", "capability"],
     actions: [],
     events: [],
     startup: [],
     state_file: stateFilePath(),
     config_dir: pluginDirs(PLUGIN_ID).configDir,
     socket: options.socketPath ?? null,
-    execution: "not_implemented", // T2 (#104) adds execute/status transitions
+    execution: "same_host",
+    execution_surface: {
+      strategies: ["native_resume", "portable_context"],
+      target_selection: ["--target-pane", "--target-workspace", "--new-workspace"],
+      agent_api: ["workspace.create", "tab.create", "agent.start", "agent.prompt", "agent.wait"],
+      failure_cleanup_flag: "--cleanup-on-failure",
+      observation_flag: "--wait-ms",
+      provider_hint: "opaque label; first '.'-segment is used as the agent.start kind only",
+    },
     limits: {
       max_excerpt_chars: MAX_EXCERPT_CHARS,
       max_payload_refs: MAX_PAYLOAD_REFS,
       max_requirements: MAX_REQUIREMENTS,
+      max_prompt_chars: MAX_PROMPT_CHARS,
     },
   });
 }
@@ -402,11 +530,22 @@ Usage:
                  [--target-workspace ID] [--dry-run]
                  [--session NAME] [--socket PATH]
   handoff list [--status STATUS] [--limit N] [--session NAME]
-  handoff status <handoff-id> [--no-resolve-refs] [--session NAME]
+  handoff status <handoff-id> [--no-resolve-refs] [--no-reconcile]
+                 [--session NAME]
+  handoff execute <handoff-id> [--target-pane ID | --target-workspace ID
+                 | --new-workspace] [--provider HINT] [--model M]
+                 [--wait-ms MS] [--cleanup-on-failure] [--dry-run]
+                 [--session NAME] [--socket PATH]
+  handoff resume-info [--provider KIND]
   handoff capability [--session NAME]
 
 Strategies: ${HANDOFF_STRATEGIES.join(" | ")}
 Statuses:   ${HANDOFF_STATUSES.join(" | ")}
+
+execute runs the same-host handoff: target surface via herdr API only,
+agent.start, payload prompt injection, then pending→ready→delivered→
+done/failed tracking. native_resume falls back to portable_context when
+the provider cannot resume; failures persist status=failed honestly.
 `;
 
 export async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
@@ -418,6 +557,10 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       return cmdList(options);
     case "status":
       return cmdStatus(options);
+    case "execute":
+      return cmdExecute(options);
+    case "resume-info":
+      return cmdResumeInfo(options);
     case "capability":
       return cmdCapability(options);
     case "help":
