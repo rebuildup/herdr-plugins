@@ -44,7 +44,7 @@ import {
   type ResumeSessionKind,
 } from "./launch";
 
-const PLUGIN_VERSION = "0.8.0";
+const PLUGIN_VERSION = "0.6.0";
 
 interface CliOptions extends CallOptions {
   command: string;

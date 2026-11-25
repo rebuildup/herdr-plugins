@@ -37,7 +37,11 @@ Thin, stateless wrappers over herdr's `agent.*` socket API:
   optional `--wait*` post-launch `agent.wait`. Provider support is
   per-kind and explicit — unsupported pairs fail
   `unsupported_launch_option` (see `capability.providers[].launch`).
-- `capability` — offline contract/provider/operation discovery.
+- `capability` — offline contract/provider/operation discovery,
+  including `dialogs`: structured approval/question/attachment/goal/
+  subagent-approval surfaces are all `unsupported` in v1 (herdr has
+  no dialog API — ADR-0019, upstream herdrdev/herdr#6196); PTY-level
+  `interrupt`/`read` are the labeled interactive fallback.
 
 Every operation resolves `<target>` (pane id or agent name) via
 `agent.get` first and echoes the full identity (host, session,

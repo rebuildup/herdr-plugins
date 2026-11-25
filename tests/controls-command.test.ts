@@ -388,4 +388,21 @@ describe("rebuildup.controls capability command surface", () => {
     expect(claude?.commands.verified).toBe(false);
     expect(json.upstream_gaps.join(" ")).toContain("steer");
   });
+
+  test("capability declares structured dialogs unsupported with the PTY fallback (ADR-0019)", async () => {
+    const result = await runCli(["capability"]);
+    expect(result.status).toBe(0);
+    const json = result.json as {
+      dialogs: Record<
+        string,
+        { status: string; reason?: string; commands?: string[]; note?: string }
+      >;
+    };
+    for (const id of ["approval", "question", "attachments", "goals", "subagent_approvals"]) {
+      expect(json.dialogs[id]?.status).toBe("unsupported");
+      expect(json.dialogs[id]?.reason).toBeTruthy();
+    }
+    expect(json.dialogs.interactive_fallback?.status).toBe("pty_level");
+    expect(json.dialogs.interactive_fallback?.commands).toEqual(["interrupt", "read"]);
+  });
 });

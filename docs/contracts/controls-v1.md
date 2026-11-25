@@ -61,9 +61,10 @@ Offline. Reports the contract version, the command list, the
 structured calls from PTY key injection), the per-provider support
 matrix (uniform across herdr-detected agent kinds; provider-specific
 input semantics are not verified), the advisory per-provider
-slash-command table, and the known upstream gaps (structured
-interrupt, queue/steer, structured approval/question
-dialogs, structured history).
+slash-command table, the `dialogs` capability table (structured
+dialogs — all `unsupported` in v1, see below), and the known
+upstream gaps (structured interrupt, queue/steer, structured
+approval/question dialogs, structured history).
 
 `mutation_commands: ["send", "command", "interrupt", "rename", "start"]`;
 `read` and `wait` are non-mutating.
@@ -222,6 +223,30 @@ mapping herdr uses for session restore). `agent_session_path` is not
 exposed for claude/codex upstream, so only id-kind resume is
 available there.
 
+## Structured dialogs (unsupported in v1)
+
+herdr has no structured dialog API: `agent.prompt` rejects `blocked`
+agents, and no events or response channel exist for approval,
+questions, attachments, goal state, or subagent-approval aggregation
+(ADR-0019; upstream request herdrdev/herdr#6196). `capability.dialogs`
+publishes the final v1 table so consumers feature-detect:
+
+| dialog | status | reason |
+| --- | --- | --- |
+| `approval` | `unsupported` | No events/response API; `blocked` → `requires_interactive_input` on `send`/`command`. PTY fallback or upstream #6196. |
+| `question` | `unsupported` | Same boundary as approval; no option/answer channel. |
+| `attachments` | `unsupported` | No structured attach path; file-path references inside prompt text via `send`/`command` are the only v1 route (provider-TUI dependent, unverified). Binary/image payloads out of scope. |
+| `goals` | `unsupported` | No goal state surface; provider slash commands (e.g. `/goal`) pass through `command` as fragile text only. |
+| `subagent_approvals` | `unsupported` | No parent-pane aggregation upstream; follow-up scope of #6196. |
+| `interactive_fallback` | `pty_level` | `interrupt` + `read` are the labeled PTY-level tools for driving an open dialog by hand — fragile, never reported as a structured dialog API. |
+
+Prompt text typed into an open dialog can be submitted *as the dialog
+answer* upstream (herdrdev/herdr#6081, #5263), which is why v1 keeps
+the blocked-agent rejection strict and does not offer a "type the
+answer" path. A plugin-side provider-protocol (e.g. ACP) channel was
+evaluated and rejected: it would bypass herdr's PTY authority and
+fabricate state herdr cannot observe (ADR-0019).
+
 ## Identity
 
 Every non-capability result carries:
@@ -259,3 +284,23 @@ herdr does not report are `null`/omitted — never fabricated.
 | `timeout` | upstream wait/prompt timeout |
 | `session_unreachable` | socket connect/transport failure |
 | `usage` | CLI usage error (exit 2) |
+
+## Versioning
+
+`herdr-plugins.controls/v1` is **stable** as of plugin v0.6.0
+(T4/#102): the command surface (`capability`/`send`/`command`/`wait`/
+`interrupt`/`read`/`rename`/`start`), identity echo and `--expect-*`
+guards, error `kind` taxonomy, launch-option table, advisory
+per-provider command table, and the `dialogs` capability table are
+the finalized v1 contract. Additive fields may appear in any response
+or in `capability` (`providers`, `dialogs`, `upstream_gaps`,
+`notes`); clients must ignore unknown fields. `providers[].status`,
+`providers[].launch`, `providers[].commands.known`, and
+`dialogs.*.status` extend additively.
+
+A breaking change — removing/renaming a command or field, changing an
+error `kind`'s meaning, altering identity-guard or wait/launch
+semantics — bumps the contract suffix to `herdr-plugins.controls/v2`,
+shipped alongside v1 for at least one release so consumers can
+migrate; v1 is then frozen, not deleted. The plugin keeps no durable
+state, so there is no on-disk schema covered by this contract.
