@@ -1,3 +1,4 @@
+export * from "./agents";
 export * from "./commands";
 export * from "./panes";
 export * from "./snapshot";
