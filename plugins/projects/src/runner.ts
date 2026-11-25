@@ -15,6 +15,7 @@
  */
 
 import { randomBytes } from "node:crypto";
+import os from "node:os";
 import path from "node:path";
 import {
   type CallOptions,
@@ -30,11 +31,13 @@ import {
   paneSendKeys,
   paneWaitForOutput,
   reportPaneMetadata,
+  sessionKeyFor,
   type WorkspaceCreatedResult,
   workspaceCreate,
 } from "../../../packages/herdr-client/src/index";
 import { pluginDirs } from "../../../packages/herdr-client/src/socket";
 import {
+  ACTIVE_RUN_RESULTS,
   loadRuns,
   type RunResult,
   readRunLog,
@@ -133,6 +136,10 @@ export const MAX_INLINE_COMMAND_CHARS = 4_000;
 export const DEFAULT_RUN_TIMEOUT_MS = 600_000;
 export const DEFAULT_LOG_MAX_BYTES = 65_536;
 export const DEFAULT_STOP_GRACE_MS = 2_000;
+/** Bounded window to confirm a stop request actually ended the process. */
+export const DEFAULT_STOP_CONFIRM_MS = 5_000;
+/** Hard cap on stop-confirmation polls regardless of configured timings. */
+const MAX_STOP_CONFIRM_ATTEMPTS = 20;
 
 export function runMarkerToken(runId: string): string {
   return `${MARKER_PREFIX}${runId}__`;
@@ -235,6 +242,16 @@ export interface RunnerDeps {
   logMaxBytes?: number | undefined;
   /** Grace period between ctrl+c and pane.close on stop. */
   stopGraceMs?: number | undefined;
+  /** Bounded window confirming the process actually exited after stop. */
+  stopConfirmMs?: number | undefined;
+  /**
+   * Session discriminator (`sessionKeyFor`) of the socket this transport
+   * talks to; recorded on new runs and checked before every pane action.
+   * Defaults to the ambient socket resolution.
+   */
+  sessionKey?: string | undefined;
+  /** Hostname recorded on new runs; defaults to `os.hostname()`. */
+  host?: string | undefined;
   sleep?: ((ms: number) => Promise<void>) | undefined;
   now?: (() => Date) | undefined;
 }
@@ -243,6 +260,9 @@ interface ResolvedDeps {
   waitTimeoutMs: number;
   logMaxBytes: number;
   stopGraceMs: number;
+  stopConfirmMs: number;
+  sessionKey: string;
+  host: string;
   sleep: (ms: number) => Promise<void>;
   now: () => Date;
 }
@@ -252,6 +272,9 @@ function resolveDeps(deps: RunnerDeps): ResolvedDeps {
     waitTimeoutMs: deps.waitTimeoutMs ?? DEFAULT_RUN_TIMEOUT_MS,
     logMaxBytes: deps.logMaxBytes ?? DEFAULT_LOG_MAX_BYTES,
     stopGraceMs: deps.stopGraceMs ?? DEFAULT_STOP_GRACE_MS,
+    stopConfirmMs: deps.stopConfirmMs ?? DEFAULT_STOP_CONFIRM_MS,
+    sessionKey: deps.sessionKey ?? sessionKeyFor({}),
+    host: deps.host ?? os.hostname(),
     sleep: deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
     now: deps.now ?? (() => new Date()),
   };
@@ -272,6 +295,84 @@ async function markRun(runId: string, patch: Partial<ScriptRun>): Promise<void> 
     const existing = state.runs[runId];
     if (existing) state.runs[runId] = { ...existing, ...patch };
   });
+}
+
+// --- Pane ownership re-validation (#66) ------------------------------------
+//
+// herdr socket panes carry no server-side ownership token (ADR-0010), so
+// before ANY input/close/read targeted at a recorded pane the plugin
+// re-validates the ownership tuple persisted at creation:
+//   host + session_key (which herdr session/socket the pane lives in)
+//   + pane_id (never reused by herdr) + workspace_id/tab_id context.
+// A mismatch or `pane_not_found` means the recorded pane is stale or the
+// id now resolves to a foreign pane — the plugin must NEVER send input
+// or close in that case.
+
+export type PaneOwnership =
+  | { kind: "owned"; pane: PaneInfo }
+  | { kind: "gone" }
+  | { kind: "foreign"; detail: string }
+  | { kind: "pane_mismatch"; detail: string }
+  | { kind: "unreachable"; error: unknown };
+
+function paneContextMismatch(run: ScriptRun, pane: PaneInfo): string | null {
+  if (typeof pane.pane_id === "string" && pane.pane_id !== run.pane_id) {
+    return `pane_id mismatch: recorded ${run.pane_id}, got ${pane.pane_id}`;
+  }
+  if (
+    run.workspace_id.length > 0 &&
+    typeof pane.workspace_id === "string" &&
+    pane.workspace_id !== run.workspace_id
+  ) {
+    return `workspace mismatch: recorded ${run.workspace_id}, got ${pane.workspace_id}`;
+  }
+  if (run.workspace_id.length > 0 && typeof pane.workspace_id !== "string") {
+    return `workspace unverifiable: recorded ${run.workspace_id}, pane.get returned none`;
+  }
+  if (run.tab_id !== null && typeof pane.tab_id === "string" && pane.tab_id !== run.tab_id) {
+    return `tab mismatch: recorded ${run.tab_id}, got ${pane.tab_id}`;
+  }
+  if (run.tab_id !== null && typeof pane.tab_id !== "string") {
+    return `tab unverifiable: recorded ${run.tab_id}, pane.get returned none`;
+  }
+  return null;
+}
+
+/**
+ * Verify that `run`'s recorded pane is still the pane this transport's
+ * session owns. `foreign` (host/session_key recorded and different)
+ * short-circuits BEFORE any socket call — a same-named pane id in another
+ * session is a different pane. `pane_mismatch` means `pane.get`
+ * succeeded but the returned pane's workspace/tab context disagrees with
+ * the record (defensive: herdr documents pane ids as never reused).
+ */
+async function checkPaneOwnership(
+  run: ScriptRun,
+  d: ResolvedDeps,
+  transport: ScriptTransport,
+): Promise<PaneOwnership> {
+  if (run.host !== null && run.host !== d.host) {
+    return {
+      kind: "foreign",
+      detail: `host mismatch: recorded ${run.host}, current ${d.host}`,
+    };
+  }
+  if (run.session_key !== null && run.session_key !== d.sessionKey) {
+    return {
+      kind: "foreign",
+      detail: `session mismatch: run belongs to a different herdr session/socket`,
+    };
+  }
+  let pane: PaneInfo;
+  try {
+    pane = await transport.paneGet(run.pane_id);
+  } catch (err) {
+    if (isPaneGoneError(err)) return { kind: "gone" };
+    return { kind: "unreachable", error: err };
+  }
+  const mismatch = paneContextMismatch(run, pane);
+  if (mismatch !== null) return { kind: "pane_mismatch", detail: mismatch };
+  return { kind: "owned", pane };
 }
 
 // --- start -----------------------------------------------------------------
@@ -339,6 +440,9 @@ export async function startRun(input: StartRunInput, deps: RunnerDeps): Promise<
     finished_at: null,
     exit_code: null,
     result: "running",
+    host: d.host,
+    session_key: d.sessionKey,
+    stop_requested_at: null,
     log_path: null,
     error: null,
   };
@@ -444,13 +548,61 @@ export async function startRun(input: StartRunInput, deps: RunnerDeps): Promise<
 
 export interface StopOutcome {
   run: ScriptRun;
-  action: "stopped" | "already_finished" | "pane_gone";
+  action: "stopped" | "already_finished" | "pane_gone" | "stale_pane" | "stop_unconfirmed";
+}
+
+/** Results `scripts stop` will still act on (request or confirm a stop). */
+const STOPPABLE_RESULTS: ReadonlySet<RunResult> = ACTIVE_RUN_RESULTS;
+
+/**
+ * Confirm a stop request actually ended the process, bounded by
+ * `stopConfirmMs`. Evidence accepted (never inferred from ctrl+c alone):
+ * the pane is gone (`pane.get` → not_found) OR `pane.process_info`
+ * reports an empty foreground process list (shell regained the tty).
+ * Transport errors during polling are inconclusive, not fatal — the
+ * bounded window decides.
+ */
+async function confirmStop(
+  d: ResolvedDeps,
+  run: ScriptRun,
+  transport: ScriptTransport,
+): Promise<"stopped" | "unconfirmed"> {
+  const interval = Math.max(d.stopGraceMs, 1);
+  const attempts = Math.max(
+    1,
+    Math.min(MAX_STOP_CONFIRM_ATTEMPTS, Math.ceil(d.stopConfirmMs / interval)),
+  );
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      await transport.paneGet(run.pane_id);
+    } catch (err) {
+      if (isPaneGoneError(err)) return "stopped";
+      // Unreachable socket: inconclusive; keep polling within the bound.
+    }
+    try {
+      const info = await transport.paneProcessInfo(run.pane_id);
+      if (info.foreground_processes.length === 0) return "stopped";
+    } catch (err) {
+      if (isPaneGoneError(err)) return "stopped";
+      // Inconclusive; keep polling.
+    }
+    if (i + 1 < attempts) await d.sleep(interval);
+  }
+  return "unconfirmed";
 }
 
 /**
- * Stop every `running` run matched by `target`. `target` is a run_id
- * (exact or unique prefix) or a project id (all its running runs).
- * Only the pane_id recorded in each run record is ever addressed.
+ * Stop every active run matched by `target`. `target` is a run_id
+ * (exact or unique prefix) or a project id (all its stoppable runs).
+ *
+ * Ownership is re-validated via `pane.get` BEFORE any input/close/read:
+ * a foreign-session record or a mismatched pane context yields a
+ * `stale_pane` outcome and ZERO side effects on the pane. A `running`
+ * run is sent ctrl+c and recorded `stopping` (request accepted — NOT
+ * yet stopped); exit is confirmed within `stopConfirmMs` via pane
+ * absence or an empty foreground process list, then recorded `stopped`.
+ * Without evidence inside the window the run is `stop_unconfirmed` —
+ * ctrl+c alone is never treated as stopped.
  */
 export async function stopRuns(target: string, deps: RunnerDeps): Promise<StopOutcome[]> {
   const d = resolveDeps(deps);
@@ -478,28 +630,93 @@ export async function stopRuns(target: string, deps: RunnerDeps): Promise<StopOu
 
   const outcomes: StopOutcome[] = [];
   for (const record of matched) {
-    if (record.result !== "running") {
+    if (!STOPPABLE_RESULTS.has(record.result)) {
       outcomes.push({ run: record, action: "already_finished" });
       continue;
     }
+
+    // Ownership gate: no input/close/read may reach a pane whose
+    // recorded host/session/pane context does not verify.
+    const ownership = await checkPaneOwnership(record, d, deps.transport);
+    if (ownership.kind === "foreign") {
+      // The record belongs to another host/session: leave the result
+      // untouched (a later correctly-scoped invocation can still act)
+      // but record why nothing happened.
+      await markRun(record.run_id, { error: ownership.detail });
+      const fresh = (await loadRuns()).runs[record.run_id];
+      if (fresh) outcomes.push({ run: fresh, action: "stale_pane" });
+      continue;
+    }
+    if (ownership.kind === "pane_mismatch") {
+      // Same session but the pane id now resolves to a different
+      // workspace/tab context: the recorded pane is gone → unknown.
+      await markRun(record.run_id, {
+        result: "unknown",
+        finished_at: iso(d),
+        error: `stale_pane: ${ownership.detail}`,
+      });
+      const fresh = (await loadRuns()).runs[record.run_id];
+      if (fresh) outcomes.push({ run: fresh, action: "stale_pane" });
+      continue;
+    }
+    if (ownership.kind === "unreachable") {
+      throw ownership.error instanceof Error
+        ? ownership.error
+        : structuredError(String(ownership.error), "script_run_error");
+    }
+    if (ownership.kind === "gone") {
+      // The dedicated pane vanished. For a `running` run the outcome is
+      // undetermined → unknown. For stopping/stop_unconfirmed the pane
+      // being gone IS the exit evidence → stopped.
+      const result: RunResult = record.result === "running" ? "unknown" : "stopped";
+      await markRun(record.run_id, {
+        result,
+        finished_at: iso(d),
+        error: result === "unknown" ? "pane gone before stop could be confirmed" : null,
+      });
+      const fresh = (await loadRuns()).runs[record.run_id];
+      if (fresh) {
+        if (result === "stopped") await reportRunState(deps, fresh, "stopped");
+        outcomes.push({ run: fresh, action: result === "stopped" ? "stopped" : "pane_gone" });
+      }
+      continue;
+    }
+
     const run = { ...record };
     try {
-      await deps.transport.paneSendKeys(run.pane_id, ["ctrl+c"]);
+      // Only `running` needs the interrupt; `stopping`/`stop_unconfirmed`
+      // retries go straight to close+confirm (ctrl+c was already sent).
+      if (record.result === "running") {
+        await deps.transport.paneSendKeys(run.pane_id, ["ctrl+c"]);
+        await markRun(run.run_id, {
+          result: "stopping",
+          stop_requested_at: iso(d),
+          error: null,
+        });
+        const stopping = (await loadRuns()).runs[run.run_id];
+        if (stopping) await reportRunState(deps, stopping, "stopping");
+      }
     } catch (err) {
       if (isPaneGoneError(err)) {
         await markRun(run.run_id, {
-          result: "unknown",
+          result: record.result === "running" ? "unknown" : "stopped",
           finished_at: iso(d),
           error: err instanceof Error ? err.message : String(err),
         });
-        const updated = (await loadRuns()).runs[run.run_id];
-        if (updated) outcomes.push({ run: updated, action: "pane_gone" });
+        const fresh = (await loadRuns()).runs[run.run_id];
+        if (fresh) {
+          const action = fresh.result === "stopped" ? "stopped" : "pane_gone";
+          if (action === "stopped") await reportRunState(deps, fresh, "stopped");
+          outcomes.push({ run: fresh, action });
+        }
         continue;
       }
       throw err;
     }
+
     await d.sleep(d.stopGraceMs);
-    // Best-effort log capture before closing the pane.
+    // Best-effort log capture before closing the pane (ownership was
+    // verified above; a mid-stop pane loss is tolerated).
     try {
       const read = await deps.transport.paneRead(run.pane_id, {
         source: "recent",
@@ -513,17 +730,32 @@ export async function stopRuns(target: string, deps: RunnerDeps): Promise<StopOu
     try {
       await deps.transport.paneClose(run.pane_id);
     } catch {
-      // Already closed/exited — the run is stopped either way.
+      // Close failure is NOT proof of stop — confirmation below decides.
     }
-    await markRun(run.run_id, {
-      result: "stopped",
-      finished_at: iso(d),
-      error: null,
-    });
-    const updated = (await loadRuns()).runs[run.run_id];
-    if (updated) {
-      await reportRunState(deps, updated, "stopped");
-      outcomes.push({ run: updated, action: "stopped" });
+
+    const confirmed = await confirmStop(d, run, deps.transport);
+    if (confirmed === "stopped") {
+      await markRun(run.run_id, {
+        result: "stopped",
+        finished_at: iso(d),
+        error: null,
+      });
+      const fresh = (await loadRuns()).runs[run.run_id];
+      if (fresh) {
+        await reportRunState(deps, fresh, "stopped");
+        outcomes.push({ run: fresh, action: "stopped" });
+      }
+    } else {
+      // Never claim stopped without evidence: the process may still be
+      // running. `scripts results`/`logs` keep re-checking ownership.
+      const error =
+        "stop_unconfirmed: no pane-exit or foreground-process evidence within the confirmation window";
+      await markRun(run.run_id, { result: "stop_unconfirmed", error });
+      const fresh = (await loadRuns()).runs[run.run_id];
+      if (fresh) {
+        await reportRunState(deps, fresh, "stop_unconfirmed");
+        outcomes.push({ run: fresh, action: "stop_unconfirmed" });
+      }
     }
   }
   return outcomes;
@@ -532,10 +764,43 @@ export async function stopRuns(target: string, deps: RunnerDeps): Promise<StopOu
 // --- results / logs --------------------------------------------------------
 
 /**
- * List run records, optionally filtered by project. `running` records are
- * reconciled lazily: `pane.get` is re-checked and a vanished pane flips
- * the record to `unknown` (persisted). Socket failures leave the record
- * `running` — liveness is unknown, not fabricated.
+ * Promote a `stopping`/`stop_unconfirmed` record to `stopped` when exit
+ * evidence appears (pane gone or empty foreground process list), or keep
+ * it active. Returns the result to persist, or null to leave unchanged.
+ */
+async function reconcileStopState(
+  run: ScriptRun,
+  transport: ScriptTransport,
+): Promise<RunResult | null> {
+  try {
+    await transport.paneGet(run.pane_id);
+  } catch (err) {
+    if (isPaneGoneError(err)) return "stopped";
+    return null; // unreachable: liveness unknown, keep the record
+  }
+  try {
+    const info = await transport.paneProcessInfo(run.pane_id);
+    if (info.foreground_processes.length === 0) return "stopped";
+  } catch (err) {
+    if (isPaneGoneError(err)) return "stopped";
+    return null;
+  }
+  return null;
+}
+
+/**
+ * List run records, optionally filtered by project. Active records
+ * (`running`/`stopping`/`stop_unconfirmed`) are reconciled lazily AFTER
+ * ownership re-validation (#66):
+ * - foreign host/session records are never touched through this socket
+ *   (error annotated, result preserved for the owning session);
+ * - a vanished pane flips `running` → `unknown`, and confirms
+ *   `stopping`/`stop_unconfirmed` → `stopped` (pane absence IS the exit
+ *   evidence once a stop was requested);
+ * - a pane whose workspace/tab context disagrees with the record is
+ *   `unknown` — the recorded pane is gone;
+ * - socket failures leave the record unchanged — liveness is unknown,
+ *   not fabricated.
  */
 export async function listRuns(
   deps: RunnerDeps,
@@ -549,25 +814,61 @@ export async function listRuns(
 
   const reconciled: ScriptRun[] = [];
   for (const run of runs) {
-    if (run.result !== "running") {
+    if (!ACTIVE_RUN_RESULTS.has(run.result)) {
       reconciled.push(run);
       continue;
     }
-    try {
-      await deps.transport.paneGet(run.pane_id);
-      reconciled.push(run);
-    } catch (err) {
-      if (isPaneGoneError(err)) {
-        await markRun(run.run_id, {
-          result: "unknown",
-          finished_at: iso(d),
-          error: err instanceof Error ? err.message : String(err),
-        });
-        const fresh = (await loadRuns()).runs[run.run_id];
-        reconciled.push(fresh ?? { ...run, result: "unknown" });
-      } else {
-        reconciled.push(run);
+    const ownership = await checkPaneOwnership(run, d, deps.transport);
+    if (ownership.kind === "foreign") {
+      // Never probe a foreign pane; annotate why and preserve the result
+      // so the owning session's invocation can still reconcile it.
+      if (run.error !== ownership.detail) {
+        await markRun(run.run_id, { error: ownership.detail });
       }
+      const fresh = (await loadRuns()).runs[run.run_id];
+      reconciled.push(fresh ?? { ...run, error: ownership.detail });
+      continue;
+    }
+    if (ownership.kind === "unreachable") {
+      reconciled.push(run);
+      continue;
+    }
+    if (ownership.kind === "pane_mismatch") {
+      await markRun(run.run_id, {
+        result: "unknown",
+        finished_at: iso(d),
+        error: `stale_pane: ${ownership.detail}`,
+      });
+      const fresh = (await loadRuns()).runs[run.run_id];
+      reconciled.push(fresh ?? { ...run, result: "unknown" });
+      continue;
+    }
+    if (ownership.kind === "gone") {
+      // running → outcome undetermined (unknown); stopping states → the
+      // pane being gone confirms the stop (stopped).
+      const result: RunResult = run.result === "running" ? "unknown" : "stopped";
+      await markRun(run.run_id, {
+        result,
+        finished_at: iso(d),
+        error: result === "unknown" ? (run.error ?? "pane gone before completion marker") : null,
+      });
+      const fresh = (await loadRuns()).runs[run.run_id];
+      reconciled.push(fresh ?? { ...run, result });
+      continue;
+    }
+    // owned: `running` stays running (marker simply not seen yet);
+    // stopping states may now have exit evidence.
+    if (run.result === "running") {
+      reconciled.push(run);
+      continue;
+    }
+    const promoted = await reconcileStopState(run, deps.transport);
+    if (promoted !== null) {
+      await markRun(run.run_id, { result: promoted, finished_at: iso(d), error: null });
+      const fresh = (await loadRuns()).runs[run.run_id];
+      reconciled.push(fresh ?? { ...run, result: promoted });
+    } else {
+      reconciled.push(run);
     }
   }
   return reconciled;
@@ -597,7 +898,45 @@ export async function runLog(runId: string, deps: RunnerDeps): Promise<RunLogRes
     return { run, log: stored, log_path: run.log_path };
   }
 
-  // No stored log: try a live bounded read for still-alive panes.
+  // No stored log: a live bounded read is only attempted for ACTIVE runs
+  // whose recorded pane passes ownership re-validation (#66) — a foreign
+  // or mismatched pane is never read.
+  if (!ACTIVE_RUN_RESULTS.has(run.result)) {
+    return { run, log: null, log_path: run.log_path };
+  }
+  const ownership = await checkPaneOwnership(run, d, deps.transport);
+  if (ownership.kind === "foreign" || ownership.kind === "pane_mismatch") {
+    const error =
+      ownership.kind === "pane_mismatch" ? `stale_pane: ${ownership.detail}` : ownership.detail;
+    if (ownership.kind === "pane_mismatch") {
+      await markRun(run.run_id, {
+        result: "unknown",
+        finished_at: iso(d),
+        error,
+      });
+      const updated = (await loadRuns()).runs[run.run_id] ?? { ...run, result: "unknown" as const };
+      return { run: updated, log: null, log_path: updated.log_path };
+    }
+    await markRun(run.run_id, { error });
+    const fresh = (await loadRuns()).runs[run.run_id] ?? { ...run, error };
+    return { run: fresh, log: null, log_path: fresh.log_path };
+  }
+  if (ownership.kind === "gone") {
+    // running → outcome undetermined; stopping states → pane absence
+    // confirms the stop.
+    const result: RunResult = run.result === "running" ? "unknown" : "stopped";
+    await markRun(run.run_id, {
+      result,
+      finished_at: iso(d),
+      error: result === "unknown" ? "pane gone before log capture" : null,
+    });
+    const updated = (await loadRuns()).runs[run.run_id] ?? { ...run, result };
+    return { run: updated, log: null, log_path: updated.log_path };
+  }
+  if (ownership.kind === "unreachable") {
+    return { run, log: null, log_path: run.log_path };
+  }
+
   try {
     const read = await deps.transport.paneRead(run.pane_id, {
       source: "recent",
@@ -609,16 +948,14 @@ export async function runLog(runId: string, deps: RunnerDeps): Promise<RunLogRes
     const updated = (await loadRuns()).runs[run.run_id] ?? run;
     return { run: updated, log: fresh, log_path: updated.log_path };
   } catch (err) {
-    if (run.result === "running" && isPaneGoneError(err)) {
+    if (isPaneGoneError(err)) {
+      const result: RunResult = run.result === "running" ? "unknown" : "stopped";
       await markRun(run.run_id, {
-        result: "unknown",
+        result,
         finished_at: iso(d),
-        error: err instanceof Error ? err.message : String(err),
+        error: result === "unknown" ? (err instanceof Error ? err.message : String(err)) : null,
       });
-      const updated = (await loadRuns()).runs[run.run_id] ?? {
-        ...run,
-        result: "unknown" as const,
-      };
+      const updated = (await loadRuns()).runs[run.run_id] ?? { ...run, result };
       return { run: updated, log: null, log_path: updated.log_path };
     }
     return { run, log: null, log_path: run.log_path };
