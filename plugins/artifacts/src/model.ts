@@ -1,6 +1,6 @@
 /**
  * Shared contract constants and record types for
- * rebuildup.artifacts (`herdr-plugins.artifacts/v1`, DRAFT — ADR-0022).
+ * rebuildup.artifacts (`herdr-plugins.artifacts/v1`, DRAFT — ADR-0024).
  *
  * T1 (#136) ships the contract skeleton only: identity, kinds, storage
  * modes, and size caps are fixed here so T2–T4 implement against them.
@@ -16,7 +16,7 @@ export const PLUGIN_VERSION = "0.1.0";
 export const ARTIFACT_KINDS = ["html", "image", "pdf", "file", "other"] as const;
 export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];
 
-/** Storage modes (ADR-0022 §2). */
+/** Storage modes (ADR-0024 §2). */
 export const STORAGE_MODES = ["state_copy", "path_ref"] as const;
 export type StorageMode = (typeof STORAGE_MODES)[number];
 

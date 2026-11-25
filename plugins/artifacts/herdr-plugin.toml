@@ -2,7 +2,7 @@ id = "rebuildup.artifacts"
 name = "Artifacts"
 version = "0.1.0"
 min_herdr_version = "0.9.0"
-description = "Artifact registry: registers, validates, indexes, and delivers references to generated files (HTML/image/pdf/file) under herdr-plugins.artifacts/v1. Rendering, capture, and MCP Apps UI stay with herdr-t3 (ADR-0022)."
+description = "Artifact registry: registers, validates, indexes, and delivers references to generated files (HTML/image/pdf/file) under herdr-plugins.artifacts/v1. Rendering, capture, and MCP Apps UI stay with herdr-t3 (ADR-0024)."
 platforms = ["linux", "macos", "windows"]
 
 # No build step: the plugin is dependency-free TypeScript executed by Bun

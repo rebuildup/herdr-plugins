@@ -5,7 +5,7 @@ responsibility boundary, storage policy, v1 attachment definition, and
 the draft contract skeleton `herdr-plugins.artifacts/v1`. Registry
 implementation lands in T2 (#141), kind validation/search in T3
 (#142), delivery/integration in T4 (#143). Design:
-ADR-0022. Contract: `docs/contracts/artifacts-v1.md` (**draft**).
+ADR-0024. Contract: `docs/contracts/artifacts-v1.md` (**draft**).
 
 ## Purpose
 
@@ -27,7 +27,7 @@ references, without the plugin ever executing or rendering content.
 | browser-import | `docs/user/browser-import.md` | **out-of-scope** (GUI) |
 | question-attachments | `docs/user/question-attachments.md` | v1 = path reference inside prompt text; structured attachment API is an upstream gap candidate |
 
-## Responsibility boundary (ADR-0022 §1)
+## Responsibility boundary (ADR-0024 §1)
 
 - **Plugin owns**: registration, identity, kind classification,
   MIME/leading-byte validation, size enforcement, list/get/search/
@@ -40,7 +40,7 @@ references, without the plugin ever executing or rendering content.
   has none). v1 delivers paths in prompt text; a structured API is an
   Issue candidate only if providers require non-path attachment parts.
 
-## Storage policy (ADR-0022 §2)
+## Storage policy (ADR-0024 §2)
 
 - `state_copy` (default): bytes copied under
   `HERDR_PLUGIN_STATE_DIR/artifacts/<artifact_id>/`; per-kind cap
@@ -53,13 +53,13 @@ references, without the plugin ever executing or rendering content.
   sources are stored resolved. Total-budget enforcement is `gc`
   retention (T4), not a v1 quota.
 
-## Attachment definition (ADR-0022 §3)
+## Attachment definition (ADR-0024 §3)
 
 v1 "attach" = stable absolute artifact path embedded in
 `agent.prompt`/`pane.send_text` text (`deliver`, T4). No structured
 attachment API exists in protocol 22; none is fabricated.
 
-## Safety boundary (ADR-0022 §4)
+## Safety boundary (ADR-0024 §4)
 
 The plugin validates HTML *shape* (extension + `<!doctype html>`/
 `<html>` prefix, upstream `HtmlRender` rules) and records metadata

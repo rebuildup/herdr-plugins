@@ -7,7 +7,7 @@ see [`docs/contracts/artifacts-v1.md`](../../docs/contracts/artifacts-v1.md),
 the specification
 [`docs/specs/artifacts.md`](../../docs/specs/artifacts.md), and the
 design boundary
-[`docs/adr/0022-artifacts-boundary.md`](../../docs/adr/0022-artifacts-boundary.md).
+[`docs/adr/0024-artifacts-boundary.md`](../../docs/adr/0024-artifacts-boundary.md).
 
 ## What it does (planned)
 
@@ -22,7 +22,7 @@ attachment API exists in herdr protocol 22).
 
 - It never executes, renders, or proxies artifact content. Isolated
   HTML rendering, screenshots, and network/CSP policy are herdr-t3
-  responsibilities (ADR-0022 §4).
+  responsibilities (ADR-0024 §4).
 - SnapShots (OS window capture) and browser import are out of scope
   (desktop/GUI). MCP Apps UI is upstream-blocked on #30.
 

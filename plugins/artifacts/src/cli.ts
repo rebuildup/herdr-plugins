@@ -10,7 +10,7 @@
  * deliver/gc) are declared in the contract but return `contract_draft`
  * until T2–T4 (#141/#142/#143) implement them.
  *
- * The plugin never executes or renders artifact content (ADR-0022 §4);
+ * The plugin never executes or renders artifact content (ADR-0024 §4);
  * render-time sandbox/CSP is a herdr-t3 requirement.
  */
 
@@ -71,10 +71,10 @@ function cmdCapability(): void {
     },
     notes: [
       "Contract is DRAFT (T1, Issue #136): only capability/help are implemented; registry commands return contract_draft until T2-T4 (#141/#142/#143).",
-      "Plugin never executes or renders artifact content; render-time sandbox/CSP/network isolation is a herdr-t3 requirement (ADR-0022, docs/contracts/artifacts-v1.md).",
+      "Plugin never executes or renders artifact content; render-time sandbox/CSP/network isolation is a herdr-t3 requirement (ADR-0024, docs/contracts/artifacts-v1.md).",
       "state_copy (default) enforces per-kind caps at register; path_ref records oversize as a warning flag and reports vanished targets as missing_ref.",
-      "v1 attachment delivery is the artifact's stable absolute path inside agent.prompt/pane.send_text text; no structured attachment API exists in herdr protocol 22 (upstream gap candidate, ADR-0022).",
-      "SnapShots (OS capture), browser import, and MCP Apps UI are out of plugin scope: herdr-t3/desktop or upstream-blocked on #30 (ADR-0022 section 5).",
+      "v1 attachment delivery is the artifact's stable absolute path inside agent.prompt/pane.send_text text; no structured attachment API exists in herdr protocol 22 (upstream gap candidate, ADR-0024).",
+      "SnapShots (OS capture), browser import, and MCP Apps UI are out of plugin scope: herdr-t3/desktop or upstream-blocked on #30 (ADR-0024 section 5).",
     ],
     generated_at: now(),
   });

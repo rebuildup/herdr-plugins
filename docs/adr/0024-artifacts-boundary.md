@@ -1,4 +1,4 @@
-# ADR-0022: Artifacts plugin responsibility boundary, storage policy, and v1 attachment definition
+# ADR-0024: Artifacts plugin responsibility boundary, storage policy, and v1 attachment definition
 
 Status: Accepted (release-0-7-0 candidate, Issue #136 / parent #31 T1 —
 first ticket of the #31 Artifacts/Snapshots decomposition; T2–T4 are

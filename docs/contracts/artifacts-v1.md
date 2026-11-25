@@ -4,7 +4,7 @@ Structured JSON CLI contract for the `rebuildup.artifacts` herdr
 plugin — an artifact registry that registers, validates, indexes,
 and delivers references to generated files (HTML pages, images, PDFs,
 generic files). Design boundary:
-[`docs/adr/0022-artifacts-boundary.md`](../adr/0022-artifacts-boundary.md).
+[`docs/adr/0024-artifacts-boundary.md`](../adr/0024-artifacts-boundary.md).
 Specification: [`docs/specs/artifacts.md`](../specs/artifacts.md).
 
 **Status: DRAFT (T1, Issue #136).** Only `capability` and `help` are
@@ -164,5 +164,5 @@ sanitized content beyond the metadata it reports.
 v1 attachment = the artifact's stable absolute path embedded in
 `agent.prompt` / `pane.send_text` text assembled by `deliver`. There is
 no structured pane/agent attachment API in herdr protocol 22; that gap
-is recorded as an upstream Issue candidate (ADR-0022 §3), not worked
+is recorded as an upstream Issue candidate (ADR-0024 §3), not worked
 around.
