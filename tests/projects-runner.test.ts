@@ -275,6 +275,20 @@ function deps(transport: FakeTransport, extra: Partial<Parameters<typeof startRu
   };
 }
 
+/**
+ * Simulate the script finishing AFTER the bounded wait timed out: the
+ * shell echoes the durable `__HERDR_DONE_<run-id>__=<code>` marker into
+ * the pane's scrollback. The run-id token is recovered from the injected
+ * input line recorded by `paneSendInput`.
+ */
+function completePaneLater(transport: FakeTransport, paneId: string, code: number): void {
+  const pane = transport.panes.get(paneId);
+  if (!pane) throw new Error(`no fake pane: ${paneId}`);
+  const token = TOKEN_RE.exec(pane.input ?? "")?.[1];
+  if (token === undefined) throw new Error("pane input carries no run marker token");
+  pane.output = `${pane.output}late output\n__HERDR_DONE_${token}__=${code}\n`;
+}
+
 function startInput(project: Project, repoRoot: string) {
   return {
     project,
@@ -818,6 +832,199 @@ describe("listRuns / runLog", () => {
   });
 });
 
+// --- durable completion recovery via scrollback re-scan (#68) -------------
+
+describe("completion recovery (#68)", () => {
+  test("wait timeout → later completion → results recovers exit code", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    transport.behavior = "hang"; // wait times out; no marker yet
+    const project = makeProject("p", [repo]);
+    const run = await startRun(startInput(project, repo), deps(transport));
+    expect(run.result).toBe("running");
+
+    // Marker absent → stays honestly running, exit code never fabricated.
+    let runs = await listRuns(deps(transport));
+    expect(runs.find((r) => r.run_id === run.run_id)?.result).toBe("running");
+
+    // The script finishes later: the marker lands in scrollback.
+    completePaneLater(transport, run.pane_id, 0);
+    runs = await listRuns(deps(transport));
+    const recovered = runs.find((r) => r.run_id === run.run_id);
+    expect(recovered?.result).toBe("success");
+    expect(recovered?.exit_code).toBe(0);
+    expect(recovered?.finished_at).not.toBeNull();
+    expect(recovered?.log_path).not.toBeNull();
+    // Persisted, and metadata projected the terminal state.
+    const stored = (await loadRuns()).runs[run.run_id];
+    expect(stored?.result).toBe("success");
+    expect(stored?.exit_code).toBe(0);
+    const states = transport.metadata
+      .filter((m) => m.pane_id === run.pane_id)
+      .map((m) => Object.values(m.tokens)[0]);
+    expect(states).toEqual(["running", "success"]);
+
+    // Double results is idempotent: terminal records are not re-scanned
+    // or rewritten.
+    const readsBefore = transport.readCalls;
+    runs = await listRuns(deps(transport));
+    expect(runs.find((r) => r.run_id === run.run_id)?.result).toBe("success");
+    expect(transport.readCalls).toBe(readsBefore);
+  });
+
+  test("late non-zero exit → failed with the real code", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    transport.behavior = "hang";
+    const project = makeProject("p", [repo]);
+    const run = await startRun(startInput(project, repo), deps(transport));
+
+    completePaneLater(transport, run.pane_id, 3);
+    const runs = await listRuns(deps(transport));
+    const recovered = runs.find((r) => r.run_id === run.run_id);
+    expect(recovered?.result).toBe("failed");
+    expect(recovered?.exit_code).toBe(3);
+  });
+
+  test("scripts logs recovers the same completion (exit code + tail)", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    transport.behavior = "hang";
+    const project = makeProject("p", [repo]);
+    const run = await startRun(startInput(project, repo), deps(transport));
+
+    completePaneLater(transport, run.pane_id, 0);
+    const result = await runLog(run.run_id, deps(transport));
+    expect(result.run.result).toBe("success");
+    expect(result.run.exit_code).toBe(0);
+    expect(result.log).toContain("__HERDR_DONE_");
+    expect(result.log).toContain("late output");
+    // A second logs call serves the stored file without re-reading.
+    const readsBefore = transport.readCalls;
+    const again = await runLog(run.run_id, deps(transport));
+    expect(again.run.result).toBe("success");
+    expect(again.log).toBe(result.log);
+    expect(transport.readCalls).toBe(readsBefore);
+  });
+
+  test("stop_unconfirmed run later completes → marker exit code wins", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    transport.behavior = "hang";
+    transport.closeError = new Error("close refused");
+    transport.foreground = [{ pid: 200, name: "bun" }];
+    const project = makeProject("p", [repo]);
+    const run = await startRun(startInput(project, repo), deps(transport));
+    await stopRuns(run.run_id, deps(transport));
+    expect((await loadRuns()).runs[run.run_id]?.result).toBe("stop_unconfirmed");
+
+    // The command actually finished before ctrl+c landed: the durable
+    // marker proves the real exit status, which is more truthful than
+    // "stopped" or a lingering stop_unconfirmed.
+    completePaneLater(transport, run.pane_id, 0);
+    const runs = await listRuns(deps(transport));
+    const recovered = runs.find((r) => r.run_id === run.run_id);
+    expect(recovered?.result).toBe("success");
+    expect(recovered?.exit_code).toBe(0);
+  });
+
+  test("marker absent forever → stays running, exit code stays null", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    transport.behavior = "hang";
+    const project = makeProject("p", [repo]);
+    const run = await startRun(startInput(project, repo), deps(transport));
+
+    for (let i = 0; i < 3; i += 1) {
+      const runs = await listRuns(deps(transport));
+      const current = runs.find((r) => r.run_id === run.run_id);
+      expect(current?.result).toBe("running");
+      expect(current?.exit_code).toBeNull();
+      expect(current?.finished_at).toBeNull();
+    }
+    const stored = (await loadRuns()).runs[run.run_id];
+    expect(stored?.result).toBe("running");
+    expect(stored?.exit_code).toBeNull();
+  });
+
+  test("pane gone before marker → unknown, never fabricated success", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    transport.behavior = "hang";
+    const project = makeProject("p", [repo]);
+    const run = await startRun(startInput(project, repo), deps(transport));
+    const pane = transport.panes.get(run.pane_id);
+    if (pane) pane.alive = false;
+
+    const runs = await listRuns(deps(transport));
+    const updated = runs.find((r) => r.run_id === run.run_id);
+    expect(updated?.result).toBe("unknown");
+    expect(updated?.exit_code).toBeNull();
+    expect((await loadRuns()).runs[run.run_id]?.result).toBe("unknown");
+  });
+
+  test("restart with a stale running record → results marks unknown honestly", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    transport.behavior = "hang";
+    const project = makeProject("p", [repo]);
+    const run = await startRun(startInput(project, repo), deps(transport));
+    expect(run.result).toBe("running");
+
+    // Simulate a herdr restart: a NEW transport knows nothing about the
+    // recorded pane id, so pane.get reports it gone.
+    const afterRestart = new FakeTransport();
+    const runs = await listRuns(deps(afterRestart));
+    const updated = runs.find((r) => r.run_id === run.run_id);
+    expect(updated?.result).toBe("unknown");
+    expect(updated?.exit_code).toBeNull();
+    expect((await loadRuns()).runs[run.run_id]?.result).toBe("unknown");
+  });
+
+  test("unreachable pane read during re-scan leaves the record unchanged", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    transport.behavior = "hang";
+    const project = makeProject("p", [repo]);
+    const run = await startRun(startInput(project, repo), deps(transport));
+
+    // Socket dies between ownership check and scrollback read.
+    transport.paneRead = async () => {
+      throw new Error("socket reset by peer");
+    };
+    const runs = await listRuns(deps(transport));
+    const current = runs.find((r) => r.run_id === run.run_id);
+    expect(current?.result).toBe("running");
+    expect(current?.exit_code).toBeNull();
+    expect((await loadRuns()).runs[run.run_id]?.result).toBe("running");
+  });
+
+  test("foreign record is never re-scanned through the wrong session", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    transport.behavior = "hang";
+    const project = makeProject("p", [repo]);
+    const run = await startRun(startInput(project, repo), deps(transport));
+    completePaneLater(transport, run.pane_id, 0);
+    const readsBefore = transport.readCalls;
+
+    const runs = await listRuns(deps(transport, { sessionKey: "elsewhere /tmp/e.sock" }));
+    const updated = runs.find((r) => r.run_id === run.run_id);
+    expect(updated?.result).toBe("running");
+    expect(transport.readCalls).toBe(readsBefore);
+    expect((await loadRuns()).runs[run.run_id]?.result).toBe("running");
+  });
+});
+
 // --- CLI-level contract tests (no herdr needed) ----------------------------
 
 const CLI = path.join(__dirname, "..", "plugins", "projects", "src", "cli.ts");
@@ -914,6 +1121,43 @@ describe("cli scripts run/stop/results/logs", () => {
     expectErr(runCli(["scripts", "stop", "run-nope"]), "run_not_found");
     expect(runCli(["scripts", "run"]).status).toBe(2);
     expect(runCli(["scripts", "bogus"]).status).toBe(2);
+  });
+
+  test("results with unreachable socket keeps active records unchanged", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const now = new Date().toISOString();
+    await updateRuns((s) => {
+      s.runs["run-cli-stale"] = {
+        run_id: "run-cli-stale",
+        project_id: "p",
+        script: { id: "s", name: "S", command: "x", source: "t3.json" },
+        repo: { root: repo, remote: null },
+        pane_id: "w1:p1",
+        workspace_id: "w1",
+        tab_id: null,
+        cwd: repo,
+        command_line: "x",
+        script_path: null,
+        started_at: now,
+        finished_at: null,
+        exit_code: null,
+        result: "running",
+        host: null,
+        session_key: null,
+        stop_requested_at: null,
+        log_path: null,
+        error: null,
+      };
+    });
+    // HERDR_SOCKET_PATH points at a nonexistent socket: ownership check
+    // is unreachable, so the record must stay `running` — never
+    // fabricated as success or unknown.
+    const r = expectOk(runCli(["scripts", "results"]));
+    const runs = r.runs as Array<{ run_id: string; result: string; exit_code: number | null }>;
+    const record = runs.find((x) => x.run_id === "run-cli-stale");
+    expect(record?.result).toBe("running");
+    expect(record?.exit_code).toBeNull();
   });
 
   test("capability advertises scripts run/stop as mutations", () => {

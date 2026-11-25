@@ -352,9 +352,20 @@ injects input into panes it did not create.
   or pane close events.
 - **Results:** marker exit 0 → `success`; non-zero → `failed` (with
   `exit_code`). Wait timeout → the run stays `running`, the pane is left
-  alone (never killed implicitly), and `scripts results`/`logs`
-  re-check liveness lazily. Pane vanished before the marker →
+  alone (never killed implicitly). Pane vanished before the marker →
   `unknown` — never fabricated success.
+- **Durable completion receipt (#68):** the marker line persists in
+  pane scrollback after the wait times out, so completion is
+  recoverable without polling or a daemon. `scripts results`/`logs`
+  lazily re-scan the owned pane's scrollback (`pane.read`,
+  `recent_unwrapped`, last 2000 lines) for
+  `__HERDR_DONE_<run-id>__=<code>`; a found marker finalizes the record
+  exactly like the live wait path (`success`/`failed` + `exit_code` +
+  `finished_at` + bounded log tail). `events.subscribe`
+  `pane.output_matched` was evaluated and rejected: it requires a
+  persistent subscription connection a one-shot CLI cannot hold after
+  exit, events are not replayed to late subscribers, and ADR-0002
+  forbids a daemon — the scrollback receipt is the durable record.
 - A run record is persisted BEFORE the command is injected, so a crash
   mid-run still leaves an honest trail.
 - `pane.report_metadata` projects a display-only `script_<name>` token
@@ -458,8 +469,14 @@ Lists run records newest-first, optionally filtered by project id
 (`project_not_found` for unknown ids). Active records
 (`running`/`stopping`/`stop_unconfirmed`) are reconciled lazily AFTER
 ownership re-validation: `pane.get` plus the recorded host/session/
-workspace/tab context. A vanished pane flips `running` → `unknown`
-(persisted) and confirms `stopping`/`stop_unconfirmed` → `stopped`;
+workspace/tab context. For an OWNED pane the scrollback is then
+re-scanned once for the durable completion marker (#68): marker found
+→ the run is finalized `success`/`failed` with the parsed `exit_code`,
+`finished_at`, and a bounded log tail — this recovers runs whose
+`pane.wait_for_output` timed out, across CLI invocations and herdr
+restarts, with no polling loop. A vanished pane flips `running` →
+`unknown` (persisted) and confirms `stopping`/`stop_unconfirmed` →
+`stopped`;
 `stopping` states with an empty foreground process list also promote to
 `stopped`. A foreign host/session record is never probed through the
 wrong socket — its `error` is annotated and the result preserved for
@@ -477,11 +494,15 @@ Returns the bounded log for one run (`run_id` exact or unique prefix,
 `run_not_found`/`ambiguous_run` otherwise). On completion the runner
 stores the pane read tail — capped at `runLogMaxBytes` (config, default
 65536 bytes, tail kept with a truncation marker) at
-`<stateDir>/runs/<run-id>.log`. When no log exists yet and the run is
-active, a bounded `pane.read` (last 500 lines) is captured on demand —
-only after ownership re-validation passes; foreign/mismatched panes are
-never read. A `running` run whose pane is gone is marked `unknown`; a
-stopping-state run whose pane is gone is confirmed `stopped`.
+`<stateDir>/runs/<run-id>.log`. When the run is active, ownership
+re-validation runs first and the pane scrollback is re-scanned once
+for the completion marker (#68) — a found marker finalizes the record
+(`success`/`failed` + `exit_code`) and its tail becomes the log. With
+no marker, a bounded `pane.read` (`recent_unwrapped`, last 2000 lines)
+captures the tail on demand — only after ownership re-validation
+passes; foreign/mismatched panes are never read. A `running` run whose
+pane is gone is marked `unknown`; a stopping-state run whose pane is
+gone is confirmed `stopped`.
 
 Response: `{contract, command:"scripts logs", run_id, run, log_path,
 log, generated_at}` (`log` may be `null`).
