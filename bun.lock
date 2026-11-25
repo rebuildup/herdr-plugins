@@ -24,7 +24,7 @@
     },
     "plugins/controls": {
       "name": "@herdr-plugins/controls",
-      "version": "0.7.0",
+      "version": "0.8.0",
     },
     "plugins/conversations": {
       "name": "@herdr-plugins/conversations",

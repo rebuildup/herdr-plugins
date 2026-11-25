@@ -1,8 +1,8 @@
 id = "rebuildup.controls"
 name = "Controls"
-version = "0.7.0"
+version = "0.8.0"
 min_herdr_version = "0.9.0"
-description = "Agent operation core over the herdr agent.* socket API: send, wait-for-state, PTY-level interrupt, scrollback read, rename, and launch-time controls (model/permission-mode/resume args) under herdr-plugins.controls/v1."
+description = "Agent operation core over the herdr agent.* socket API: send, provider slash-command passthrough, wait-for-state, PTY-level interrupt, scrollback read, rename, and launch-time controls (model/permission-mode/resume args) under herdr-plugins.controls/v1."
 platforms = ["linux", "macos", "windows"]
 
 # No build step: the plugin is dependency-free TypeScript executed by Bun
