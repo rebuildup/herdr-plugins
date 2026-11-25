@@ -21,6 +21,10 @@ bun run src/cli.ts status <pane_id> [--session NAME] [--socket PATH] [--timeout 
 bun run src/cli.ts files <pane_id> [--path PATH]... [--session NAME]
 bun run src/cli.ts diff <pane_id> [--staged] [--stat|--name-status|--numstat]
     [--path PATH]... [--max-bytes N] [rev [rev]]
+bun run src/cli.ts log <pane_id> [--limit N] [--skip N] [--all]
+    [--first-parent] [--author X] [--grep X] [--since X] [--until X]
+    [--path PATH]...
+bun run src/cli.ts compare <pane_id> [base [head]] [--max-bytes N]
 bun run src/cli.ts project <pane_id> [--session NAME]
 bun run src/cli.ts capability
 ```
@@ -156,6 +160,65 @@ Exactly one of `output` (patch), `stat_output`, `name_status_output`, or
 `truncated: true` means the output was cut at the byte cap — clients must
 not treat it as complete.
 
+## `log`
+
+```json
+{
+  "contract": "herdr-plugins.git/v1",
+  "command": "log",
+  "pane_id": "w1:p1",
+  "repo_root": "/path/to/worktree",
+  "limit": 50,
+  "skip": 0,
+  "commits": [
+    {
+      "sha": "abc123…",
+      "parents": ["def456…"],
+      "author": { "name": "…", "email": "…", "date": "2026-01-01T00:00:00+00:00" },
+      "committer": { "name": "…", "email": "…", "date": "2026-01-01T00:00:01+00:00" },
+      "subject": "commit subject"
+    }
+  ],
+  "has_more": false,
+  "generated_at": "…"
+}
+```
+
+Options: `--limit N` (default 50, max 1000), `--skip N`, `--all`,
+`--first-parent`, `--author`, `--grep`, `--since`, `--until`, and
+`--path` pathspecs (repeatable). `has_more` is computed by fetching one
+extra commit. There is no arbitrary revision-range positional in v1.
+
+## `compare`
+
+```json
+{
+  "contract": "herdr-plugins.git/v1",
+  "command": "compare",
+  "pane_id": "w1:p1",
+  "repo_root": "/path/to/worktree",
+  "base": "origin/main",
+  "head": "HEAD",
+  "merge_base": "abc123…",
+  "ahead": 3,
+  "behind": 1,
+  "files": [ { "status": "M", "path": "src/a.ts", "old_path": null } ],
+  "stat": " src/a.ts | 2 +-",
+  "patch": "…bounded unified diff…",
+  "patch_truncated": false,
+  "patch_bytes": 1234,
+  "generated_at": "…"
+}
+```
+
+`compare [base [head]]` diffs `head` against the merge-base of `base` and
+`head`. With no revisions, `base` is the current branch's upstream
+(`@{upstream}`); a missing upstream is a `git_error`, never an empty
+diff. `files` entries carry raw name-status letters (`M`, `A`, `D`,
+`R100`, …); renames/copies populate `old_path` (source) and `path`
+(destination). `ahead` counts head-only commits, `behind` base-only
+commits. `patch` is byte-capped (`--max-bytes`, default 262144).
+
 ## `project`
 
 Computes `status` for the pane and reports metadata tokens via
@@ -178,7 +241,7 @@ the status data remains authoritative.
   "contract": "herdr-plugins.git/v1",
   "plugin": "rebuildup.git",
   "version": "0.2.0",
-  "commands": ["capability", "status", "files", "diff", "project"],
+  "commands": ["capability", "status", "files", "diff", "log", "compare", "project"],
   "read_only": true,
   "requires": { "git": true, "bun": true },
   "defaults": { "timeoutMs": 10000, "diffMaxBytes": 262144 }

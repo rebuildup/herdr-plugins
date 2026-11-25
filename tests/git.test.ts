@@ -4,10 +4,14 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
+  collectCompare,
   collectDiff,
   collectFiles,
+  collectLog,
   collectStatus,
   GitError,
+  parseLogOutput,
+  parseNameStatusZ,
   parseNumstatZ,
   parsePorcelain,
   parsePorcelainZ,
@@ -212,6 +216,118 @@ describe("collectFiles", () => {
     const conflicted = files.find((f) => f.path === "a.txt");
     expect(conflicted?.kind).toBe("conflicted");
     expect(conflicted?.binary).toBeNull();
+  });
+});
+
+describe("parseLogOutput", () => {
+  test("parses records separated by \\x01 with \\x1f fields", () => {
+    const out = [
+      "\x01abc123\x1fdef456 789abc\x1fT\x1ft@t\x1f2026-01-01T00:00:00+00:00\x1fT\x1ft@t\x1f2026-01-01T00:00:01+00:00\x1ffirst subject",
+      "\x01def456\x1f\x1fT\x1ft@t\x1f2026-01-01T00:00:00+00:00\x1fT\x1ft@t\x1f2026-01-01T00:00:01+00:00\x1froot commit",
+      "",
+    ].join("");
+    const commits = parseLogOutput(out);
+    expect(commits).toHaveLength(2);
+    expect(commits[0]).toMatchObject({
+      sha: "abc123",
+      parents: ["def456", "789abc"],
+      subject: "first subject",
+    });
+    expect(commits[1]?.parents).toEqual([]);
+  });
+});
+
+describe("parseNameStatusZ", () => {
+  test("parses statuses and rename old/new paths", () => {
+    const out = ["M", "a.txt", "R100", "old name.txt", "new name.txt", "D", "gone.txt", ""].join(
+      "\0",
+    );
+    const entries = parseNameStatusZ(out);
+    expect(entries).toEqual([
+      { status: "M", path: "a.txt", oldPath: null },
+      { status: "R100", path: "new name.txt", oldPath: "old name.txt" },
+      { status: "D", path: "gone.txt", oldPath: null },
+    ]);
+  });
+});
+
+describe("collectLog", () => {
+  test("returns commits newest-first with limit and has_more", async () => {
+    const repo = initRepo();
+    writeFileSync(path.join(repo, "a.txt"), "one\ntwo\n");
+    git(repo, ["commit", "-qam", "second"]);
+    writeFileSync(path.join(repo, "a.txt"), "one\ntwo\nthree\n");
+    git(repo, ["commit", "-qam", "third"]);
+
+    const all = await collectLog(repo, {});
+    expect(all.commits.map((c) => c.subject)).toEqual(["third", "second", "init"]);
+    expect(all.hasMore).toBe(false);
+
+    const limited = await collectLog(repo, { limit: 2 });
+    expect(limited.commits).toHaveLength(2);
+    expect(limited.hasMore).toBe(true);
+
+    const skipped = await collectLog(repo, { limit: 2, skip: 2 });
+    expect(skipped.commits.map((c) => c.subject)).toEqual(["init"]);
+  });
+
+  test("first-parent follows only the mainline of a merge", async () => {
+    const repo = initRepo();
+    git(repo, ["checkout", "-qb", "side"]);
+    writeFileSync(path.join(repo, "s.txt"), "s\n");
+    git(repo, ["add", "s.txt"]);
+    git(repo, ["commit", "-qm", "side work"]);
+    git(repo, ["checkout", "-q", "main"]);
+    writeFileSync(path.join(repo, "a.txt"), "one\nmain\n");
+    git(repo, ["commit", "-qam", "main work"]);
+    git(repo, ["merge", "--no-ff", "-m", "merge side", "side"]);
+
+    const merged = await collectLog(repo, { firstParent: true, limit: 10 });
+    const subjects = merged.commits.map((c) => c.subject);
+    expect(subjects).toContain("merge side");
+    expect(subjects).toContain("main work");
+    // side work is reachable only via the second parent.
+    expect(subjects).not.toContain("side work");
+  });
+});
+
+describe("collectCompare", () => {
+  test("compares HEAD against an explicit base revision", async () => {
+    const repo = initRepo();
+    writeFileSync(path.join(repo, "a.txt"), "one\ntwo\n");
+    git(repo, ["commit", "-qam", "second"]);
+    const baseSha = git(repo, ["rev-parse", "HEAD~1"]).trim();
+
+    const result = await collectCompare(repo, { base: baseSha, head: "HEAD" });
+    expect(result.mergeBase).toBe(baseSha);
+    expect(result.ahead).toBe(1);
+    expect(result.behind).toBe(0);
+    expect(result.files.map((f) => f.path)).toContain("a.txt");
+    expect(result.patch.output).toContain("+two");
+  });
+
+  test("uses merge-base for diverged branches", async () => {
+    const repo = initRepo();
+    git(repo, ["checkout", "-qb", "feature"]);
+    writeFileSync(path.join(repo, "f.txt"), "feature\n");
+    git(repo, ["add", "f.txt"]);
+    git(repo, ["commit", "-qm", "feature commit"]);
+    git(repo, ["checkout", "-q", "main"]);
+    writeFileSync(path.join(repo, "a.txt"), "one\nmain\n");
+    git(repo, ["commit", "-qam", "main commit"]);
+
+    const result = await collectCompare(repo, { base: "main", head: "feature" });
+    // merge-base is the init commit; feature adds f.txt only.
+    expect(result.files.map((f) => f.path)).toEqual(["f.txt"]);
+    expect(result.ahead).toBe(1);
+    expect(result.behind).toBe(1);
+  });
+
+  test("rejects when no base and no upstream", async () => {
+    const repo = initRepo();
+    await expect(collectCompare(repo, {})).rejects.toMatchObject({
+      kind: "git_error",
+    });
   });
 });
 

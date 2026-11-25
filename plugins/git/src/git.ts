@@ -407,6 +407,169 @@ export async function collectFiles(
   return { files };
 }
 
+export interface LogCommit {
+  sha: string;
+  parents: string[];
+  author: { name: string; email: string; date: string };
+  committer: { name: string; email: string; date: string };
+  subject: string;
+}
+
+// Record separator \x01, field separator \x1f — both illegal in the
+// fields we emit, so parsing cannot be confused by path/subject text.
+const LOG_FORMAT = "%x01%H%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%cn%x1f%ce%x1f%cI%x1f%s";
+
+export function parseLogOutput(output: string): LogCommit[] {
+  const commits: LogCommit[] = [];
+  for (const record of output.split("\x01")) {
+    if (record.length === 0) continue;
+    const f = record.split("\x1f");
+    if (f.length < 9) continue;
+    commits.push({
+      sha: f[0] as string,
+      parents: (f[1] as string).split(" ").filter((p) => p.length > 0),
+      author: { name: f[2] as string, email: f[3] as string, date: f[4] as string },
+      committer: { name: f[5] as string, email: f[6] as string, date: f[7] as string },
+      subject: (f[8] as string).replace(/\n+$/, ""),
+    });
+  }
+  return commits;
+}
+
+export interface LogRequest {
+  limit?: number | undefined;
+  skip?: number | undefined;
+  all?: boolean | undefined;
+  firstParent?: boolean | undefined;
+  author?: string | undefined;
+  grep?: string | undefined;
+  since?: string | undefined;
+  until?: string | undefined;
+  pathspec?: string[] | undefined;
+}
+
+export interface LogResult {
+  commits: LogCommit[];
+  hasMore: boolean;
+}
+
+const LOG_DEFAULT_LIMIT = 50;
+const LOG_MAX_LIMIT = 1000;
+
+export async function collectLog(
+  repoRoot: string,
+  request: LogRequest = {},
+  options: { timeoutMs?: number } = {},
+): Promise<LogResult> {
+  const limit = Math.min(Math.max(request.limit ?? LOG_DEFAULT_LIMIT, 1), LOG_MAX_LIMIT);
+  const args = ["log", `--format=${LOG_FORMAT}`, `--max-count=${limit + 1}`];
+  if (request.skip && request.skip > 0) args.push(`--skip=${request.skip}`);
+  if (request.all) args.push("--all");
+  if (request.firstParent) args.push("--first-parent");
+  if (request.author) args.push(`--author=${request.author}`);
+  if (request.grep) args.push(`--grep=${request.grep}`);
+  if (request.since) args.push(`--since=${request.since}`);
+  if (request.until) args.push(`--until=${request.until}`);
+  if (request.pathspec && request.pathspec.length > 0) {
+    args.push("--", ...request.pathspec);
+  }
+  const output = await gitOk(repoRoot, args, options);
+  const commits = parseLogOutput(output);
+  return { commits: commits.slice(0, limit), hasMore: commits.length > limit };
+}
+
+export interface NameStatusEntry {
+  /** Raw status letters, e.g. "M", "A", "D", "R100". */
+  status: string;
+  path: string;
+  oldPath: string | null;
+}
+
+/**
+ * Parse `git diff --name-status -z` output. Rename/copy records carry
+ * status, then old path, then new path as separate NUL fields.
+ */
+export function parseNameStatusZ(output: string): NameStatusEntry[] {
+  const tokens = output.split("\0").filter((t) => t.length > 0);
+  const entries: NameStatusEntry[] = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    const status = tokens[i] as string;
+    if (status.length === 0) continue;
+    if (status.startsWith("R") || status.startsWith("C")) {
+      const oldPath = tokens[i + 1] ?? "";
+      const path = tokens[i + 2] ?? "";
+      i += 2;
+      if (path) entries.push({ status, path, oldPath: oldPath || null });
+    } else {
+      const path = tokens[i + 1] ?? "";
+      i += 1;
+      if (path) entries.push({ status, path, oldPath: null });
+    }
+  }
+  return entries;
+}
+
+export interface CompareResult {
+  /** Revision the comparison is anchored on (as requested). */
+  base: string;
+  head: string;
+  mergeBase: string;
+  ahead: number;
+  behind: number;
+  files: NameStatusEntry[];
+  stat: string;
+  patch: DiffResult;
+}
+
+/**
+ * Branch/revision comparison: `git diff <merge-base> <head>` plus
+ * ahead/behind counts. `base` defaults to the upstream of `head`'s
+ * branch; with no arguments this compares HEAD against its upstream.
+ */
+export async function collectCompare(
+  repoRoot: string,
+  request: { base?: string | undefined; head?: string | undefined; maxBytes?: number | undefined },
+  options: { timeoutMs?: number } = {},
+): Promise<CompareResult> {
+  let base = request.base;
+  const head = request.head ?? "HEAD";
+  if (!base) {
+    const upstream = await upstreamRef(repoRoot, options);
+    if (!upstream) {
+      throw new GitError("git_error", "no upstream configured; pass an explicit base revision");
+    }
+    base = upstream;
+  }
+  const mergeBase = (await gitOk(repoRoot, ["merge-base", base, head], options))
+    .trim()
+    .split("\n")[0] as string;
+  const counts = await runGit(
+    repoRoot,
+    ["rev-list", "--left-right", "--count", `${base}...${head}`],
+    options,
+  );
+  const match = counts.stdout.trim().match(/^(\d+)\s+(\d+)$/);
+  // rev-list --left-right --count base...head: left = base-only (behind),
+  // right = head-only (ahead).
+  const behind = match ? Number(match[1]) : 0;
+  const ahead = match ? Number(match[2]) : 0;
+  const [nameStatus, stat, patch] = await Promise.all([
+    gitOk(repoRoot, ["diff", "--name-status", "-z", mergeBase, head], options),
+    gitOk(repoRoot, ["diff", "--stat", mergeBase, head], options),
+    collectDiff(repoRoot, { revisions: [mergeBase, head], maxBytes: request.maxBytes }, options),
+  ]);
+  return {
+    base,
+    head,
+    mergeBase,
+    ahead,
+    behind,
+    files: parseNameStatusZ(nameStatus),
+    stat: stat.trimEnd(),
+    patch,
+  };
+}
+
 export type DiffFormat = "patch" | "stat" | "name-status" | "numstat";
 
 export interface DiffRequest {

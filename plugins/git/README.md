@@ -19,6 +19,10 @@ bun run src/cli.ts status <pane_id>
 bun run src/cli.ts files <pane_id> [--path PATH]...
 bun run src/cli.ts diff <pane_id> [--staged] [--stat|--name-status|--numstat]
     [--path PATH]... [--max-bytes N] [rev [rev]]
+bun run src/cli.ts log <pane_id> [--limit N] [--skip N] [--all]
+    [--first-parent] [--author X] [--grep X] [--since X] [--until X]
+    [--path PATH]...
+bun run src/cli.ts compare <pane_id> [base [head]] [--max-bytes N]
 bun run src/cli.ts project <pane_id>
 ```
 
@@ -27,7 +31,11 @@ file-level change counts. `files` returns the structured per-file change
 list (staged/unstaged/untracked/conflicted, renames, binary flags).
 `diff` returns a byte-capped patch or machine-readable `--stat`,
 `--name-status`, or `--numstat` output (`truncated` flag when cut),
-optionally limited by `--path` pathspecs and revisions. `project`
+optionally limited by `--path` pathspecs and revisions. `log` returns
+structured commit history (sha/parents/author/committer/subject) with
+`--limit`/`--skip` paging and `has_more`. `compare` diffs a revision range
+against its merge-base — defaulting to the branch's upstream — returning
+changed files, stat, ahead/behind, and a bounded patch. `project`
 additionally reports `git_branch`, `git_changes`, and `git_ahead_behind`
 pane metadata tokens.
 
