@@ -15,13 +15,15 @@ automations, adapted to herdr's no-daemon model.
 
 ## Status
 
-T2 registry core (#144) implemented: task CRUD, pause/resume,
-manual `run-now` records, run history with deterministic missed-run
-derivation, and `reconcile` materialization. The plugin holds no
-clock and no daemon — scheduled firing is driven by external clocks
-(`schedule install` OS entries or opt-in `watch`) calling the
-idempotent `tick`/`fire` path (ADR-0022), which lands in #145; event
-triggers in #146, webhook evaluation (if adopted) in #147.
+T3 firing + delivery (#145) implemented on top of the T2 registry:
+`fire`/`tick` idempotent occurrence firing with misfire policies,
+`schedule install|uninstall|status` OS adapters (launchd / systemd
+--user / schtasks) and opt-in `watch`, run delivery via
+`agent.prompt`/`agent.start` with `[automations]` provenance, and
+honest `driver.state` reporting. Event triggers land in #146,
+webhook evaluation (if adopted) in #147. The plugin holds no clock
+and no daemon — external clocks call the idempotent `tick`/`fire`
+path (ADR-0022).
 
 ## Commands
 
@@ -41,6 +43,10 @@ bun run src/cli.ts delete <task_id>
 bun run src/cli.ts run-now <task_id>
 bun run src/cli.ts runs [--task <id>] [--status S] [--limit N] [--stored-only]
 bun run src/cli.ts reconcile [--task <id>]
+bun run src/cli.ts fire <task_id> --scheduled-for <iso8601>
+bun run src/cli.ts tick
+bun run src/cli.ts watch [--interval SEC]
+bun run src/cli.ts schedule install|uninstall|status
 bun run src/cli.ts help
 ```
 
@@ -52,9 +58,10 @@ Schedules: `interval` (`every_ms >= 60000`), `fixed_time`
 `webhook`/`event` are schema-reserved → `unsupported_schedule` until
 #146/#147.
 
-`run-now` records a manual run (`trigger:"manual"`,
-`scheduled_for:null`, `status:"scheduled"`); actual delivery lands
-with the #145 run path.
+`run-now` records and delivers a manual run
+(`trigger:"manual"`, `scheduled_for:null`) through the same
+`agent.prompt`/`agent.start` path as scheduled fires; it always
+executes and never collides with the occurrence idempotency key.
 
 ## State
 

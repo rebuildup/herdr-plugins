@@ -4,7 +4,9 @@
 > ADR-0022 (firing mechanism) and ADR-0023 (delivery, idempotency,
 > boundaries). #144 (T2) implemented the task-registry surface
 > (`create`/`list`/`get`/`update`/`set-enabled`/`delete`/`run-now`/
-> `runs`/`reconcile`); #145/#146/#147 flesh out the remaining commands.
+> `runs`/`reconcile`); #145 (T3) implemented the firing drivers
+> (`fire`/`tick`/`watch`/`schedule`), run delivery, and driver
+> reporting; #146/#147 flesh out event/webhook triggers.
 > External clients MUST depend only on this contract, never on the
 > plugin's internal state file format.
 
@@ -164,15 +166,86 @@ occurrence (or `created_at` for the first), so effective period is
 | `update` | implemented (#144) | Partial update of name/prompt/schedule/destination/misfire; ≥1 field required. |
 | `set-enabled` | implemented (#144) | `true` opens a new owed window (`enabled_at=now`); `false` materializes owed missed runs then closes it (`disabled_at=now`). |
 | `delete` | implemented (#144) | Removes the task AND its run records; unknown id → `task_not_found`. |
-| `run-now` | implemented (#144 registry; execution #145) | Creates a `trigger:"manual"`, `scheduled_for:null`, `status:"scheduled"` run — pending execution by the #145 run path; never collides with the occurrence key. |
+| `run-now` | implemented (#144 registry, #145 execution) | Creates a `trigger:"manual"`, `scheduled_for:null` run and delivers it synchronously through the same run path as `fire`; never collides with the occurrence key. |
 | `runs` | implemented (#144) | Run history newest-first; stored runs merged with derived `missed` entries (`run_id:null`, `derived:true`) unless `--stored-only`; `--task/--status/--limit`. |
 | `reconcile [--task]` | implemented (#144) | Materializes derived missed occurrences into real `missed` run records (idempotent). |
-| `fire <task-id> --scheduled-for <ts>` | #145 | Idempotent single-occurrence fire. |
-| `tick` | #145 | Scan due occurrences across enabled tasks; apply `misfire`; fire. The OS/watch driver entrypoint. |
-| `watch [--interval SEC]` | #145 | Opt-in foreground driver: sleep-until-next-due + `tick` loop (single timer, no high-frequency polling). |
-| `schedule install\|uninstall\|status` | #145 | OS scheduler adapter — ONE entry per plugin invoking `tick` (launchd / systemd --user timer / schtasks). |
+| `fire <task-id> --scheduled-for <ts>` | implemented (#145) | Idempotent single-occurrence fire; see §Fire semantics. |
+| `tick` | implemented (#145) | Scan due occurrences across enabled tasks; apply `misfire`; fire. The OS/watch driver entrypoint. |
+| `watch [--interval SEC]` | implemented (#145) | Opt-in foreground driver: sleep-until-next-due (capped at `--interval`, default 60 s) + `tick` loop; registers a pid-checked `watch` driver record. |
+| `schedule install\|uninstall\|status` | implemented (#145) | OS scheduler adapter — ONE entry per plugin invoking `tick` (launchd / systemd --user timer / schtasks); records an `os-scheduler` driver record. |
 | `hook` (event entrypoint) | #146 | `[[events]]` handler for reserved `event` schedules. |
 | `serve` (webhook) | #147 | Only if #147 adopts opt-in foreground serve; otherwise absent. |
+
+## Fire semantics (normative, #145)
+
+- `fire <task-id> --scheduled-for <ts>` validates `ts` against the
+  task's schedule: it MUST be a genuine occurrence instant
+  (`isOccurrenceInstant` — interval grid, exact `once.run_at`, or a
+  `fixed_time` wall-clock round-trip), MUST NOT be in the future, and
+  MUST lie inside the enabled window. Violations →
+  `invalid_occurrence`. Driver-supplied values are validated, never
+  trusted.
+- Existing records for the key are checked BEFORE schedule
+  re-validation (the interval anchor advances to the last fired
+  occurrence, so a spent key can fall off the current grid).
+- Idempotent no-op: an existing run in `scheduled | running | success |
+  failed` is returned unchanged. `missed | skipped | cancelled` do not
+  block — an explicit `fire` is a legitimate retry and creates a new
+  run record (the honest history keeps both).
+- Misfire on explicit fire: an occurrence older than the 60 s grace
+  fired under `misfire:"skip"` records a terminal `skipped` run
+  (`error.code:"misfire_skip"`) and is never executed; under
+  `run_once` (or inside the grace) it executes normally. `run-now`
+  (`trigger:"manual"`, `scheduled_for:null`) always executes — it is
+  the manual override.
+- `tick` partitions each enabled task's unresolved due occurrences at
+  exactly the `deriveMissed` cutoff (`now - MISSED_GRACE_MS`):
+  - inside grace → fire each through the run path;
+  - past grace → `misfire:"skip"` materializes them `missed` (never
+    executed); `misfire:"run_once"` fires the MOST RECENT late
+    occurrence once and materializes the rest `missed`.
+- Anchor invariant: `schedule_anchor_at` advances to a fired
+  occurrence only after every earlier owed occurrence has a run
+  record — `tick`/`fire` materialize missed occurrences first
+  (excepting the key about to fire) so pre-anchor occurrences can
+  never silently drop out of the owed/missed derivation.
+- Preflight: `fire`/`tick`/`run-now` probe herdr connectivity
+  (`session.snapshot`) BEFORE creating any run record. Transport
+  failure → `socket_unavailable`, exit non-zero, NO record; the
+  occurrence resolves `missed` on next read. Failures after the
+  record exists (destination gone, agent errors, mid-delivery
+  transport loss) become honest `failed` runs with the observed code.
+
+## Run delivery (normative, #145 — ADR-0023)
+
+- Prompt provenance: every delivered prompt begins with
+  `[automations] scheduled task <task_id> ("<name>") run <run_id> —
+  scheduled_for <iso>|manual run` so automation input is always
+  distinguishable from user input.
+- `destination.kind="pane"`: `agent.get` verifies a live agent
+  (missing/closed → `destination_unavailable`), then `agent.prompt`
+  delivers; observed `agent_status` is recorded in `result`.
+- `destination.kind="launch"`: the surface resolves to a fresh shell
+  pane — `{new_workspace:true}` → `workspace.create`,
+  `{workspace_id}` → `tab.create`, `{tab_id}` → `pane.split` of the
+  tab's first pane — then `agent.start` (`kind=destination.agent`,
+  `args=launch_args`) and `agent.prompt` (with the same brief
+  prompt-registry retry as handoff execute). `via:"handoff-execute"`
+  is schema-reserved and fails honestly `unsupported_destination`.
+- Run status observes API/agent-status results only; PTY text is
+  never parsed into success. `destination_snapshot` records the
+  fire-time resolved identities (pane/workspace/tab/agent/argv).
+
+## Driver reporting (normative, #145)
+
+- `watch` registers a `watch` driver record (pid + heartbeat) for its
+  session registry and removes it on clean stop; `schedule
+  install|status` maintains an `os-scheduler` record (platform,
+  entry, status).
+- Task `driver.state` derives honestly: live watch pid → `watch`;
+  installed OS entry → `os-scheduler`; failed install →
+  `install_failed`; dead pid / missing entry → `stale`; nothing →
+  `none`. Coverage is reported, never implied.
 
 ## Idempotency (normative)
 
@@ -224,6 +297,9 @@ JSON error object on stderr:
 | `lock_timeout` | Single-writer lock could not be acquired in time. |
 | `state_corrupt` | State file unreadable; refuses to guess. |
 | `driver_unavailable` | `tick`/`fire` invoked with no resolvable driver context where required. |
+| `invalid_occurrence` | `fire --scheduled-for` is not a genuine occurrence instant / is future / outside the enabled window (#145). |
+| `unsupported_destination` | Reserved `via:"handoff-execute"` or otherwise undeliverable destination shape at fire time (#145). |
+| `unsupported_platform` | Host platform has no `schedule` adapter (#145). |
 | `error` | Catch-all handled failure (exit 1). |
 
 ## State and identity

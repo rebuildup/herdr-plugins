@@ -7,8 +7,10 @@
  * `unsupported_schedule`), CRUD (`create`/`list`/`get`/`update`/
  * `set-enabled`/`delete`), manual runs (`run-now`/`runs`), lazy
  * missed-run derivation on reads, and `reconcile` materialization.
- * Firing (`fire`/`tick`/`watch`/`schedule`) and delivery land in #145;
- * event schedules in #146; webhook in #147.
+ * T3 (#145): time-based firing — `fire`/`tick`/`watch` drivers and
+ * `schedule install|uninstall|status` OS adapters (ADR-0022), run
+ * delivery via `agent.prompt`/`agent.start` (ADR-0023), and honest
+ * driver reporting. Event schedules land in #146; webhook in #147.
  *
  * Output contract (same shape as other plugins): one JSON document on
  * stdout for success, one JSON error object on stderr, exit 0 / 1 /
@@ -17,10 +19,15 @@
  * (ADR-0022).
  */
 
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { resolveSocketPath } from "../../../packages/herdr-client/src/socket";
+import { deliverRun, herdrTransport } from "./execute";
 import {
   AutomationsError,
   CONTRACT,
   type MisfirePolicy,
+  nextOccurrenceAfter,
   PLUGIN_ID,
   RUN_STATUSES,
   type RunStatus,
@@ -28,14 +35,28 @@ import {
 import {
   createTask,
   deleteTask,
+  finalizeRun,
   listRuns,
   listTaskViews,
   materializeMissed,
+  prepareFire,
+  prepareTick,
+  removeDriver,
   runNow,
   setTaskEnabled,
+  startRun,
   taskView,
   updateTask,
+  upsertDriver,
 } from "./registry";
+import {
+  type AdapterResult,
+  productionSchedulerDeps,
+  type SchedulerAdapter,
+  type ScheduleStatus,
+  schedulerAdapterFor,
+  type TickCommand,
+} from "./scheduler";
 import {
   type AutomationsState,
   loadState,
@@ -46,7 +67,7 @@ import {
 } from "./state";
 
 export { CONTRACT, PLUGIN_ID };
-export const PLUGIN_VERSION = "0.2.0";
+export const PLUGIN_VERSION = "0.3.0";
 
 export interface CapabilityDocument {
   contract: string;
@@ -77,8 +98,12 @@ export function capabilityDocument(): CapabilityDocument {
       "run-now",
       "runs",
       "reconcile",
+      "fire",
+      "tick",
+      "watch",
+      "schedule",
     ],
-    planned_commands: ["fire", "tick", "watch", "schedule", "hook", "serve"],
+    planned_commands: ["hook", "serve"],
     schedules: ["interval", "fixed_time", "once"],
     reserved_schedules: ["webhook", "event"],
     state_file: "state.json",
@@ -358,12 +383,338 @@ async function cmdDelete(options: CliOptions): Promise<void> {
   emit(result);
 }
 
+// ---------------------------------------------------------------------------
+// Run execution plumbing (#145)
+// ---------------------------------------------------------------------------
+
+function transportFor(options: CliOptions) {
+  const call: {
+    session?: string;
+    socketPath?: string;
+    timeoutMs?: number;
+  } = {};
+  if (options.session !== undefined) call.session = options.session;
+  if (options.socketPath !== undefined) call.socketPath = options.socketPath;
+  if (options.timeoutMs !== undefined) call.timeoutMs = options.timeoutMs;
+  return herdrTransport(call);
+}
+
+/**
+ * Connectivity preflight (contract §Missed-run): an unreachable herdr
+ * is a transport error — exit non-zero, NO run record fabricated; the
+ * occurrence resolves as `missed` on the next read.
+ */
+async function preflightTransport(options: CliOptions): Promise<void> {
+  try {
+    await transportFor(options).sessionSnapshot();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    emitError("socket_unavailable", `herdr unreachable: ${message}`);
+  }
+}
+
+interface DeliveryReport {
+  run_id: string;
+  task_id: string;
+  status: string;
+}
+
+/**
+ * Deliver a `running` run outside the state lock, then finalize the
+ * record. Delivery failures are captured INTO the run (`failed` +
+ * honest error) — they never escape as exceptions here.
+ */
+async function deliverAndFinalize(options: CliOptions, runId: string): Promise<DeliveryReport> {
+  const transport = transportFor(options);
+  // Fresh read: the task may have been updated between prepare and now.
+  const state = await loadState();
+  const registry = state.sessions[sessionKey(options)];
+  const run = registry?.runs[runId];
+  if (!registry || !run) {
+    emitError("error", `run '${runId}' disappeared before delivery`);
+  }
+  const task = registry.tasks[run.task_id];
+  if (!task) {
+    emitError("task_not_found", `task '${run.task_id}' missing before delivery`, run.task_id);
+  }
+  const outcome = await deliverRun(task, run, transport);
+  const finished = await updateState((s) =>
+    finalizeRun(registryFor(s, options), runId, {
+      status: outcome.status,
+      finishedAtMs: Date.now(),
+      result: outcome.result,
+      error: outcome.error,
+      destinationSnapshot: outcome.destinationSnapshot,
+    }),
+  );
+  return { run_id: finished.run_id, task_id: finished.task_id, status: finished.status };
+}
+
+// ---------------------------------------------------------------------------
+// fire / tick / watch / schedule (#145)
+// ---------------------------------------------------------------------------
+
+async function cmdFire(options: CliOptions): Promise<void> {
+  const { taskId, rest } = requireTaskId(options.args, "fire");
+  const scheduledFor = takeFlag(rest, "--scheduled-for");
+  if (scheduledFor.rest.length > 0) usage(`fire: unexpected argument '${scheduledFor.rest[0]}'`);
+  if (scheduledFor.value === undefined) usage("fire requires --scheduled-for <iso8601>");
+  await preflightTransport(options);
+  const nowMs = Date.now();
+  const prep = await updateState((state) =>
+    prepareFire(registryFor(state, options), taskId, scheduledFor.value as string, nowMs),
+  );
+  if (prep.action === "existing") {
+    emit({ run: prep.run, deduplicated: true });
+    return;
+  }
+  const delivered = await deliverAndFinalize(options, prep.run.run_id);
+  emit({ run: delivered, deduplicated: false });
+}
+
+interface TickSummary {
+  tasks_scanned: number;
+  fired: DeliveryReport[];
+  missed_materialized: number;
+}
+
+/** One tick pass: prepare under the lock, deliver each pending run. */
+async function runTickOnce(options: CliOptions): Promise<TickSummary> {
+  await preflightTransport(options);
+  const nowMs = Date.now();
+  const prep = await updateState((state) => prepareTick(registryFor(state, options), nowMs));
+  const fired: DeliveryReport[] = [];
+  for (const run of prep.pending) {
+    fired.push(await deliverAndFinalize(options, run.run_id));
+  }
+  return {
+    tasks_scanned: prep.tasksScanned,
+    fired,
+    missed_materialized: prep.missedMaterialized,
+  };
+}
+
+async function cmdTick(options: CliOptions): Promise<void> {
+  if (options.args.length > 0) usage(`tick: unexpected argument '${options.args[0]}'`);
+  const summary = await runTickOnce(options);
+  emit({ ...summary });
+}
+
+function emitLine(payload: unknown): void {
+  process.stdout.write(`${JSON.stringify(payload)}\n`);
+}
+
+/**
+ * Opt-in foreground driver (ADR-0022 §2): registers a `watch` driver
+ * record (pid-checked by `driver.state`), then loops — each pass runs
+ * the same `tick` logic as the OS entrypoint, sleeping until the next
+ * due occurrence capped at `--interval` seconds (default 60, matching
+ * the OS tick floor so registry changes are noticed promptly).
+ * JSONL events on stdout; SIGINT/SIGTERM stop cleanly and remove the
+ * driver record.
+ */
+async function cmdWatch(options: CliOptions): Promise<void> {
+  let args = options.args;
+  const intervalFlag = takeFlag(args, "--interval");
+  args = intervalFlag.rest;
+  if (args.length > 0) usage(`watch: unexpected argument '${args[0]}'`);
+  const intervalSec = Number(intervalFlag.value ?? "60");
+  const capMs = (Number.isFinite(intervalSec) && intervalSec > 0 ? intervalSec : 60) * 1000;
+
+  await updateState((state) =>
+    upsertDriver(registryFor(state, options), {
+      contract: CONTRACT,
+      driver_id: "watch",
+      kind: "watch",
+      status: "active",
+      detail: `watch process pid ${process.pid}`,
+      pid: process.pid,
+      platform: process.platform,
+      entry: null,
+      installed_at: null,
+      updated_at: new Date().toISOString(),
+    }),
+  );
+  emitLine({
+    contract: CONTRACT,
+    type: "watch.started",
+    pid: process.pid,
+    interval_ms: capMs,
+    at: new Date().toISOString(),
+  });
+
+  let stopping = false;
+  const stop = () => {
+    stopping = true;
+  };
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
+
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  try {
+    for (;;) {
+      if (stopping) break;
+      try {
+        const summary = await runTickOnce(options);
+        emitLine({
+          contract: CONTRACT,
+          type: "watch.tick",
+          ...summary,
+          at: new Date().toISOString(),
+        });
+      } catch (err) {
+        emitLine({
+          contract: CONTRACT,
+          type: "watch.error",
+          error: err instanceof Error ? err.message : String(err),
+          at: new Date().toISOString(),
+        });
+      }
+      if (stopping) break;
+      // Sleep until the next due occurrence, capped at --interval so
+      // newly created/edited tasks are noticed within one period.
+      let sleepMs = capMs;
+      try {
+        const state = await loadState();
+        const registry = state.sessions[sessionKey(options)];
+        if (registry) {
+          const now = Date.now();
+          let nextDue = Number.POSITIVE_INFINITY;
+          for (const task of Object.values(registry.tasks)) {
+            if (!task.enabled) continue;
+            const next = nextOccurrenceAfter(task, now);
+            if (next !== null && next < nextDue) nextDue = next;
+          }
+          if (Number.isFinite(nextDue)) {
+            sleepMs = Math.max(1_000, Math.min(nextDue - now, capMs));
+          }
+        }
+      } catch {
+        // State read failure → fall back to the cap interval.
+      }
+      // Refresh the driver heartbeat each loop.
+      await updateState((state) =>
+        upsertDriver(registryFor(state, options), {
+          contract: CONTRACT,
+          driver_id: "watch",
+          kind: "watch",
+          status: "active",
+          detail: `watch process pid ${process.pid}`,
+          pid: process.pid,
+          platform: process.platform,
+          entry: null,
+          installed_at: null,
+          updated_at: new Date().toISOString(),
+        }),
+      ).catch(() => {});
+      await sleep(sleepMs);
+    }
+  } finally {
+    process.off("SIGINT", stop);
+    process.off("SIGTERM", stop);
+    try {
+      await updateState((state) => removeDriver(registryFor(state, options), "watch"));
+    } catch {
+      // Best-effort cleanup; a stale record reports honestly via pid check.
+    }
+    emitLine({
+      contract: CONTRACT,
+      type: "watch.stopped",
+      reason: stopping ? "signal" : "error",
+      at: new Date().toISOString(),
+    });
+  }
+}
+
+function tickCommandFor(options: CliOptions): TickCommand {
+  return {
+    bun: process.execPath,
+    cli: fileURLToPath(import.meta.url),
+    socketPath: path.resolve(options.socketPath ?? resolveSocketPath({ session: options.session })),
+  };
+}
+
+function driverRecordFor(
+  platform: string,
+  entry: string | null,
+  status: "installed" | "error" | "stale",
+  detail: string,
+): Parameters<typeof upsertDriver>[1] {
+  return {
+    contract: CONTRACT,
+    driver_id: "os-scheduler",
+    kind: "os-scheduler",
+    status,
+    detail,
+    pid: null,
+    platform,
+    entry,
+    installed_at: status === "installed" ? new Date().toISOString() : null,
+    updated_at: new Date().toISOString(),
+  };
+}
+
+async function cmdSchedule(options: CliOptions): Promise<void> {
+  const sub = options.args[0];
+  const rest = options.args.slice(1);
+  if (sub === undefined || !["install", "uninstall", "status"].includes(sub)) {
+    usage("schedule requires install|uninstall|status");
+  }
+  if (rest.length > 0) usage(`schedule ${sub}: unexpected argument '${rest[0]}'`);
+  const adapter: SchedulerAdapter = schedulerAdapterFor(
+    process.platform,
+    productionSchedulerDeps(),
+  );
+  const entryLabel = "rebuildup.automations.tick";
+
+  if (sub === "install") {
+    const result: AdapterResult = await adapter.install(tickCommandFor(options));
+    await updateState((state) =>
+      upsertDriver(
+        registryFor(state, options),
+        driverRecordFor(
+          adapter.platform,
+          entryLabel,
+          result.ok ? "installed" : "error",
+          result.detail,
+        ),
+      ),
+    );
+    if (!result.ok) emitError("error", result.detail);
+    emit({ driver: "os-scheduler", platform: adapter.platform, detail: result.detail });
+    return;
+  }
+  if (sub === "uninstall") {
+    const result = await adapter.uninstall();
+    await updateState((state) => removeDriver(registryFor(state, options), "os-scheduler"));
+    if (!result.ok) emitError("error", result.detail);
+    emit({ driver: "os-scheduler", platform: adapter.platform, detail: result.detail });
+    return;
+  }
+  // status
+  const st = await adapter.status();
+  const recordStatus =
+    st.state === "installed" ? "installed" : st.state === "error" ? "error" : "stale";
+  await updateState((state) =>
+    upsertDriver(
+      registryFor(state, options),
+      driverRecordFor(adapter.platform, entryLabel, recordStatus, st.detail),
+    ),
+  );
+  emit({
+    schedule: { platform: adapter.platform, state: st.state as ScheduleStatus, detail: st.detail },
+  });
+}
+
 async function cmdRunNow(options: CliOptions): Promise<void> {
   const { taskId, rest } = requireTaskId(options.args, "run-now");
   if (rest.length > 0) usage(`run-now: unexpected argument '${rest[0]}'`);
+  await preflightTransport(options);
   const nowMs = Date.now();
   const run = await updateState((state) => runNow(registryFor(state, options), taskId, nowMs));
-  emit({ run });
+  await updateState((state) => startRun(registryFor(state, options), run.run_id, Date.now()));
+  const delivered = await deliverAndFinalize(options, run.run_id);
+  emit({ run: delivered });
 }
 
 async function cmdRuns(options: CliOptions): Promise<void> {
@@ -431,8 +782,12 @@ function helpText(): string {
     "  run-now <task_id>\n" +
     "  runs [--task <task_id>] [--status S] [--limit N] [--stored-only]\n" +
     "  reconcile [--task <task_id>]\n" +
+    "  fire <task_id> --scheduled-for <iso8601>\n" +
+    "  tick\n" +
+    "  watch [--interval SEC]\n" +
+    "  schedule install|uninstall|status\n" +
     "global flags: --session NAME --socket PATH --timeout MS\n" +
-    "planned (#145-#147): fire/tick/watch/schedule/hook/serve\n" +
+    "planned (#146/#147): hook/serve\n" +
     "see docs/contracts/automations-v1.md and docs/specs/automations.md\n"
   );
 }
@@ -477,9 +832,21 @@ async function main(argv: string[]): Promise<void> {
       case "reconcile":
         await cmdReconcile(options);
         return;
+      case "fire":
+        await cmdFire(options);
+        return;
+      case "tick":
+        await cmdTick(options);
+        return;
+      case "watch":
+        await cmdWatch(options);
+        return;
+      case "schedule":
+        await cmdSchedule(options);
+        return;
       default:
         usage(
-          `unknown command '${options.command}' — see 'help' (registry: create/list/get/update/set-enabled/delete/run-now/runs/reconcile)`,
+          `unknown command '${options.command}' — see 'help' (registry: create/list/get/update/set-enabled/delete/run-now/runs/reconcile; drivers: fire/tick/watch/schedule)`,
         );
     }
   } catch (err) {

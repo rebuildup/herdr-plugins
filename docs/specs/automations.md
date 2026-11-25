@@ -6,7 +6,8 @@ automations, adapted to herdr's no-daemon constraint.
 
 Parent: #32 (Automations) / #22. Decomposition: #137 (T1, this doc +
 ADR-0022/0023 + contract skeleton), #144 (T2 registry — implemented),
-#145 (T3 firing/delivery), #146 (T4 event triggers), #147 (T5 webhook).
+#145 (T3 firing/delivery — implemented), #146 (T4 event triggers),
+#147 (T5 webhook).
 
 ## Sources (upstream inventory — confirmed at t3code @ `9cc4018c`)
 
@@ -71,36 +72,82 @@ missed`, timestamps, `destination_snapshot`, observed-only `result`,
 | `webhook` | reserved | rejected `unsupported_schedule` until #147 |
 | `event` | reserved | rejected until #146 (`[[events]]` hook path) |
 
-### Firing architecture (ADR-0022)
+### Firing architecture (ADR-0022) — implemented #145
 
 The plugin holds no clock. Drivers invoke `tick` (scan due
 occurrences → apply `misfire` → `fire` each) or `fire` directly:
 
 - `schedule install|uninstall|status` — OS scheduler adapter,
-  ONE entry per plugin → `automations tick` (launchd /
-  systemd --user timer `Persistent=true` / schtasks `/sc minute`).
-- `watch` — opt-in foreground process, sleep-until-next-due.
-- `fire <task-id> --scheduled-for <ts>` — manual/idempotent
-  single-occurrence entrypoint.
+  ONE entry per plugin → `automations tick --socket <abs>`:
+  launchd `StartInterval=60` (`~/Library/LaunchAgents/
+  rebuildup.automations.tick.plist` + `launchctl bootstrap`),
+  systemd --user timer (`~/.config/systemd/user/
+  rebuildup.automations.tick.{service,timer}`,
+  `OnUnitActiveSec=1min`, `Persistent=true`), schtasks
+  (`/sc minute /mo 1`). Unsupported platforms report
+  `unsupported_platform`/`error` honestly — `watch` is the fallback.
+- `watch [--interval SEC]` — opt-in foreground process: registers a
+  pid-checked `watch` driver record, then loops the `tick` logic,
+  sleeping until the next due occurrence capped at `--interval`
+  (default 60 s, matching the OS tick floor). JSONL events; clean
+  stop removes the driver record.
+- `fire <task-id> --scheduled-for <ts>` — idempotent single-
+  occurrence entrypoint; `ts` is validated against the schedule
+  (`invalid_occurrence`), never trusted.
 
-### Delivery (ADR-0023)
+`tick` partitions unresolved due occurrences at the `deriveMissed`
+cutoff (`now - MISSED_GRACE_MS`): inside grace → fire; past grace →
+`misfire:"skip"` materializes `missed`, `misfire:"run_once"` fires
+the most recent late occurrence once. The interval
+`schedule_anchor_at` advances to the last fired occurrence only
+after all earlier owed occurrences are resolved (missed
+materialization runs first, excepting the firing key) — pre-anchor
+occurrences can never silently drop out of the owed/missed
+derivation.
 
-- `destination.kind = "pane"` → `agent.prompt` to the pane's live
-  agent (T3 `continue` analogue).
-- `destination.kind = "launch"` → `agent.start` fresh agent in a
-  chosen surface (T3 `new_thread`/`fresh_session` analogue); optional
-  `handoff_record_id` resolves context via `rebuildup.handoff`
-  (invoke, never reimplement; no auto-handoff — ADR-0021 §6).
-- Prompts carry an `[automations]` provenance prefix.
+### Delivery (ADR-0023) — implemented #145
+
+- `destination.kind = "pane"` → `agent.get` liveness check +
+  `agent.prompt` to the pane's live agent (T3 `continue` analogue);
+  missing agent/pane → `destination_unavailable`.
+- `destination.kind = "launch"` → surface resolves to a fresh shell
+  pane (`new_workspace` → `workspace.create`, `workspace_id` →
+  `tab.create`, `tab_id` → `pane.split` of the tab's first pane),
+  then `agent.start` (`kind=destination.agent`,
+  `args=launch_args`, 60 s readiness timeout) + `agent.prompt` with
+  a brief prompt-registry retry (same race handoff execute handles).
+  Optional `handoff_record_id` resolves context via
+  `rebuildup.handoff` (invoke, never reimplement; no auto-handoff —
+  ADR-0021 §6); `via:"handoff-execute"` is schema-reserved and fails
+  `unsupported_destination` until implemented.
+- Prompts carry the `[automations] scheduled task <task_id> ("<name>")
+  run <run_id> — scheduled_for <iso>|manual run` provenance prefix.
 - Run status observes API/agent-status results only; no PTY-text
-  success fabrication.
+  success fabrication. `destination_snapshot` records resolved
+  fire-time identities.
+- Preflight: `fire`/`tick`/`run-now` probe `session.snapshot` before
+  creating run records — transport failure → `socket_unavailable`,
+  no record fabricated. Post-record failures become honest `failed`
+  runs (`destination_unavailable`, server error codes,
+  `socket_unavailable`).
+- `run-now` executes synchronously through the same delivery path
+  (`scheduled` → `running` → terminal); manual runs always execute —
+  they are the override for `misfire:"skip"` tasks.
+
+### Driver reporting (#145)
+
+`driver.state` on task views derives from persisted driver records:
+live `watch` pid → `watch`; installed OS entry → `os-scheduler`;
+failed install → `install_failed`; dead pid/missing entry →
+`stale`; none → `none`.
 
 ## v1 scope confirmation
 
 **In**: interval/fixed_time/once schedules; task CRUD +
 pause/resume (`set-enabled`)/run-now/delete/runs; idempotent fire,
 misfire policy, missed-run lazy resolution; OS-scheduler + watch
-drivers; pane/launch destinations; CLI surface.
+drivers; pane/launch destinations; CLI surface — all implemented
+through #145.
 
 **T2 registry semantics (#144, implemented)**:
 
@@ -119,9 +166,9 @@ drivers; pane/launch destinations; CLI surface.
   (`run_id:null`, `derived:true`, capped at 200/task with
   `missed_truncated`); `reconcile` and `set-enabled false`
   materialize them into real `missed` run records (idempotent).
-- `run-now` records `trigger:"manual"`, `scheduled_for:null`,
-  `status:"scheduled"` — execution is the #145 run path; the record
-  honestly stays `scheduled` until then.
+- `run-now` records `trigger:"manual"`, `scheduled_for:null` and
+  delivers synchronously (#145); manual runs never collide with the
+  `task_id + scheduled_for` idempotency key.
 - `delete` removes the task and all its run records; state is
   session-namespaced (`hostname + canonical socket path`) under
   `HERDR_PLUGIN_STATE_DIR/state.json` with the standard
@@ -147,8 +194,7 @@ offline queue.
   record; occurrence resolves `missed` at next read.
 - Driver coverage is reported (`driver.state` on tasks,
   `schedule status`): `none`/`install_failed`/`stale` are visible,
-  never implied-armed. Until #145 lands, the registry reports
-  `driver.state = "none"` honestly.
+  never implied-armed (#145).
 - `missed` is derived deterministically from schedule + run records +
   the enabled window; reads and writes agree (ADR-0002 path 1).
   Derived entries carry `run_id:null`/`derived:true`; materialized

@@ -66,10 +66,14 @@ describe("automations capability (T1 scaffold, #137)", () => {
       "run-now",
       "runs",
       "reconcile",
+      "fire",
+      "tick",
+      "watch",
+      "schedule",
     ]) {
       expect(doc.commands).toContain(cmd);
     }
-    for (const planned of ["fire", "tick", "watch", "schedule", "hook", "serve"]) {
+    for (const planned of ["hook", "serve"]) {
       expect(doc.planned_commands).toContain(planned);
       expect(doc.commands).not.toContain(planned);
     }
