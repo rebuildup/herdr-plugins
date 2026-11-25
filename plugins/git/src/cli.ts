@@ -25,8 +25,11 @@ import {
   collectCommit,
   collectCompare,
   collectDiff,
+  collectFetch,
   collectFiles,
   collectLog,
+  collectPush,
+  collectRemotes,
   collectStage,
   collectStatus,
   collectUnstage,
@@ -42,10 +45,12 @@ const CONTRACT = "herdr-plugins.git/v1";
 const PLUGIN_ID = "rebuildup.git";
 const PLUGIN_VERSION = "0.2.0";
 const DEFAULT_TIMEOUT_MS = 10_000;
+const DEFAULT_REMOTE_TIMEOUT_MS = 60_000;
 const DEFAULT_DIFF_MAX_BYTES = 256 * 1024;
 
 interface PluginConfig {
   timeoutMs?: number | undefined;
+  remoteTimeoutMs?: number | undefined;
   diffMaxBytes?: number | undefined;
 }
 
@@ -161,6 +166,10 @@ async function loadConfig(): Promise<PluginConfig> {
     return {
       timeoutMs:
         typeof parsed.timeoutMs === "number" && parsed.timeoutMs > 0 ? parsed.timeoutMs : undefined,
+      remoteTimeoutMs:
+        typeof parsed.remoteTimeoutMs === "number" && parsed.remoteTimeoutMs > 0
+          ? parsed.remoteTimeoutMs
+          : undefined,
       diffMaxBytes:
         typeof parsed.diffMaxBytes === "number" && parsed.diffMaxBytes > 0
           ? parsed.diffMaxBytes
@@ -173,6 +182,11 @@ async function loadConfig(): Promise<PluginConfig> {
 
 function effectiveTimeoutMs(options: CliOptions, config: PluginConfig): number {
   return options.timeoutMs ?? config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+}
+
+/** Network-facing git ops (fetch/push) get a longer default budget. */
+function effectiveRemoteTimeoutMs(options: CliOptions, config: PluginConfig): number {
+  return options.timeoutMs ?? config.remoteTimeoutMs ?? DEFAULT_REMOTE_TIMEOUT_MS;
 }
 
 async function findPane(snapshot: SessionSnapshot, paneId: string): Promise<PaneInfo> {
@@ -670,6 +684,102 @@ async function cmdUpstream(options: CliOptions): Promise<void> {
   }
 }
 
+/** Optional second/third positionals after the pane id (remote/refspec). */
+function extraPositionals(options: CliOptions, valueFlags: string[] = []): string[] {
+  return positionals(options.args, valueFlags).slice(1);
+}
+
+async function cmdFetch(options: CliOptions): Promise<void> {
+  const config = await loadConfig();
+  const { paneId, repoRoot } = await repoRootForPane(options, config);
+  const extra = extraPositionals(options);
+  if (extra.length > 1) fail("fetch accepts at most one remote argument", 2);
+  const remote = extra[0];
+  if (remote) {
+    try {
+      assertSafeGitArg(remote, "remote");
+    } catch (err) {
+      if (err instanceof GitError) fail(err.message, 2, err.kind);
+      throw err;
+    }
+  }
+  const prune = hasFlag(options.args, "--prune");
+  try {
+    const output = await collectFetch(
+      repoRoot,
+      { remote, prune },
+      { timeoutMs: effectiveRemoteTimeoutMs(options, config) },
+    );
+    emit(mutationPayload("fetch", paneId, repoRoot, { remote: remote ?? null, prune, output }));
+  } catch (err) {
+    if (err instanceof GitError) fail(err.message, 1, err.kind);
+    throw err;
+  }
+}
+
+async function cmdPush(options: CliOptions): Promise<void> {
+  const config = await loadConfig();
+  const { paneId, repoRoot } = await repoRootForPane(options, config);
+  const extra = extraPositionals(options);
+  if (extra.length > 2) fail("push accepts at most remote and refspec arguments", 2);
+  const [remote, refspec] = extra;
+  for (const [value, what] of [
+    [remote, "remote"],
+    [refspec, "refspec"],
+  ] as const) {
+    if (value) {
+      try {
+        assertSafeGitArg(value, what);
+      } catch (err) {
+        if (err instanceof GitError) fail(err.message, 2, err.kind);
+        throw err;
+      }
+    }
+  }
+  const setUpstream = hasFlag(options.args, "--set-upstream");
+  const forceWithLease = hasFlag(options.args, "--force-with-lease");
+  try {
+    const output = await collectPush(
+      repoRoot,
+      { remote, refspec, setUpstream, forceWithLease },
+      { timeoutMs: effectiveRemoteTimeoutMs(options, config) },
+    );
+    emit(
+      mutationPayload("push", paneId, repoRoot, {
+        remote: remote ?? null,
+        refspec: refspec ?? null,
+        set_upstream: setUpstream,
+        force_with_lease: forceWithLease,
+        output,
+      }),
+    );
+  } catch (err) {
+    if (err instanceof GitError) fail(err.message, 1, err.kind);
+    throw err;
+  }
+}
+
+async function cmdRemote(options: CliOptions): Promise<void> {
+  const config = await loadConfig();
+  const { paneId, repoRoot } = await repoRootForPane(options, config);
+  try {
+    const remotes = await collectRemotes(repoRoot, {
+      timeoutMs: effectiveTimeoutMs(options, config),
+    });
+    emit({
+      contract: CONTRACT,
+      command: "remote",
+      pane_id: paneId,
+      repo_root: repoRoot,
+      remotes,
+      generated_at: new Date().toISOString(),
+    });
+  } catch (err) {
+    if (err instanceof GitError) fail(err.message, 1, err.kind);
+    throw err;
+  }
+}
+
 async function cmdProject(options: CliOptions): Promise<void> {
   const config = await loadConfig();
   const paneId = await resolvePaneId(options.args);
@@ -751,13 +861,17 @@ async function cmdCapability(options: CliOptions): Promise<void> {
       "commit",
       "branch",
       "upstream",
+      "fetch",
+      "push",
+      "remote",
       "project",
     ],
     read_only: false,
-    mutation_commands: ["stage", "unstage", "commit", "branch", "upstream"],
+    mutation_commands: ["stage", "unstage", "commit", "branch", "upstream", "fetch", "push"],
     requires: { git: true, bun: true },
     defaults: {
       timeoutMs: config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      remoteTimeoutMs: config.remoteTimeoutMs ?? DEFAULT_REMOTE_TIMEOUT_MS,
       diffMaxBytes: config.diffMaxBytes ?? DEFAULT_DIFF_MAX_BYTES,
     },
   });
@@ -779,6 +893,9 @@ Usage:
   git branch create <pane_id> <name> [--switch]
   git branch switch <pane_id> <name>
   git upstream <pane_id> <upstream-ref>
+  git fetch <pane_id> [remote] [--prune]
+  git push <pane_id> [--set-upstream] [--force-with-lease] [remote] [refspec]
+  git remote <pane_id>
   git project <pane_id> [--session NAME]
   git capability
 
@@ -809,6 +926,12 @@ async function main(): Promise<void> {
       return cmdBranch(options);
     case "upstream":
       return cmdUpstream(options);
+    case "fetch":
+      return cmdFetch(options);
+    case "push":
+      return cmdPush(options);
+    case "remote":
+      return cmdRemote(options);
     case "project":
       return cmdProject(options);
     case "capability":

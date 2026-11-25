@@ -658,6 +658,82 @@ export async function collectUpstream(
   return (await gitOk(repoRoot, ["branch", "--set-upstream-to", request.upstream], options)).trim();
 }
 
+export async function collectFetch(
+  repoRoot: string,
+  request: { remote?: string | undefined; prune?: boolean | undefined },
+  options: { timeoutMs?: number } = {},
+): Promise<string> {
+  if (request.remote) assertSafeGitArg(request.remote, "remote");
+  const args = ["fetch"];
+  if (request.prune) args.push("--prune");
+  if (request.remote) args.push(request.remote);
+  return (await gitOk(repoRoot, args, options)).trim();
+}
+
+export async function collectPush(
+  repoRoot: string,
+  request: {
+    remote?: string | undefined;
+    refspec?: string | undefined;
+    setUpstream?: boolean | undefined;
+    forceWithLease?: boolean | undefined;
+  },
+  options: { timeoutMs?: number } = {},
+): Promise<string> {
+  if (request.remote) assertSafeGitArg(request.remote, "remote");
+  if (request.refspec) assertSafeGitArg(request.refspec, "refspec");
+  const args = ["push"];
+  if (request.setUpstream) args.push("--set-upstream");
+  if (request.forceWithLease) args.push("--force-with-lease");
+  if (request.remote) args.push(request.remote);
+  if (request.refspec) args.push(request.refspec);
+  return (await gitOk(repoRoot, args, options)).trim();
+}
+
+export interface RemoteInfo {
+  name: string;
+  /** Fetch URL with any embedded credentials stripped. */
+  url: string;
+  /** Push URL with any embedded credentials stripped; falls back to `url`. */
+  pushUrl: string;
+}
+
+/** Remove userinfo (and any token in it) from a remote URL. */
+export function sanitizeRemoteUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    parsed.username = "";
+    parsed.password = "";
+    return parsed.toString();
+  } catch {
+    // scp-like syntax (git@host:path) or unparsable: return as-is — it
+    // cannot carry an https userinfo token in that form.
+    return url;
+  }
+}
+
+export async function collectRemotes(
+  repoRoot: string,
+  options: { timeoutMs?: number } = {},
+): Promise<RemoteInfo[]> {
+  const names = (await gitOk(repoRoot, ["remote"], options)).trim().split("\n").filter(Boolean);
+  const remotes: RemoteInfo[] = [];
+  for (const name of names) {
+    const [url, pushUrl] = await Promise.all([
+      gitOk(repoRoot, ["remote", "get-url", name], options).then((s) => s.trim()),
+      runGit(repoRoot, ["remote", "get-url", "--push", name], options).then((r) =>
+        r.code === 0 ? r.stdout.trim() : "",
+      ),
+    ]);
+    remotes.push({
+      name,
+      url: sanitizeRemoteUrl(url),
+      pushUrl: sanitizeRemoteUrl(pushUrl || url),
+    });
+  }
+  return remotes;
+}
+
 export type DiffFormat = "patch" | "stat" | "name-status" | "numstat";
 
 export interface DiffRequest {

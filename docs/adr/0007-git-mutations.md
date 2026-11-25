@@ -2,15 +2,15 @@
 
 ## Status
 
-Accepted (v0.2.0, `rebuildup.git` stage 2, Issue #24 / ticket #37)
+Accepted (v0.2.0, `rebuildup.git` stage 2, Issue #24 / tickets #37, #38)
 
 ## Context
 
 Issue #24 requires local Git operations (stage/unstage/commit/branch/
-upstream) on the pane's repository without weakening the stage-1 read
-contract or the project invariants: no shell interpolation, no ambient
-secret inheritance, no fabricated state, herdr remains the execution
-authority.
+upstream) plus remote operations (fetch/push/remote list) on the pane's
+repository without weakening the stage-1 read contract or the project
+invariants: no shell interpolation, no ambient secret inheritance, no
+fabricated state, herdr remains the execution authority.
 
 ## Decision
 
@@ -21,9 +21,12 @@ authority.
    reporting.
 2. **Explicit allow-list only.** Commands map to a fixed set of git
    argv shapes: `add`, `reset -q`, `restore --staged`, `commit -m`,
-   `switch`/`branch`, `branch --set-upstream-to`. Destructive or
-   history-rewriting operations (`reset --hard`, `clean`, `checkout --`,
-   force push, branch delete) are not exposed at all.
+   `switch`/`branch`, `branch --set-upstream-to`, `fetch [--prune]`,
+   `push [--set-upstream|--force-with-lease]`, and read-only `remote`.
+   Destructive or history-rewriting operations (`reset --hard`,
+   `clean`, `checkout --`, plain `--force`, branch delete) are not
+   exposed at all; force push exists only as the lease-checked
+   `--force-with-lease`.
 3. **Input validation before spawn.** Pathspecs, branch names, and
    upstream refs that are empty or `-`-prefixed are rejected; pathspecs
    go after `--`. Commit messages are `-m` argv values (repeatable for
@@ -45,7 +48,12 @@ authority.
   producing ambiguous state; callers can retry or inspect `status`.
 - Hooks (pre-commit etc.) run inside the same timeout budget; clients
   needing longer passes can raise `--timeout`.
+- `fetch`/`push` are network-bound, so they default to `remoteTimeoutMs`
+  (60s) rather than `timeoutMs`; `GIT_TERMINAL_PROMPT=0` still prevents
+  interactive credential prompts. Remote URLs reported by `remote` are
+  stripped of userinfo credentials before leaving the plugin.
 - Worktree lifecycle stays with herdr/Worktrunk — `branch switch`
   operates on the pane's checkout only and never creates worktrees.
-- If a future stage needs force-push or history edits, that is a new
-  ADR and likely a contract bump, not a flag on these commands.
+- If a future stage needs unconditional force push or history edits,
+  that is a new ADR and likely a contract bump, not a flag on these
+  commands.

@@ -1,10 +1,10 @@
 # Contract `herdr-plugins.git/v1`
 
 Structured JSON CLI contract for the `rebuildup.git` herdr plugin.
-Read commands (`status`, `files`, `diff`, `log`, `compare`, `project`)
-are side-effect free; mutation commands (`stage`, `unstage`, `commit`,
-`branch`, `upstream`) change the pane repository's index/refs on the
-herdr host. Follows the same conventions as `herdr-plugins.inbox/v1`
+Read commands (`status`, `files`, `diff`, `log`, `compare`, `remote`,
+`project`) are side-effect free; mutation commands (`stage`, `unstage`,
+`commit`, `branch`, `upstream`, `fetch`, `push`) change the pane
+repository's index/refs/remotes on the herdr host. Follows the same conventions as `herdr-plugins.inbox/v1`
 (`docs/contracts/inbox-v1.md`).
 
 ## Discovery
@@ -33,6 +33,10 @@ bun run src/cli.ts commit <pane_id> -m MSG [-m MSG]... [--allow-empty]
 bun run src/cli.ts branch create <pane_id> <name> [--switch]
 bun run src/cli.ts branch switch <pane_id> <name>
 bun run src/cli.ts upstream <pane_id> <upstream-ref>
+bun run src/cli.ts fetch <pane_id> [remote] [--prune]
+bun run src/cli.ts push <pane_id> [--set-upstream] [--force-with-lease]
+    [remote] [refspec]
+bun run src/cli.ts remote <pane_id>
 bun run src/cli.ts project <pane_id> [--session NAME]
 bun run src/cli.ts capability
 ```
@@ -227,10 +231,10 @@ diff. `files` entries carry raw name-status letters (`M`, `A`, `D`,
 (destination). `ahead` counts head-only commits, `behind` base-only
 commits. `patch` is byte-capped (`--max-bytes`, default 262144).
 
-## Mutations: `stage` / `unstage` / `commit` / `branch` / `upstream`
+## Mutations: `stage` / `unstage` / `commit` / `branch` / `upstream` / `fetch` / `push`
 
-These commands mutate the index and refs of the pane's repository on the
-herdr host. Success payloads share the shape
+These commands mutate the index, refs, or remote-tracking refs of the
+pane's repository on the herdr host. Success payloads share the shape
 `{contract, command, pane_id, repo_root, ok:true, …, generated_at}`:
 
 - `stage`/`unstage` — `{all, paths, output}` (`output` is git's trimmed
@@ -239,6 +243,13 @@ herdr host. Success payloads share the shape
 - `branch` — `{action: "create"|"switch", name, output}`; `create
   --switch` maps to `git switch -c`.
 - `upstream` — `{upstream, output}` (`git branch --set-upstream-to`).
+- `fetch` — `{remote, prune, output}`; `remote` defaults to the
+  configured default remote when omitted.
+- `push` — `{remote, refspec, set_upstream, force_with_lease, output}`.
+  Both positional args are optional; with none, `git push` uses the
+  branch's configured upstream and fails structurally when none exists.
+- `remote` (read-only) — `{remotes: [{name, url, pushUrl}]}`; URLs have
+  any embedded userinfo credentials stripped before reporting.
 
 Rules:
 
@@ -246,20 +257,27 @@ Rules:
   are usage errors.
 - `commit` requires ≥1 `-m`; `--allow-empty` is explicit-only. Identity
   comes from git config, never fabricated.
-- Branch/upstream values and pathspecs are argv elements; empty or
-  `-`-prefixed values are rejected (usage error, exit 2).
-- No destructive operations are exposed (no `reset --hard`, `clean`,
-  force push, branch delete).
+- Branch/upstream/remote/refspec values and pathspecs are argv elements;
+  empty or `-`-prefixed values are rejected (usage error, exit 2).
+- Force push exists only as `--force-with-lease` (lease-checked); plain
+  `--force` is never exposed. No other destructive operations (no
+  `reset --hard`, `clean`, branch delete).
+- `fetch`/`push` use `remoteTimeoutMs` (default 60000) instead of
+  `timeoutMs` because they are network-bound; `GIT_TERMINAL_PROMPT=0`
+  still prevents credential prompts.
 - Git failures — including hook failures, "nothing to commit", missing
-  upstream — return `{ok:false,error:{code:"error",kind:"git_error",
-  message}}` on stderr with exit 1; message includes git stderr.
+  upstream, non-fast-forward rejections — return `{ok:false,
+  error:{code:"error",kind:"git_error",message}}` on stderr with exit 1;
+  message includes git stderr.
 - Mutations are not manifest actions; they are invoked via CLI or agents
   with explicit arguments.
 
 For `branch`/`upstream`, the target value may be given as the sole
 positional when a pane is resolvable from `HERDR_PANE_ID` or plugin
 context; otherwise the first positional is the pane and the second is
-the value (`branch create <pane> <name>`).
+the value (`branch create <pane> <name>`). `fetch`/`push` take the pane
+as the first positional followed by at most one (`fetch`) or two
+(`push`) extra positionals.
 
 ## `project`
 
@@ -285,12 +303,19 @@ the status data remains authoritative.
   "version": "0.2.0",
   "commands": [
     "capability", "status", "files", "diff", "log", "compare",
-    "stage", "unstage", "commit", "branch", "upstream", "project"
+    "stage", "unstage", "commit", "branch", "upstream", "fetch",
+    "push", "remote", "project"
   ],
   "read_only": false,
-  "mutation_commands": ["stage", "unstage", "commit", "branch", "upstream"],
+  "mutation_commands": [
+    "stage", "unstage", "commit", "branch", "upstream", "fetch", "push"
+  ],
   "requires": { "git": true, "bun": true },
-  "defaults": { "timeoutMs": 10000, "diffMaxBytes": 262144 }
+  "defaults": {
+    "timeoutMs": 10000,
+    "remoteTimeoutMs": 60000,
+    "diffMaxBytes": 262144
+  }
 }
 ```
 

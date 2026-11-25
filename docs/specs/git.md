@@ -4,9 +4,9 @@ Stage 1 scope: read-only Git status/diff for herdr panes, extended in
 v0.2.0 with a structured per-file change list (`files`),
 pathspec-limited and machine-readable diffs, commit history (`log`),
 and merge-base branch comparison (`compare`). Local mutation commands
-(`stage`, `unstage`, `commit`, `branch`, `upstream`) landed in v0.2.0;
-remote operations (fetch/push) are ticket #38 and PR integration is
-#39. Checkpoint integration is Issue #4.
+(`stage`, `unstage`, `commit`, `branch`, `upstream`) and remote
+operations (`fetch`, `push`, `remote` list) landed in v0.2.0; PR
+integration is #39. Checkpoint integration is Issue #4.
 
 ## Purpose
 
@@ -45,10 +45,15 @@ only runs read-only `git` commands and projects display metadata.
 | `commit` | `git commit -m` (repeatable), `--allow-empty` opt-in. |
 | `branch` | `create <name> [--switch]` / `switch <name>`. |
 | `upstream` | `git branch --set-upstream-to <ref>`. |
+| `fetch` | `git fetch [remote] [--prune]`; longer `remoteTimeoutMs` budget. |
+| `push` | `git push [--set-upstream] [--force-with-lease] [remote] [refspec]`; plain `--force` is never exposed. |
+| `remote` | Read-only remote list; URLs are reported with embedded credentials stripped. |
 | `project` | Compute `status` for a pane and project pane metadata tokens. |
 
 All commands accept `--session`, `--socket`, `--timeout` (overrides
-`config.json` `timeoutMs`, default 10000); `diff`/`compare` accept
+`config.json` `timeoutMs`, default 10000); `fetch`/`push` additionally
+honor `--timeout` but default to `remoteTimeoutMs` (60000) because they
+are network-bound; `diff`/`compare` accept
 `--max-bytes` (default 262144, `config.json` `diffMaxBytes`).
 `files`/`diff`/`log` accept repeatable `--path <pathspec>` values, passed
 to git after `--`; values starting with `-` are rejected. All output is a
@@ -130,12 +135,14 @@ base-only commit counts), the changed-file list (`--name-status -z`
 parsed: `status`/`path`/`old_path`), `stat`, and a byte-capped `patch`
 with `patch_truncated`/`patch_bytes`.
 
-## Local mutations
+## Local and remote mutations
 
-`stage`, `unstage`, `commit`, `branch`, and `upstream` mutate the index
-and refs of the pane's repository on the herdr host. They share the same
-target resolution, timeout, and env hygiene as reads; there is still no
-daemon and no shell interpolation — every git invocation is argv spawn.
+`stage`, `unstage`, `commit`, `branch`, `upstream`, `fetch`, and `push`
+mutate the index, refs, remote-tracking refs, or the configured remote
+of the pane's repository on the herdr host. They share the same
+target resolution, timeout policy, and env hygiene as reads; there is
+still no daemon and no shell interpolation — every git invocation is
+argv spawn.
 
 Rules:
 
@@ -146,11 +153,22 @@ Rules:
 - `commit` requires at least one `-m`; `--allow-empty` is explicit-only.
   Author/committer identity comes from the repo/global git config — the
   plugin never fabricates one.
+- `fetch` accepts at most one remote positional plus `--prune`;
+  `push` accepts at most remote + refspec positionals plus
+  `--set-upstream`/`--force-with-lease`. With no positionals, `push`
+  defers to the branch's configured upstream and fails structurally
+  when none exists.
+- Force push exists only as `--force-with-lease` (lease-checked against
+  the remote-tracking ref); plain `--force` is never exposed.
+- `remote` is read-only: it reports `name`, `url`, and `pushUrl` with
+  any URL userinfo (embedded credentials/tokens) stripped.
 - No destructive operations exist: no `reset --hard`, `checkout -- .`,
-  `clean`, force push, or branch delete.
-- Failures (hooks, conflicts, missing upstream, nothing to commit) are
-  structured `git_error` results carrying git's stderr; partial success
-  is reported as failure.
+  `clean`, plain force push, or branch delete.
+- Failures (hooks, conflicts, missing upstream, nothing to commit,
+  non-fast-forward rejections) are structured `git_error` results
+  carrying git's stderr; partial success is reported as failure.
+- `GIT_TERMINAL_PROMPT=0` prevents credential prompts; `fetch`/`push`
+  use the longer `remoteTimeoutMs` budget (default 60s).
 - Mutations are not exposed as manifest actions — they require explicit
   arguments and are invoked via CLI/agents. `capability` reports
   `read_only: false` plus a `mutation_commands` list.
@@ -177,7 +195,7 @@ add opt-in `watch`-style refresh.
 `config.json` in the plugin config dir (optional):
 
 ```json
-{ "timeoutMs": 10000, "diffMaxBytes": 262144 }
+{ "timeoutMs": 10000, "remoteTimeoutMs": 60000, "diffMaxBytes": 262144 }
 ```
 
 Unknown keys are ignored; invalid values fall back to defaults.
@@ -185,8 +203,8 @@ Unknown keys are ignored; invalid values fall back to defaults.
 ## Non-goals
 
 - No daemon, no hooks that write plugin state, no polling.
-- No remote operations beyond `fetch`/`push` scope of ticket #38; no PR
-  writes (ticket #39 covers GitHub PR read/create).
+- No PR writes or forge integrations (ticket #39 covers GitHub PR
+  read/create via `gh`).
 - No destructive git operations (see Local mutations).
 - No parsing of GitHub remotes beyond what `gh`/git provide, no provider
   integrations.
