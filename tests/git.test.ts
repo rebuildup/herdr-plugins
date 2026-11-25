@@ -4,11 +4,17 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
+  collectBranchCreate,
+  collectBranchSwitch,
+  collectCommit,
   collectCompare,
   collectDiff,
   collectFiles,
   collectLog,
+  collectStage,
   collectStatus,
+  collectUnstage,
+  collectUpstream,
   GitError,
   parseLogOutput,
   parseNameStatusZ,
@@ -326,6 +332,104 @@ describe("collectCompare", () => {
   test("rejects when no base and no upstream", async () => {
     const repo = initRepo();
     await expect(collectCompare(repo, {})).rejects.toMatchObject({
+      kind: "git_error",
+    });
+  });
+});
+
+describe("mutations", () => {
+  test("stage paths / --all then commit returns new sha", async () => {
+    const repo = initRepo();
+    writeFileSync(path.join(repo, "a.txt"), "one\nchanged\n");
+    writeFileSync(path.join(repo, "n.txt"), "new\n");
+
+    await collectStage(repo, { paths: ["a.txt"] });
+    let status = await collectStatus(repo);
+    expect(status.changes.staged).toBe(1);
+    expect(status.changes.unstaged).toBe(0);
+    expect(status.changes.untracked).toBe(1);
+
+    // n.txt stays untracked until staged explicitly.
+    await collectStage(repo, { paths: ["n.txt"] });
+    const commit = await collectCommit(repo, { messages: ["work", "details"] });
+    expect(commit.sha).toMatch(/^[0-9a-f]{40}$/);
+    const log = git(repo, ["log", "-1", "--format=%s %b"]).trim();
+    expect(log).toContain("work");
+    expect(log).toContain("details");
+
+    status = await collectStatus(repo);
+    expect(status.changes.staged + status.changes.unstaged + status.changes.untracked).toBe(0);
+  });
+
+  test("unstage --all and per-path restore the index", async () => {
+    const repo = initRepo();
+    writeFileSync(path.join(repo, "a.txt"), "one\nchanged\n");
+    git(repo, ["add", "a.txt"]);
+    await collectUnstage(repo, { paths: ["a.txt"] });
+    let status = await collectStatus(repo);
+    expect(status.changes.staged).toBe(0);
+    expect(status.changes.unstaged).toBe(1);
+
+    git(repo, ["add", "a.txt"]);
+    await collectUnstage(repo, { all: true });
+    status = await collectStatus(repo);
+    expect(status.changes.staged).toBe(0);
+  });
+
+  test("stage/unstage require --all or --path", async () => {
+    const repo = initRepo();
+    await expect(collectStage(repo, {})).rejects.toMatchObject({ kind: "git_error" });
+    await expect(collectUnstage(repo, {})).rejects.toMatchObject({ kind: "git_error" });
+  });
+
+  test("rejects option-like path injection", async () => {
+    const repo = initRepo();
+    await expect(collectStage(repo, { paths: ["--all"] })).rejects.toMatchObject({
+      kind: "git_error",
+    });
+  });
+
+  test("commit without -m fails; --allow-empty works", async () => {
+    const repo = initRepo();
+    await expect(collectCommit(repo, { messages: [] })).rejects.toMatchObject({
+      kind: "git_error",
+    });
+    const empty = await collectCommit(repo, { messages: ["noop"], allowEmpty: true });
+    expect(empty.sha).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  test("commit with nothing staged fails as git_error", async () => {
+    const repo = initRepo();
+    await expect(collectCommit(repo, { messages: ["nothing"] })).rejects.toMatchObject({
+      kind: "git_error",
+    });
+  });
+
+  test("branch create/switch and upstream round-trip", async () => {
+    const repo = initRepo();
+    await collectBranchCreate(repo, { name: "feature", switchTo: true });
+    let status = await collectStatus(repo);
+    expect(status.branch.name).toBe("feature");
+
+    await collectBranchCreate(repo, { name: "other" });
+    await collectBranchSwitch(repo, { name: "feature" });
+    status = await collectStatus(repo);
+    expect(status.branch.name).toBe("feature");
+
+    // upstream against a real remote-tracking ref (bare remote + push)
+    const bare = tempDir();
+    spawnSync("git", ["init", "--bare", "-q", bare]);
+    git(repo, ["remote", "add", "origin", bare]);
+    git(repo, ["push", "-q", "origin", "feature"]);
+    const out = await collectUpstream(repo, { upstream: "origin/feature" });
+    expect(out).toContain("feature");
+    status = await collectStatus(repo);
+    expect(status.branch.upstream).toBe("origin/feature");
+  });
+
+  test("branch name injection is rejected", async () => {
+    const repo = initRepo();
+    await expect(collectBranchCreate(repo, { name: "--help" })).rejects.toMatchObject({
       kind: "git_error",
     });
   });

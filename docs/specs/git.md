@@ -3,9 +3,10 @@
 Stage 1 scope: read-only Git status/diff for herdr panes, extended in
 v0.2.0 with a structured per-file change list (`files`),
 pathspec-limited and machine-readable diffs, commit history (`log`),
-and merge-base branch comparison (`compare`). Mutation operations
-(staging, commit, push) and PR integration are later stages tracked by
-Issues #24/#25 (tickets #37–#39); Checkpoint integration is Issue #4.
+and merge-base branch comparison (`compare`). Local mutation commands
+(`stage`, `unstage`, `commit`, `branch`, `upstream`) landed in v0.2.0;
+remote operations (fetch/push) are ticket #38 and PR integration is
+#39. Checkpoint integration is Issue #4.
 
 ## Purpose
 
@@ -39,6 +40,11 @@ only runs read-only `git` commands and projects display metadata.
 | `diff` | Patch, `--stat`, `--name-status`, or `--numstat` for worktree, index (`--staged`), or revisions; `--path` pathspec filter. |
 | `log` | Structured commit history with filters and paging. |
 | `compare` | Merge-base diff between two revisions (default: HEAD vs upstream). |
+| `stage` | `git add` for `--all` or `--path` pathspecs. |
+| `unstage` | Unstage `--all` or `--path` pathspecs (`git reset`/`restore --staged`). |
+| `commit` | `git commit -m` (repeatable), `--allow-empty` opt-in. |
+| `branch` | `create <name> [--switch]` / `switch <name>`. |
+| `upstream` | `git branch --set-upstream-to <ref>`. |
 | `project` | Compute `status` for a pane and project pane metadata tokens. |
 
 All commands accept `--session`, `--socket`, `--timeout` (overrides
@@ -124,6 +130,31 @@ base-only commit counts), the changed-file list (`--name-status -z`
 parsed: `status`/`path`/`old_path`), `stat`, and a byte-capped `patch`
 with `patch_truncated`/`patch_bytes`.
 
+## Local mutations
+
+`stage`, `unstage`, `commit`, `branch`, and `upstream` mutate the index
+and refs of the pane's repository on the herdr host. They share the same
+target resolution, timeout, and env hygiene as reads; there is still no
+daemon and no shell interpolation — every git invocation is argv spawn.
+
+Rules:
+
+- Pathspecs and names are argv elements after `--` where applicable;
+  empty or `-`-prefixed values are rejected before spawn.
+- `stage`/`unstage` require `--all` or at least one `--path`; bare
+  invocation is a usage error, never an accidental whole-repo write.
+- `commit` requires at least one `-m`; `--allow-empty` is explicit-only.
+  Author/committer identity comes from the repo/global git config — the
+  plugin never fabricates one.
+- No destructive operations exist: no `reset --hard`, `checkout -- .`,
+  `clean`, force push, or branch delete.
+- Failures (hooks, conflicts, missing upstream, nothing to commit) are
+  structured `git_error` results carrying git's stderr; partial success
+  is reported as failure.
+- Mutations are not exposed as manifest actions — they require explicit
+  arguments and are invoked via CLI/agents. `capability` reports
+  `read_only: false` plus a `mutation_commands` list.
+
 ## Metadata projection
 
 `project` reports pane metadata tokens (display-only, herdr-owned
@@ -151,9 +182,13 @@ add opt-in `watch`-style refresh.
 
 Unknown keys are ignored; invalid values fall back to defaults.
 
-## Non-goals (stage 1)
+## Non-goals
 
-- No mutation commands, no hooks that write state, no daemon.
-- No parsing of GitHub remotes, PR state, or provider integrations.
+- No daemon, no hooks that write plugin state, no polling.
+- No remote operations beyond `fetch`/`push` scope of ticket #38; no PR
+  writes (ticket #39 covers GitHub PR read/create).
+- No destructive git operations (see Local mutations).
+- No parsing of GitHub remotes beyond what `gh`/git provide, no provider
+  integrations.
 - No fabricated status for bare repositories or missing `git` binary —
   both produce structured errors.

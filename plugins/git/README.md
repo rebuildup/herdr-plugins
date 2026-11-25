@@ -35,7 +35,9 @@ optionally limited by `--path` pathspecs and revisions. `log` returns
 structured commit history (sha/parents/author/committer/subject) with
 `--limit`/`--skip` paging and `has_more`. `compare` diffs a revision range
 against its merge-base — defaulting to the branch's upstream — returning
-changed files, stat, ahead/behind, and a bounded patch. `project`
+changed files, stat, ahead/behind, and a bounded patch. Mutation
+commands (`stage`, `unstage`, `commit`, `branch`, `upstream`) apply
+allow-listed local git operations; see ADR-0007. `project`
 additionally reports `git_branch`, `git_changes`, and `git_ahead_behind`
 pane metadata tokens.
 
@@ -44,7 +46,9 @@ Design: ADR-0006.
 
 ## Notes
 
-- Read-only in v0.2.0: no staging/commit/push (later stages, Issue #2).
+- v0.2.0 adds local mutations (stage/commit/branch/upstream); remote
+  fetch/push and PR integration are later tickets (#38/#39). No
+  destructive git operations are exposed (ADR-0007).
 - Remote herdr hosts: run the CLI on the target host (same rule as
   `rebuildup.inbox`).
 - Optional `config.json` in the plugin config dir:

@@ -570,6 +570,94 @@ export async function collectCompare(
   };
 }
 
+/**
+ * Mutation helpers (stage 2). All go through the same argv-spawn +
+ * timeout + env-hygiene path as reads; non-zero exits surface as
+ * GitError("git_error") carrying stderr. Callers validate arguments —
+ * nothing here interpolates into shell text.
+ */
+
+/** Reject empty or option-like values that could inject git flags. */
+export function assertSafeGitArg(value: string, what: string): void {
+  if (value.length === 0 || value.startsWith("-")) {
+    throw new GitError("git_error", `invalid ${what}: ${JSON.stringify(value)}`);
+  }
+}
+
+export async function collectStage(
+  repoRoot: string,
+  request: { all?: boolean | undefined; paths?: string[] | undefined },
+  options: { timeoutMs?: number } = {},
+): Promise<string> {
+  for (const p of request.paths ?? []) assertSafeGitArg(p, "path");
+  if (!request.all && (!request.paths || request.paths.length === 0)) {
+    throw new GitError("git_error", "stage requires --all or at least one --path");
+  }
+  const args = request.all ? ["add", "-A"] : ["add", "--", ...(request.paths as string[])];
+  return (await gitOk(repoRoot, args, options)).trim();
+}
+
+export async function collectUnstage(
+  repoRoot: string,
+  request: { all?: boolean | undefined; paths?: string[] | undefined },
+  options: { timeoutMs?: number } = {},
+): Promise<string> {
+  for (const p of request.paths ?? []) assertSafeGitArg(p, "path");
+  if (!request.all && (!request.paths || request.paths.length === 0)) {
+    throw new GitError("git_error", "unstage requires --all or at least one --path");
+  }
+  // `git reset -q` unstages everything (mixed reset to HEAD). On an
+  // unborn branch it fails with a structured git_error — acceptable.
+  const args = request.all
+    ? ["reset", "-q"]
+    : ["restore", "--staged", "--", ...(request.paths as string[])];
+  return (await gitOk(repoRoot, args, options)).trim();
+}
+
+export async function collectCommit(
+  repoRoot: string,
+  request: { messages: string[]; allowEmpty?: boolean | undefined },
+  options: { timeoutMs?: number } = {},
+): Promise<{ sha: string; summary: string }> {
+  if (request.messages.length === 0) {
+    throw new GitError("git_error", "commit requires at least one -m message");
+  }
+  const args = ["commit"];
+  for (const message of request.messages) args.push("-m", message);
+  if (request.allowEmpty) args.push("--allow-empty");
+  const summary = (await gitOk(repoRoot, args, options)).trim();
+  const sha = (await gitOk(repoRoot, ["rev-parse", "HEAD"], options)).trim();
+  return { sha, summary };
+}
+
+export async function collectBranchCreate(
+  repoRoot: string,
+  request: { name: string; switchTo?: boolean | undefined },
+  options: { timeoutMs?: number } = {},
+): Promise<string> {
+  assertSafeGitArg(request.name, "branch name");
+  const args = request.switchTo ? ["switch", "-c", request.name] : ["branch", request.name];
+  return (await gitOk(repoRoot, args, options)).trim();
+}
+
+export async function collectBranchSwitch(
+  repoRoot: string,
+  request: { name: string },
+  options: { timeoutMs?: number } = {},
+): Promise<string> {
+  assertSafeGitArg(request.name, "branch name");
+  return (await gitOk(repoRoot, ["switch", request.name], options)).trim();
+}
+
+export async function collectUpstream(
+  repoRoot: string,
+  request: { upstream: string },
+  options: { timeoutMs?: number } = {},
+): Promise<string> {
+  assertSafeGitArg(request.upstream, "upstream ref");
+  return (await gitOk(repoRoot, ["branch", "--set-upstream-to", request.upstream], options)).trim();
+}
+
 export type DiffFormat = "patch" | "stat" | "name-status" | "numstat";
 
 export interface DiffRequest {

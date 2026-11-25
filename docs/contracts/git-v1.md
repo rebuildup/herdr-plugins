@@ -1,8 +1,10 @@
 # Contract `herdr-plugins.git/v1`
 
 Structured JSON CLI contract for the `rebuildup.git` herdr plugin.
-Currently read-only: no command mutates the repository or herdr state.
-Follows the same conventions as `herdr-plugins.inbox/v1`
+Read commands (`status`, `files`, `diff`, `log`, `compare`, `project`)
+are side-effect free; mutation commands (`stage`, `unstage`, `commit`,
+`branch`, `upstream`) change the pane repository's index/refs on the
+herdr host. Follows the same conventions as `herdr-plugins.inbox/v1`
 (`docs/contracts/inbox-v1.md`).
 
 ## Discovery
@@ -25,6 +27,12 @@ bun run src/cli.ts log <pane_id> [--limit N] [--skip N] [--all]
     [--first-parent] [--author X] [--grep X] [--since X] [--until X]
     [--path PATH]...
 bun run src/cli.ts compare <pane_id> [base [head]] [--max-bytes N]
+bun run src/cli.ts stage <pane_id> [--all | --path PATH]...
+bun run src/cli.ts unstage <pane_id> [--all | --path PATH]...
+bun run src/cli.ts commit <pane_id> -m MSG [-m MSG]... [--allow-empty]
+bun run src/cli.ts branch create <pane_id> <name> [--switch]
+bun run src/cli.ts branch switch <pane_id> <name>
+bun run src/cli.ts upstream <pane_id> <upstream-ref>
 bun run src/cli.ts project <pane_id> [--session NAME]
 bun run src/cli.ts capability
 ```
@@ -219,6 +227,40 @@ diff. `files` entries carry raw name-status letters (`M`, `A`, `D`,
 (destination). `ahead` counts head-only commits, `behind` base-only
 commits. `patch` is byte-capped (`--max-bytes`, default 262144).
 
+## Mutations: `stage` / `unstage` / `commit` / `branch` / `upstream`
+
+These commands mutate the index and refs of the pane's repository on the
+herdr host. Success payloads share the shape
+`{contract, command, pane_id, repo_root, ok:true, …, generated_at}`:
+
+- `stage`/`unstage` — `{all, paths, output}` (`output` is git's trimmed
+  stdout, usually empty).
+- `commit` — `{sha, summary}`; `sha` is `HEAD` after the commit.
+- `branch` — `{action: "create"|"switch", name, output}`; `create
+  --switch` maps to `git switch -c`.
+- `upstream` — `{upstream, output}` (`git branch --set-upstream-to`).
+
+Rules:
+
+- `stage`/`unstage` require `--all` or ≥1 `--path`; other combinations
+  are usage errors.
+- `commit` requires ≥1 `-m`; `--allow-empty` is explicit-only. Identity
+  comes from git config, never fabricated.
+- Branch/upstream values and pathspecs are argv elements; empty or
+  `-`-prefixed values are rejected (usage error, exit 2).
+- No destructive operations are exposed (no `reset --hard`, `clean`,
+  force push, branch delete).
+- Git failures — including hook failures, "nothing to commit", missing
+  upstream — return `{ok:false,error:{code:"error",kind:"git_error",
+  message}}` on stderr with exit 1; message includes git stderr.
+- Mutations are not manifest actions; they are invoked via CLI or agents
+  with explicit arguments.
+
+For `branch`/`upstream`, the target value may be given as the sole
+positional when a pane is resolvable from `HERDR_PANE_ID` or plugin
+context; otherwise the first positional is the pane and the second is
+the value (`branch create <pane> <name>`).
+
 ## `project`
 
 Computes `status` for the pane and reports metadata tokens via
@@ -241,8 +283,12 @@ the status data remains authoritative.
   "contract": "herdr-plugins.git/v1",
   "plugin": "rebuildup.git",
   "version": "0.2.0",
-  "commands": ["capability", "status", "files", "diff", "log", "compare", "project"],
-  "read_only": true,
+  "commands": [
+    "capability", "status", "files", "diff", "log", "compare",
+    "stage", "unstage", "commit", "branch", "upstream", "project"
+  ],
+  "read_only": false,
+  "mutation_commands": ["stage", "unstage", "commit", "branch", "upstream"],
   "requires": { "git": true, "bun": true },
   "defaults": { "timeoutMs": 10000, "diffMaxBytes": 262144 }
 }
