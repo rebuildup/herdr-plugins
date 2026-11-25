@@ -113,7 +113,7 @@
       "issues": [23, 35],
       "depends_on": ["git-readonly"],
       "acceptance": "files コマンド (porcelain=v1 -z 厳密パース、rename/old_path、XY status、binary/conflict/untracked 区分) と diff --path フィルタ・--stat/--name-status/--numstat を契約化。",
-      "verification": "未着手 (Issue #35, release-0-2-0)。契約は herdr-plugins.git/v1 additive のみ。"
+      "verification": "実装済み (Issue #35 → PR #42, release-0-2-0 merge 36d3024)。files/porcelain -z/pathscope diff を git-v1.md・spec・README に反映、tests/git.test.ts で契約テスト。"
     },
     {
       "id": "git-history-compare",
@@ -127,7 +127,7 @@
       "issues": [23, 36],
       "depends_on": ["#35"],
       "acceptance": "log (limit/max-bytes/all/first-parent/author/grep/since) と compare (2 revision、ahead/behind、merge commit は first-parent diff 既定) を構造化返却。truncated/generated_at/ページングを契約化。",
-      "verification": "未着手 (Issue #36, release-0-2-0)。#35 と同一ファイル群のため直列化。"
+      "verification": "実装済み (Issue #36 → PR #43, release-0-2-0 merge b2d08ad)。log/compare (merge-base three-dot 既定、--first-parent は log のみ) を契約化。"
     },
     {
       "id": "git-write-local",
@@ -141,7 +141,7 @@
       "issues": [2, 24, 37],
       "depends_on": ["#35"],
       "acceptance": "stage/unstage/commit (-m 必須、--allow-empty 明示)/branch create・switch/upstream 設定を argv spawn で提供。force・変更破棄系は提供しない。#29 生成なしでも完結。",
-      "verification": "未着手 (Issue #37, release-0-2-0)。mutation であることを capability/仕様に明記。"
+      "verification": "実装済み (Issue #37 → PR #44, release-0-2-0 merge e9d05fa)。mutation_commands/read_only:false を capability に明記、ADR-0007。"
     },
     {
       "id": "git-remote-sync",
@@ -151,7 +151,7 @@
       "issues": [24, 38],
       "depends_on": ["git-write-local"],
       "acceptance": "fetch/push (upstream 既定、--set-upstream、--force-with-lease のみ force 相当)/remote -v 読み取り。資格情報はホスト git/gh 設定に委譲し plugin は保持・注入しない。GIT_TERMINAL_PROMPT=0。",
-      "verification": "未着手 (Issue #38, release-0-2-0)。#37 に続く直列 ticket。"
+      "verification": "実装済み (Issue #38 → PR #45, release-0-2-0 merge 8e098c9)。remoteTimeoutMs 既定60s、--force-with-lease のみ、remote URL の credential strip。"
     },
     {
       "id": "forge-github",
@@ -165,7 +165,7 @@
       "issues": [25, 39],
       "depends_on": ["#35", "#36"],
       "acceptance": "gh 検出 (>=2.81.0 相当)・pr list/status/create/view を argv spawn + --json で提供。repo は pane cwd の git remote から解決。merge/review/CI ログは scope 外 (read-only 契約)。",
-      "verification": "未着手 (Issue #39, release-0-2-0)。契約を git/v1 拡張か別 version かは設計判断 (ADR/spec 記録)。"
+      "verification": "実装済み (Issue #39 → PR #46, release-0-2-0 merge 62309b9)。契約は git/v1 additive 拡張と決定 (ADR-0008)。merge/review/CI ログは scope 外、残差は forge-non-github と #25 open 分。"
     },
     {
       "id": "forge-non-github",
