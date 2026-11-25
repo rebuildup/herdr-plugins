@@ -42,6 +42,12 @@ export interface TaskSpec {
   maxListItems: number;
   /** Per-task default timeout for provider execution, milliseconds. */
   defaultTimeoutMs: number;
+  /**
+   * When true, generation requires explicit opt-in
+   * (`guards.expensiveTaskOptIn` config or `--allow-expensive`) because
+   * the task's cost/profile is high (multi-step agent investigation).
+   */
+  requiresOptIn?: boolean;
 }
 
 const AGENT_AND_API = ["agent", "api"] as const;
@@ -108,6 +114,7 @@ export const TASKS: readonly TaskSpec[] = [
     maxOutputChars: 20_000,
     maxListItems: 1,
     defaultTimeoutMs: 600_000,
+    requiresOptIn: true,
   },
   {
     kind: "next_prompt",

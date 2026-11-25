@@ -59,3 +59,30 @@ bun run src/cli.ts config add-api-generator --id openai --kind openai \
 
 See `docs/contracts/textgen-v1.md` for the full contract and
 `docs/specs/textgen.md` for the design.
+
+## Agent-task guards and next-prompt watch (#109)
+
+`review_guide` requires opt-in — it runs a multi-step read-only
+investigation in the agent pane (largest subscription cost):
+
+```bash
+bun run src/cli.ts generate --task review_guide --allow-expensive \
+  --input '{"target": "PR #42"}' --cwd /path/to/checkout
+# or permanently: config.json → "guards": {"expensiveTaskOptIn": true}
+```
+
+Optional quota guard (`guards.quota.enabled` in config.json) probes
+`rebuildup.usage`'s read-only `quota` command before spawning a pane
+and blocks at `maxUsedPercent` (default 95); an absent/unreachable
+usage plugin degrades to a warning, never a hard dependency.
+
+`watch-next-prompt` generates a predicted next prompt whenever a
+watched pane's agent finishes a turn:
+
+```bash
+bun run src/cli.ts watch-next-prompt --pane w1:p2 [--once] [--max-triggers 5]
+```
+
+It emits JSONL events (`next_prompt.triggered|generated|error`) and
+records each result as pane metadata `textgen_next_prompt`; composer
+insertion is the caller's job.

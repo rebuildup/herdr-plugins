@@ -13,6 +13,7 @@ platforms = ["linux", "macos", "windows"]
 # `agent.prompt --wait` → `agent.read` → cleanup), so generation stays
 # visible, interruptible, and under herdr's PTY authority. API generators
 # are opt-in per config (ADR-0018 credential boundary). No
-# [[actions]] / [[events]] / [[startup]] yet: generation is an explicit
-# CLI invocation; event-driven triggers (e.g. next_prompt on turn
-# completion) are T3/#109 scope.
+# [[actions]] / [[events]] / [[startup]]: generation and the
+# watch-next-prompt subscription are explicit CLI invocations (#109);
+# event-driven triggers run inside the long-lived CLI, not as plugin
+# hooks, so a plugin failure can never wedge herdr's event pipeline.
