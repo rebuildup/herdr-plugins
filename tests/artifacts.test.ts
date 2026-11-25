@@ -132,7 +132,15 @@ describe("artifacts cli (draft scaffold)", () => {
     expect(doc.storage_modes).toEqual([...STORAGE_MODES]);
     const limits = doc.limits as Record<string, unknown>;
     expect(limits.max_bytes).toEqual(MAX_BYTES);
-    expect(doc.implemented_commands).toEqual(["capability", "help"]);
+    expect(doc.implemented_commands).toEqual([
+      "capability",
+      "help",
+      "register",
+      "list",
+      "get",
+      "search",
+      "delete",
+    ]);
     expect(doc.planned_commands).toEqual([...PLANNED_COMMANDS]);
   });
 
@@ -156,17 +164,8 @@ describe("artifacts cli (draft scaffold)", () => {
     expect(result.error?.code).toBe("usage");
   });
 
-  test("planned registry commands fail with contract_draft", () => {
-    for (const command of [
-      "register",
-      "list",
-      "get",
-      "search",
-      "verify",
-      "delete",
-      "deliver",
-      "gc",
-    ]) {
+  test("unimplemented planned commands fail with contract_draft", () => {
+    for (const command of [...PLANNED_COMMANDS]) {
       const result = runCli([command]);
       expect(result.status).toBe(1);
       expect(result.json).toBeNull();

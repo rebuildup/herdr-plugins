@@ -9,14 +9,15 @@ the specification
 design boundary
 [`docs/adr/0024-artifacts-boundary.md`](../../docs/adr/0024-artifacts-boundary.md).
 
-## What it does (planned)
+## What it does
 
 `register` snapshots a file into plugin state (`state_copy`, default)
-or records an external `path_ref`; `list`/`get`/`search`/`verify` read
-the index; `delete`/`gc` remove artifacts with reference warnings;
-`deliver` sends an artifact's stable absolute path to an agent/pane
-inside prompt text (v1 attachment definition — no structured
-attachment API exists in herdr protocol 22).
+or records an external `path_ref` (opt-in); `list`/`get`/`search` read
+the index with honest `missing_ref`/`owner_stale`/`oversize` reporting;
+`delete` removes artifacts (`--force` required when `refs` exist).
+Planned: `verify`, `deliver` (stable absolute path in prompt text —
+v1 attachment definition; no structured attachment API exists in
+herdr protocol 22), `gc` retention.
 
 ## What it does NOT do
 
@@ -28,16 +29,24 @@ attachment API exists in herdr protocol 22).
 
 ## Status
 
-T1 scaffold (#136): only `capability` and `help` are implemented;
-registry commands return `contract_draft` until T2–T4
-(#141/#142/#143). CLI-only plugin — no `[[actions]]`/`[[events]]`.
+T1 scaffold (#136) + T2 registry core (#141): `capability`, `help`,
+`register`, `list`, `get`, `search`, `delete` are implemented;
+`verify`/`deliver`/`gc` return `contract_draft` until T3–T4
+(#142/#143). Contract `herdr-plugins.artifacts/v1` is still **draft**.
+CLI-only plugin — no `[[actions]]`/`[[events]]`. Registry commands
+need a reachable herdr session (`session.snapshot`) for identity and
+staleness reporting.
 
 ## Usage
 
 ```bash
 cd <plugin_root>
 bun run src/cli.ts capability
-bun run src/cli.ts help
+bun run src/cli.ts register --path report.html --title "Weekly report"
+bun run src/cli.ts list --kind html
+bun run src/cli.ts get art-<id>
+bun run src/cli.ts search "weekly" --kind html
+bun run src/cli.ts delete art-<id> [--force]
 ```
 
 Prerequisite: Bun on PATH (same as every plugin here).
