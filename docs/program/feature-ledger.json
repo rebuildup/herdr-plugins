@@ -333,10 +333,10 @@
         "apps/server/src/attachmentPaths.ts"
       ],
       "classification": "plugin",
-      "issues": [31],
+      "issues": [31, 136, 141, 142, 143],
       "depends_on": ["conversations", "provider-controls-composer"],
       "acceptance": "生成 HTML/画像/PDF/ファイルの登録・参照・保存・検索・添付、MCP Apps/visual replies、SnapShots、ファイルビューア、ブラウザプレビュー/import の棚卸しと責務割当。GUI・OS 固有 capture/render は herdr-t3。",
-      "verification": "未着手。Host/Session/Artifact 識別、パストラバーサル防止、容量上限、隔離レンダリング・ネットワーク/秘密境界、削除と永続参照を保証。"
+      "verification": "T1 (#136) 完了: 棚卸し確定・責務分界 ADR-0024・契約骨格 herdr-plugins.artifacts/v1 (draft)・plugins/artifacts scaffold (capability/help のみ)・docs/specs/artifacts.md・docs/contracts/artifacts-v1.md。分類確定: registry=plugin (#141-#143)、HTML render/screenshot/public proxy=gui-integration (herdr-t3)、SnapShots=not-feasible (OS capture→herdr-t3/desktop)、browser-import=out-of-scope (GUI)、MCP Apps=upstream-blocked (#30 依存+client 描画)、question-attachments=v1 は prompt 内 path 参照 (構造化添付 API は protocol 22 に無く upstream gap 候補として記録)。保管方針: state_copy 既定 (kind 別 cap: image 10MiB/他 25MiB) + path_ref opt-in (oversize=warning, missing_ref 誠実報告)。T2-T4 未着手。"
     },
     {
       "id": "automations",

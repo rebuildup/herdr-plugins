@@ -1,0 +1,15 @@
+id = "rebuildup.artifacts"
+name = "Artifacts"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Artifact registry: registers, validates, indexes, and delivers references to generated files (HTML/image/pdf/file) under herdr-plugins.artifacts/v1. Rendering, capture, and MCP Apps UI stay with herdr-t3 (ADR-0024)."
+platforms = ["linux", "macos", "windows"]
+
+# No build step: the plugin is dependency-free TypeScript executed by Bun
+# (runtime prerequisite, see plugins/artifacts/README.md).
+#
+# T1 scaffold (#136): contract `herdr-plugins.artifacts/v1` is DRAFT.
+# Only `capability`/`help` are implemented; the registry commands
+# (register/list/get/search/verify/delete/deliver/gc) land in T2-T4
+# (#141/#142/#143). No [[actions]] / [[events]] in v1: the registry is
+# explicit CLI invocation (same convention as rebuildup.conversations).
