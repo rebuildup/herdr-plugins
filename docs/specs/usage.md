@@ -5,12 +5,12 @@ output / cache-read / cache-creation (+ thinking detail) — over the
 provider transcripts already normalized by `rebuildup.conversations`,
 with honest reporting of what is missing, unsupported, or stale.
 
-This is T1 of #28. Subscription quota/reset endpoints and credential
-handling are **T2 (#91)** scope; cache-token refinements, HTTP quota
-sources, and CLIProxyAPI-style integration are **T3 (#92)**; estimated
-API cost vs. real billing and history retention are **T4 (#93)**. T1
-ships the aggregation core + `herdr-plugins.usage/v1` contract and
-leaves clean seams for those tickets.
+This is T1+T2 of #28. T1 (#90) shipped the aggregation core +
+`herdr-plugins.usage/v1` contract; T2 (#91) adds subscription
+quota/reset surfacing (`quota` command) and the credential-boundary
+ADR-0014. Cache-token refinements, HTTP quota sources, and
+CLIProxyAPI-style integration remain **T3 (#92)**; estimated API cost
+vs. real billing and history retention are **T4 (#93)**.
 
 ## Source decision (ADR-0013)
 
@@ -45,6 +45,11 @@ Plugin root resolution: explicit override (flag/env/config) → sibling
   aggregation. Selectors forward to the conversations `usage`
   command; `--session`/`--socket`/`--timeout`/`--offline` control the
   herdr connection used for live-binding metadata.
+- `quota [--provider] [--refresh]` — subscription quota/reset report.
+  Independent of the conversations index and of any herdr session.
+  Per-provider `status` is data (`ok`/`unsupported`/`no_credential`/
+  `credential_expired`/`request_failed`); the command exits 0 whenever
+  it can emit the envelope.
 
 ## Aggregation rules
 
@@ -69,18 +74,56 @@ Plugin root resolution: explicit override (flag/env/config) → sibling
   totals; a supported provider with zero measured usage is
   distinguishable from an unsupported one.
 
+## Quota sources (T2 / ADR-0014)
+
+Provider quota artifacts verified locally and implemented:
+
+- **claude** — `GET api.anthropic.com/api/oauth/usage` with the OAuth
+  access token from `$CLAUDE_CONFIG_DIR/.credentials.json`
+  (`claudeAiOauth`), macOS Keychain `Claude Code-credentials` as
+  fallback only when `CLAUDE_CONFIG_DIR` is unset. Windows:
+  `five_hour` (session), `seven_day` (weekly),
+  `limits[]` model-scoped weekly, `extra_usage`/`spend` (monthly).
+  Expired token → `credential_expired` (no refresh — that would be a
+  credential mutation).
+- **codex** — `GET chatgpt.com/backend-api/wham/usage` +
+  `rate-limit-reset-credits` with `tokens.access_token` from
+  `$CODEX_HOME/auth.json` (ChatGPT auth only; `apikey` mode →
+  `unsupported`). Windows: `primary`/`secondary` rate-limit windows
+  with provider-reported or position-derived durations.
+- **opencode** — `unsupported`: `auth.json` holds per-provider API
+  keys; no subscription quota artifact exists.
+
+Rules (ADR-0014 is the canonical boundary):
+
+- Credential values exist only inside the fetch closure as an
+  `Authorization` header; never logged, persisted, cached, emitted,
+  or passed to subprocesses (the only subprocess is the read-only
+  macOS `security` Keychain lookup).
+- The quota cache (`<state>/quota-cache/<provider>.json`) stores
+  `{checked_at, plan, windows, reset_credits_available}` for a short
+  TTL (default 300s, `quotaCacheTtlSeconds`); stale cache is served
+  flagged `stale: true` when the endpoint fails.
+- Endpoint overrides (`HERDR_USAGE_QUOTA_*` env, `quotaEndpoints`
+  config) are documented test/proxy hooks only.
+- HTTP/transport failure → `request_failed`; with cache → `ok` +
+  `stale: true`. Missing data is never a fabricated zero.
+
 ## Concurrency / state
 
-No durable state: every `usage` call re-exports and re-aggregates.
-Reads never mutate anything — the conversations side is read-only by
-contract (`read_only: true`, `mutation_commands: []`). Export paging
-is bounded (500 events/page, 2M-event safety cap →
-`export_incomplete_page_limit` warning + `source.complete: false`).
+`usage` keeps no durable state: every call re-exports and
+re-aggregates. `quota` writes only the short-term quota cache under
+`HERDR_PLUGIN_STATE_DIR` (atomic tmp+rename, best-effort). Reads never
+mutate anything — the conversations side is read-only by contract
+(`read_only: true`, `mutation_commands: []`), and quota probes are
+GET-only. Export paging is bounded (500 events/page, 2M-event safety
+cap → `export_incomplete_page_limit` warning + `source.complete:
+false`).
 
-## Explicit non-goals (T2–T4)
+## Explicit non-goals (T3–T4)
 
-- No credential store access, no quota endpoints, no OAuth — #91 ADR.
 - No HTTP quota sources / CLIProxyAPI / divergence reports — #92.
+- No reset-credit redemption or any credential mutation — #92+.
 - No estimated API pricing, no cost-vs-billing distinction beyond the
   `provider_reported_cost_usd` label, no history GC — #93.
 - No PTY scraping, no transcript scanning, no fabricated states.

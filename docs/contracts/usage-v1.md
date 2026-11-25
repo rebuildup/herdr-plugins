@@ -1,13 +1,16 @@
 # Contract `herdr-plugins.usage/v1`
 
-Token-usage aggregation CLI contract for the `rebuildup.usage` herdr
-plugin (Issue #90 / parent #28 T1). Follows the same conventions as
+Token-usage aggregation + subscription quota CLI contract for the
+`rebuildup.usage` herdr plugin (Issue #90 T1, Issue #91 T2 / parent
+#28). Follows the same conventions as
 `herdr-plugins.conversations/v1` and the other plugin contracts.
 
-The plugin is **read-only**: it keeps no durable state and recomputes
-every aggregate from the `rebuildup.conversations` normalized index on
-each call. It never reads PTY text, never scans provider transcripts
-itself, and never fabricates usage numbers.
+The plugin is **read-only**: `usage` keeps no durable state and
+recomputes every aggregate from the `rebuildup.conversations`
+normalized index on each call. `quota` caches successful provider
+readings briefly under the plugin state dir (quota numbers only —
+never credentials, ADR-0014). It never reads PTY text, never scans
+provider transcripts itself, and never fabricates usage numbers.
 
 ## Data source (ADR-0013)
 
@@ -47,6 +50,7 @@ bun run src/cli.ts capability
 bun run src/cli.ts usage [--pane PANE] [--session-id ID] [--provider ID] \
   [--from ISO] [--to ISO] [--session NAME] [--socket PATH] [--timeout MS] \
   [--offline] [--conversations-root DIR] [--conversations-state-dir DIR]
+bun run src/cli.ts quota [--provider ID] [--refresh] [--timeout MS]
 ```
 
 - All commands print exactly one JSON document on stdout. Handled
@@ -85,7 +89,18 @@ bun run src/cli.ts usage [--pane PANE] [--session-id ID] [--provider ID] \
       "resolved_via": "sibling",
       "freshness": "as of the last `rebuildup.conversations index`/`refresh` run…"
     },
-    { "id": "subscription-quota-api", "kind": "provider-quota", "status": "unsupported", "planned_in": "#91" },
+    {
+      "id": "subscription-quota-api",
+      "kind": "provider-quota",
+      "status": "available",
+      "credential_boundary": "docs/adr/0014-usage-quota-credential-boundary.md",
+      "providers": {
+        "claude": "implemented …",
+        "codex": "implemented …",
+        "opencode": "unsupported …"
+      },
+      "freshness": "short-term cache (default 300s) …"
+    },
     { "id": "provider-cli-billing", "kind": "cli-billing-endpoint", "status": "unsupported", "planned_in": "#92" }
   ],
   "aggregation": { "dimensions": ["provider","model","host","project","session","pane"], "…": "…" },
@@ -96,10 +111,11 @@ bun run src/cli.ts usage [--pane PANE] [--session-id ID] [--provider ID] \
 `sources` is the authoritative data-source matrix and extends
 additively: `conversations-index` reports `available` (with
 `plugin_root`/`resolved_via`) or `unavailable` (with `detail`) — the
-command never fails on source resolution. Quota/credential sources
-slot in here as new entries; T1 ships them as explicit `unsupported`
-placeholders (`planned_in` #91/#92) so consumers can distinguish
-"not implemented" from "no data".
+command never fails on source resolution. `subscription-quota-api`
+reports `available` with a per-provider implementation matrix and a
+pointer to the credential-boundary ADR; `provider-cli-billing` remains
+an explicit `unsupported` placeholder (`planned_in` #92) so consumers
+can distinguish "not implemented" from "no data".
 
 ## `usage`
 
@@ -240,6 +256,105 @@ An entirely empty index returns `totals.events: 0`,
 `rebuildup.conversations index` — zeros here mean "nothing indexed",
 not "zero usage measured".
 
+## `quota`
+
+Subscription quota/reset report per provider. Independent of the
+conversations index — it does not resolve the conversations plugin and
+needs no herdr session at all.
+
+```bash
+bun run src/cli.ts quota [--provider ID] [--refresh] [--timeout MS]
+```
+
+```json
+{
+  "contract": "herdr-plugins.usage/v1",
+  "command": "quota",
+  "cache": { "ttl_seconds": 300 },
+  "providers": [
+    {
+      "provider": "claude",
+      "status": "ok",
+      "detail": null,
+      "plan": "max",
+      "windows": [
+        {
+          "id": "five_hour",
+          "label": "Session (5-hour)",
+          "kind": "session",
+          "used_percent": 42.5,
+          "resets_at": "2026-01-01T05:00:00.000Z",
+          "window_duration_mins": 300
+        }
+      ],
+      "checked_at": "2026-01-01T00:30:00.000Z",
+      "fetched_at": "2026-01-01T00:31:00.000Z",
+      "stale": false,
+      "stale_reason": null,
+      "reset_credits_available": null,
+      "cache": { "hit": false, "age_seconds": null, "ttl_seconds": 300 }
+    }
+  ],
+  "generated_at": "…"
+}
+```
+
+### Provider statuses
+
+`status` is per provider and is **data, not an error** — `quota` exits
+0 whenever it can emit the envelope:
+
+| status | meaning |
+| --- | --- |
+| `ok` | fresh (`cache.hit:false`) or cached (`cache.hit:true`) provider reading; `stale:true` marks a cached reading served because the endpoint failed |
+| `unsupported` | no quota artifact exists (opencode API-key store, codex `auth_mode:"apikey"`, unknown provider) — `detail` records why |
+| `no_credential` | the provider credential store has no usable login |
+| `credential_expired` | a token exists but is past expiry; refresh is out of scope (ADR-0014) |
+| `request_failed` | endpoint unreachable/HTTP error/unparseable and no cache to serve — `detail` carries `HTTP <status>` or a transport summary only |
+
+- `windows[]` — provider-reported quota windows: `id`, `label`,
+  `kind` (`session`/`weekly`/`monthly`/`other`), `used_percent`
+  (0-100), `resets_at` (ISO instant or `null`), `window_duration_mins`.
+  Non-`ok` statuses always carry `windows: []` — missing is never a
+  fabricated zero.
+- `checked_at` — when the provider endpoint last answered; `null`
+  unless `status` is `ok`.
+- `plan` — provider plan label (Claude `subscriptionType`, Codex plan
+  name); `null` when unreported.
+- `reset_credits_available` — banked Codex reset-credit count when the
+  credits endpoint answers; `null` otherwise (never fabricated).
+- `stale`/`stale_reason` — `true` only when serving a cached reading
+  older than the fresh TTL because the endpoint failed; the reason is
+  recorded, the data is labeled.
+
+### Quota freshness & rate limiting
+
+Successful readings are cached at `<HERDR_PLUGIN_STATE_DIR>/quota-cache/
+<provider>.json` for `ttl_seconds` (default 300, config
+`quotaCacheTtlSeconds`). `--refresh` bypasses the fresh-cache read.
+The cache stores quota numbers only — never credential material
+(ADR-0014). Requests time out after `--timeout` ms (default 10s);
+endpoint overrides exist only as test/proxy hooks:
+
+- env: `HERDR_USAGE_QUOTA_CLAUDE_URL`, `HERDR_USAGE_QUOTA_CODEX_USAGE_URL`,
+  `HERDR_USAGE_QUOTA_CODEX_CREDITS_URL`
+- config.json: `quotaEndpoints: {claude, codexUsage, codexCredits}`
+
+When `codexUsage` is overridden without `codexCredits`, the credits
+call is skipped (a mock must opt in explicitly).
+
+### Credential boundary (ADR-0014)
+
+`quota` reads provider credential artifacts **in memory only** to
+authenticate the provider's own read-only quota endpoints: Claude
+`$CLAUDE_CONFIG_DIR/.credentials.json` (macOS Keychain
+`Claude Code-credentials` fallback only when `CLAUDE_CONFIG_DIR` is
+unset) and Codex `$CODEX_HOME/auth.json`
+(ChatGPT auth only). Tokens are never logged, persisted, cached,
+emitted, or passed to subprocesses; expired tokens report
+`credential_expired` rather than triggering a refresh. Full rules:
+`docs/adr/0014-usage-quota-credential-boundary.md`.
+
 ## Errors
 
 `kind` values: `conversations_unavailable` (plugin root not resolvable
@@ -251,10 +366,11 @@ errors (exit 2) for bad `--from`/`--to`. A missing conversations
 ## Versioning
 
 `herdr-plugins.usage/v1` is **stable** as of plugin v0.5.0: command
-surface, totals/breakdown/coverage shapes, and error `kind` taxonomy
-are the v1 contract. Additive fields may appear anywhere; clients must
-ignore unknown fields. `sources`, `breakdowns` dimensions, and
-`coverage.providers` extend additively.
+surface (`capability`/`usage`/`quota`), totals/breakdown/coverage and
+quota report shapes, and error `kind` taxonomy are the v1 contract.
+Additive fields may appear anywhere; clients must ignore unknown
+fields. `sources`, `breakdowns` dimensions, `coverage.providers`,
+quota `windows`, and provider `status` values extend additively.
 
 A breaking change — removing/renaming a command or field, changing an
 error `kind`'s meaning, altering dedup/window semantics — bumps to
