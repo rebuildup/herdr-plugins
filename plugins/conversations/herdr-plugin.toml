@@ -1,0 +1,13 @@
+id = "rebuildup.conversations"
+name = "Conversations"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Provider transcript indexer: normalizes claude session transcripts into structured conversation events (turn/user/assistant/tool/usage) under herdr-plugins.conversations/v1."
+platforms = ["linux", "macos", "windows"]
+
+# No build step: the plugin is dependency-free TypeScript executed by Bun
+# (runtime prerequisite, see plugins/conversations/README.md).
+#
+# No [[actions]] / [[events]] / [[startup]] yet: indexing is an explicit
+# CLI invocation (`index`/`refresh`); a lazy drain or hook can be added
+# once consumers (#87/#88) define the trigger semantics.
