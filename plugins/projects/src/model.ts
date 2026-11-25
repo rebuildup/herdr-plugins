@@ -24,7 +24,7 @@ export interface SkippedCwd {
   reason: string;
 }
 
-function canonicalRoot(root: string): string {
+export function canonicalRepoRoot(root: string): string {
   try {
     return realpathSync(root);
   } catch {
@@ -37,7 +37,7 @@ export function repoIndex(state: ProjectsState): Map<string, string> {
   const index = new Map<string, string>();
   for (const project of Object.values(state.projects)) {
     for (const repo of project.repos) {
-      index.set(canonicalRoot(repo.root), project.id);
+      index.set(canonicalRepoRoot(repo.root), project.id);
     }
   }
   return index;
@@ -67,7 +67,7 @@ export async function discoverRepos(
       }
       throw err;
     }
-    const key = canonicalRoot(root);
+    const key = canonicalRepoRoot(root);
     if (byRoot.has(key)) continue;
     let remote: string | null = null;
     try {

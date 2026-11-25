@@ -30,9 +30,11 @@ herdr plugins may only own feature-specific state under
    library — plus `repoRemoteIdentity`/`normalizeRemoteUrl` for
    cross-checkout grouping (scp/https/case/`.git` unified). The git
    plugin re-exports the primitives so its contract is unchanged.
-4. **Read-only v0.1.0.** `list`/`show`/`discover`/`capability` only;
-   `read_only: true`, empty `mutation_commands`. Mutations land in
-   #49+ as additive commands.
+4. **Mutations are explicit-argument CLI commands.** `register`/
+   `update`/`pin`/`archive` and `settings set|unset` write through the
+   same single-writer lock + atomic rename; `read_only: false` with
+   `mutation_commands` enumerated. No manifest actions — pane surfaces
+   never trigger registry writes implicitly.
 5. **`discover` enumerates, never registers.** Pane cwds →
    `resolveRepo` → dedupe by canonical root → normalized remote
    identity; non-git/bare/unreachable cwds are reported in `skipped`,

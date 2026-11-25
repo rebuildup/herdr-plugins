@@ -19,11 +19,16 @@ bun run src/cli.ts capability
 bun run src/cli.ts list [--all]
 bun run src/cli.ts show <id>
 bun run src/cli.ts discover [--session NAME]
+bun run src/cli.ts register <repo-path> [--title T] [--id ID]
+bun run src/cli.ts update <id> [--title T] [--pinned|--unpinned]
+    [--archived|--unarchived] [--repo-add PATH]... [--repo-remove PATH]...
+bun run src/cli.ts archive|unarchive|pin|unpin <id>
+bun run src/cli.ts settings get|set|unset <id> [key] [value]
 ```
 
-v0.1.0 is read-only: it lists registered projects and discovers git
-repositories from pane cwds. Registry writes, t3.json/scripts, and
-script execution arrive in later tickets (#49–#53).
+Registry mutations are explicit-argument CLI invocations (never pane
+actions). t3.json/scripts resolution and script execution arrive in
+#50–#53.
 
 Full contract: `docs/contracts/projects-v1.md`. Spec: `docs/specs/projects.md`.
 Design: ADR-0009.

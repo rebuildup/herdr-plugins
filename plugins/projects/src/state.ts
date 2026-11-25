@@ -15,6 +15,7 @@ import { pluginDirs } from "../../../packages/herdr-client/src/socket";
 
 export const PLUGIN_ID = "rebuildup.projects";
 export const STATE_SCHEMA_VERSION = 1;
+export const SETTINGS_SCHEMA_VERSION = 1;
 
 const LOCK_STALE_MS = 30_000;
 const LOCK_TIMEOUT_MS = 10_000;
@@ -55,6 +56,21 @@ function lockPath(): string {
   return `${stateFilePath()}.lock`;
 }
 
+/**
+ * Project-scoped settings override keys the plugin will store. Mirrors the
+ * upstream project-scoped surface relevant to scripts/display; arbitrary
+ * keys are rejected so the store cannot become a dumping ground for
+ * unrelated server settings. Extend additively as consumers land.
+ */
+export const SETTINGS_ALLOW_LIST: ReadonlySet<string> = new Set([
+  "defaultProjectScripts",
+  "defaultThreadEnvMode",
+  "worktreeSubmodules",
+  "worktreeCleanup",
+  "display.title",
+  "display.iconPath",
+]);
+
 export async function loadState(): Promise<ProjectsState> {
   try {
     const raw = await readFile(stateFilePath(), "utf8");
@@ -73,8 +89,7 @@ export async function loadState(): Promise<ProjectsState> {
   }
 }
 
-async function acquireLock(): Promise<() => Promise<void>> {
-  const file = lockPath();
+async function acquireLock(file: string): Promise<() => Promise<void>> {
   await mkdir(path.dirname(file), { recursive: true });
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
   for (;;) {
@@ -106,7 +121,7 @@ async function acquireLock(): Promise<() => Promise<void>> {
 
 /** Read-modify-write under the exclusive lock; mutations must be synchronous. */
 export async function updateState<T>(mutate: (state: ProjectsState) => T | Promise<T>): Promise<T> {
-  const release = await acquireLock();
+  const release = await acquireLock(lockPath());
   try {
     const state = await loadState();
     const result = await mutate(state);
@@ -114,6 +129,75 @@ export async function updateState<T>(mutate: (state: ProjectsState) => T | Promi
     const tmp = `${stateFilePath()}.tmp-${process.pid}`;
     await writeFile(tmp, `${JSON.stringify(state, null, 2)}\n`);
     await rename(tmp, stateFilePath());
+    return result;
+  } finally {
+    await release();
+  }
+}
+
+// --- Project settings overrides -------------------------------------------
+//
+// One JSON document per project under `<stateDir>/settings/<id>.json`,
+// same single-writer lock + tmp+rename discipline as the registry. Values
+// are stored verbatim as strings; typed interpretation belongs to the
+// consumer (#50 scripts resolution).
+
+export type ProjectSettings = Record<string, string>;
+
+interface SettingsFile {
+  version: number;
+  settings: ProjectSettings;
+}
+
+export function settingsFilePath(projectId: string): string {
+  return path.join(pluginDirs(PLUGIN_ID).stateDir, "settings", `${projectId}.json`);
+}
+
+function settingsLockPath(): string {
+  return path.join(pluginDirs(PLUGIN_ID).stateDir, "settings.lock");
+}
+
+export async function loadSettings(projectId: string): Promise<ProjectSettings> {
+  let raw: string;
+  try {
+    raw = await readFile(settingsFilePath(projectId), "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw err;
+  }
+  // Overrides are non-authoritative: a corrupt file reads as empty rather
+  // than failing every command that consults it.
+  let parsed: Partial<SettingsFile> | null;
+  try {
+    parsed = JSON.parse(raw) as Partial<SettingsFile> | null;
+  } catch {
+    return {};
+  }
+  if (
+    parsed === null ||
+    typeof parsed !== "object" ||
+    typeof parsed.settings !== "object" ||
+    parsed.settings === null
+  ) {
+    return {};
+  }
+  return parsed.settings;
+}
+
+export async function updateSettings<T>(
+  projectId: string,
+  mutate: (settings: ProjectSettings) => T,
+): Promise<T> {
+  const release = await acquireLock(settingsLockPath());
+  try {
+    const settings = await loadSettings(projectId);
+    const result = mutate(settings);
+    const file: SettingsFile = { version: SETTINGS_SCHEMA_VERSION, settings };
+    const target = settingsFilePath(projectId);
+    await mkdir(path.dirname(target), { recursive: true });
+    const tmp = `${target}.tmp-${process.pid}`;
+    await writeFile(tmp, `${JSON.stringify(file, null, 2)}\n`);
+    await rename(tmp, target);
     return result;
   } finally {
     await release();
