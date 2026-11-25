@@ -1,7 +1,7 @@
 /**
  * rebuildup.mcp contract model — `herdr-plugins.mcp/v1` (draft).
  *
- * T1 (#135) fixes the boundary (ADR-0022), access levels, the planned
+ * T1 (#135) fixes the boundary (ADR-0025), access levels, the planned
  * tool table, and the error model. T2 (#138) implements the stdio
  * server + read tools, T3 (#139) mutations, T4 (#140) events.
  */
@@ -14,7 +14,7 @@ export const PLUGIN_VERSION = "0.1.0";
 export const CONTRACT_STATUS = "draft" as const;
 
 /**
- * Server-side access levels (ADR-0022 §2). `supervised` maps to T3's
+ * Server-side access levels (ADR-0025 §2). `supervised` maps to T3's
  * approval-required..auto band; `full` to full-access.
  */
 export const ACCESS_LEVELS = ["read-only", "supervised", "full"] as const;
@@ -229,7 +229,7 @@ export const UPSTREAM_GAPS = [
     id: "saved-machine-mcp-targeting",
     summary:
       "herdr --machine SSH bridge exists for CLI use; exposing remote sessions through MCP is deferred post-v1",
-    tracking: "herdr-plugins#135 ADR-0022",
+    tracking: "herdr-plugins#135 ADR-0025",
     v1: "excluded",
   },
 ] as const;

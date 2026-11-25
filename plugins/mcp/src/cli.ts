@@ -5,7 +5,7 @@
  * T1 (#135) scope: `capability` reports the contract skeleton —
  * access levels, planned tool table, session resolution, upstream
  * gaps — and `serve` honestly reports `not_implemented` until the
- * server core lands. Boundary decisions: ADR-0022.
+ * server core lands. Boundary decisions: ADR-0025.
  *
  * All commands emit a single JSON document on stdout; diagnostics go
  * to stderr. Exit code 0 on success, 1 on handled errors, 2 on usage.
@@ -76,7 +76,7 @@ function fail(message: string, code: 1 | 2): never {
 
 function resolvedSocket(options: CliOptions): string {
   // Pane-scoped env (HERDR_PANE_ID etc.) is ignored by design
-  // (ADR-0022 §4): resolveSocketPath only honors HERDR_SOCKET_PATH /
+  // (ADR-0025 §4): resolveSocketPath only honors HERDR_SOCKET_PATH /
   // HERDR_SESSION, which legitimately describe the target session.
   return options.socketPath ?? resolveSocketPath({ session: options.session });
 }
@@ -140,7 +140,7 @@ async function cmdCapability(options: CliOptions): Promise<void> {
       tracking: "herdrdev/herdr#6199",
       note: "no inbound HTTP/OAuth in herdr; local stdio only, no bespoke public server",
     },
-    state: "no durable state in v1 (per-client stdio process; ADR-0022 §5)",
+    state: "no durable state in v1 (per-client stdio process; ADR-0025 §5)",
   });
 }
 
@@ -169,7 +169,7 @@ Usage:
 Access levels: ${ACCESS_LEVELS.join(" | ")} (default ${DEFAULT_ACCESS_LEVEL})
 
 Session resolution: --socket > --session/HERDR_SESSION > HERDR_SOCKET_PATH
-> default session socket. Pane env vars are ignored (ADR-0022 §4).
+> default session socket. Pane env vars are ignored (ADR-0025 §4).
 serve is a per-client stdio MCP server; it lands in T2 (#138) — T1
 ships the contract skeleton and capability discovery only.
 Remote HTTP/OAuth is an upstream gap (herdrdev/herdr#6199), out of v1.

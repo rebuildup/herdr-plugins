@@ -3,7 +3,7 @@
 Scope: local stdio MCP server exposing herdr sessions and sibling
 plugin contracts to outside agents. Contract:
 `herdr-plugins.mcp/v1` (**draft**, `docs/contracts/mcp-v1.md`).
-Boundary ADR: ADR-0022. Upstream inventory:
+Boundary ADR: ADR-0025. Upstream inventory:
 `docs/research/mcp-upstream-inventory.md`. Decomposition of #30:
 T1 boundary/contract (#135), T2 stdio core + read tools (#138),
 T3 mutation tools + access enforcement (#139), T4 events + live

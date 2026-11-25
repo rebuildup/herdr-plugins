@@ -1,4 +1,4 @@
-# ADR-0022: MCP outside-agent boundary — local stdio only, access levels, session resolution
+# ADR-0025: MCP outside-agent boundary — local stdio only, access levels, session resolution
 
 Status: Accepted (release-0-7-0 candidate, Issue #135 / parent #30 T1 —
 first ticket of the #30 `mcp-outside-agents` decomposition)

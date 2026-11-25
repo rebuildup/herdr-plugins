@@ -7,7 +7,7 @@ A **local stdio MCP server** that exposes herdr sessions and sibling
 plugin contracts to agents herdr did not start — terminal
 Claude Code/Codex, IDE agents, bots. Boundary, access levels, session
 resolution, and the remote/HTTP/OAuth upstream gap are fixed by
-ADR-0022; the canonized upstream inventory is
+ADR-0025; the canonized upstream inventory is
 `docs/research/mcp-upstream-inventory.md`.
 
 ## Status
@@ -41,7 +41,7 @@ All commands emit one JSON document on stdout; errors go to stderr
 
 `--socket` > `--session`/`HERDR_SESSION` > `HERDR_SOCKET_PATH` >
 default session socket. Pane env vars are ignored — an MCP client is
-not a pane (ADR-0022 §4).
+not a pane (ADR-0025 §4).
 
 ## Remote / HTTP / OAuth
 

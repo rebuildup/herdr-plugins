@@ -318,7 +318,7 @@
       "issues": [30],
       "depends_on": ["conversations"],
       "acceptance": "project/agent/会話/利用可能 capability の読み取り、起動・送信・停止・待機、イベント購読・フィルタ・再接続。local stdio 優先、remote OAuth/HTTP は必要性を精査。不要な独自公開サーバーを作らない。",
-      "verification": "T1 (#135) 完了: 上流棚卸し正本化 (docs/research/mcp-upstream-inventory.md、t3code 9cc4018c 照合)、境界 ADR-0022 (local stdio MCP server = plugin、herdr 権威不変、access level read-only/supervised/full、session 解決規則、CLI spawn vs herdr-client socket 経路、session registry 永続化不要)、契約骨格 docs/contracts/mcp-v1.md (draft) + docs/specs/mcp.md + plugins/mcp 骨格 (capability/serve not_implemented)。remote HTTP/OAuth は upstream gap として herdrdev/herdr#6199 起票・v1 対象外。T2–T4 (#138/#139/#140) 未着手: read/mutation 権限区別と access level は契約に明文化済み、世代/イベント欠落・秘密保護は T3/T4 で実装・検証。"
+      "verification": "T1 (#135) 完了: 上流棚卸し正本化 (docs/research/mcp-upstream-inventory.md、t3code 9cc4018c 照合)、境界 ADR-0025 (local stdio MCP server = plugin、herdr 権威不変、access level read-only/supervised/full、session 解決規則、CLI spawn vs herdr-client socket 経路、session registry 永続化不要)、契約骨格 docs/contracts/mcp-v1.md (draft) + docs/specs/mcp.md + plugins/mcp 骨格 (capability/serve not_implemented)。remote HTTP/OAuth は upstream gap として herdrdev/herdr#6199 起票・v1 対象外。T2–T4 (#138/#139/#140) 未着手: read/mutation 権限区別と access level は契約に明文化済み、世代/イベント欠落・秘密保護は T3/T4 で実装・検証。"
     },
     {
       "id": "artifacts-snapshots",

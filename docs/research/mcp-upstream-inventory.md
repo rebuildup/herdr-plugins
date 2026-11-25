@@ -84,7 +84,7 @@ T4 if push-style notifications are needed).
   pane *inside* herdr but are meaningless to an external MCP client
   process unless it was spawned by that pane.
 
-## Feasibility verdict (carried into ADR-0022)
+## Feasibility verdict (carried into ADR-0025)
 
 - **Local stdio MCP server: feasible.** A new plugin
   (`rebuildup.mcp`) bundles `packages/herdr-client` (agent/pane/
@@ -98,7 +98,7 @@ T4 if push-style notifications are needed).
   no authorization/pairing surface exists in herdr. Building a custom
   public server would violate repo invariants (plugins must not
   reimplement execution/orchestration; no unverified exposure). Filed
-  as a herdrdev/herdr upstream issue (see ADR-0022); v1 scope is local
+  as a herdrdev/herdr upstream issue (see ADR-0025); v1 scope is local
   stdio only.
 - **Event subscription: feasible with honest resync.**
   `events.subscribe`/`events.wait` can back MCP notifications or a
@@ -108,11 +108,11 @@ T4 if push-style notifications are needed).
 
 ## Open design questions resolved by #135
 
-- Session targeting for external agents → ADR-0022 (explicit
+- Session targeting for external agents → ADR-0025 (explicit
   `--session`/`--socket`/env; never ambient pane identity).
 - Tool granularity → contract `herdr-plugins.mcp/v1` tool table
   (herdr primitives pass-through vs plugin-contract aggregation).
-- CLI-spawn vs socket-direct → ADR-0022 (socket for herdr API,
+- CLI-spawn vs socket-direct → ADR-0025 (socket for herdr API,
   pinned CLI spawn for plugin contracts).
-- MCP session-registry persistence → ADR-0022 (not needed in v1;
+- MCP session-registry persistence → ADR-0025 (not needed in v1;
   per-client stdio process).

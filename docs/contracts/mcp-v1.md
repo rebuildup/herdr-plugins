@@ -4,7 +4,7 @@ Versioned structured interface for the `rebuildup.mcp` plugin — a
 **local stdio MCP server** that exposes herdr sessions and sibling
 plugin contracts to outside MCP clients (agents herdr did not start).
 Boundary, access levels, session resolution, and the remote/HTTP/OAuth
-upstream gap are fixed by ADR-0022; the upstream inventory is canonized
+upstream gap are fixed by ADR-0025; the upstream inventory is canonized
 in `docs/research/mcp-upstream-inventory.md`.
 
 **Status: draft (T1, issue #135).** The read surface stabilizes in T2
@@ -170,7 +170,7 @@ one JSON document on stdout; errors on stderr, exit 1/2):
 
 ## State and config
 
-- v1 writes **no durable state** (ADR-0022 §5): per-client stdio
+- v1 writes **no durable state** (ADR-0025 §5): per-client stdio
   process, in-memory session/capability cache only.
 - Config dir reserved under `HERDR_PLUGIN_CONFIG_DIR`; v1 reads no
   config file (access level is a CLI flag, not persisted).
