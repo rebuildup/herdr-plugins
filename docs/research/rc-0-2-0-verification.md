@@ -75,3 +75,29 @@ unaffected.
 Cleanup: isolated session `plugin-rc02` stopped and deleted; user's
 live session untouched. Evidence retained at `/var/tmp/herdr-plugin-rc02`
 and worktree `/Users/rebui/work/herdr-plugin-rc02` (detached at RC SHA).
+
+## Addendum — #64 convergence verification (fixed SHA `837e63e`)
+
+After PR #79 (strict option parsing + unified usage errors + `pr create`
+fixtures), the candidate moved to `837e63e2803af3be96643ee4ca159321680eb5f4`.
+Cross-platform verification ran on isolated herdr 0.9.5 sessions
+(`plugin-rc64-wsl`, `plugin-rc64-win`; dedicated XDG dirs; user sessions
+untouched, sessions deleted afterward).
+
+| Host | Result |
+| --- | --- |
+| Linux WSL2 (`device-wsl`, bun 1.4.5, gh 2.105.0) | **READY** — official `plugin install --ref release-0-2-0` resolved `837e63e` exactly; full read/mutation/remote/`pr` read surface verified; strictness checks (`--bogus`→exit 2, `stage`/`commit` misuse→exit 2) confirmed; inbox regression PASS |
+| Windows 11 (`device-windows`, bun.exe, gh 2.105.0) | **READY** — identical coverage; exit codes verified via `$LASTEXITCODE`; inbox regression PASS |
+
+`pr create` was again **not run** (real mutation forbidden); argv/body-file/
+failure paths are covered by stub-gh fixtures in `tests/gh.test.ts` (PR #79).
+The real GitHub `pr create` path remains explicitly unverified by policy.
+
+Environment caveats (not plugin defects): Windows sshd kills foreground
+`herdr server` on session end (headless servers need a persistent
+session); `GH_CONFIG_DIR` must point at real gh config when `XDG_CONFIG_HOME`
+is redirected; mise shims unusable over non-interactive ssh (direct binary
+paths used, same as RC 0.1.0).
+
+Combined with the macOS run above, all three target platforms now have
+RC evidence at the fixed candidate SHA.
