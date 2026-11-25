@@ -44,6 +44,8 @@ export interface AgentProviderConfig {
 export interface TextgenConfig {
   defaultProvider?: string;
   defaultModel?: string;
+  /** Override for the rebuildup.git plugin root (git-context adapter). */
+  gitPluginRoot?: string;
   apiGenerators: ApiGeneratorConfig[];
   /** agent-kind → overrides (key is the bare kind, e.g. "claude"). */
   agentProviders: Record<string, AgentProviderConfig>;
@@ -156,11 +158,13 @@ export function normalizeConfig(raw: unknown): {
   const limitsRaw = isRecord(root.limits) ? root.limits : {};
   const defaultProvider = str(root.defaultProvider);
   const defaultModel = str(root.defaultModel);
+  const gitPluginRoot = str(root.gitPluginRoot);
 
   return {
     config: {
       ...(defaultProvider !== undefined ? { defaultProvider } : {}),
       ...(defaultModel !== undefined ? { defaultModel } : {}),
+      ...(gitPluginRoot !== undefined ? { gitPluginRoot } : {}),
       apiGenerators,
       agentProviders,
       agent: {
@@ -260,6 +264,7 @@ export function redactConfig(config: TextgenConfig): Record<string, unknown> {
   return {
     defaultProvider: config.defaultProvider ?? null,
     defaultModel: config.defaultModel ?? null,
+    gitPluginRoot: config.gitPluginRoot ?? null,
     apiGenerators: config.apiGenerators.map((g) => ({
       id: g.id,
       kind: g.kind,

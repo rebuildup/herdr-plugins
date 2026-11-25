@@ -33,6 +33,13 @@ guard; output is validated (empty/length/control-char/fence checks)
 before return. The plugin never runs git/forge operations — callers
 adopt results explicitly, and manual specification always works.
 
+For the git tasks (`branch_name`, `commit_message`, `pr_content`) the
+plugin can gather repository context itself through the
+`rebuildup.git` plugin's read-only `herdr-plugins.git/v1` CLI
+(`--git-pane`): staged/unstaged diffs, commit lists, compare patches,
+forge PR state, and repository convention files. Collection is
+read-only; explicit `--input` fields override collected ones.
+
 ## Usage
 
 ```bash
@@ -40,6 +47,9 @@ cd <plugin_root>
 bun run src/cli.ts capability
 bun run src/cli.ts generate --task commit_message --provider agent:claude \
   --input payload.json          # {"diff": "...", "conventions": "..."}
+bun run src/cli.ts generate --task commit_message --git-pane w1:p1 \
+  --provider agent:claude       # diff/conventions collected via rebuildup.git
+bun run src/cli.ts git-context --task pr_content --git-pane w1:p1
 bun run src/cli.ts generate --task thread_title \
   --provider api:openai --input - < input.json --raw
 bun run src/cli.ts config show

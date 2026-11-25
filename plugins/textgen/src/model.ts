@@ -91,7 +91,7 @@ export const TASKS: readonly TaskSpec[] = [
     kind: "pr_content",
     description: "Pull request title + body for a set of changes.",
     paths: AGENT_AND_API,
-    inputFields: ["diff", "commits", "issue_refs", "instruction"],
+    inputFields: ["diff", "commits", "issue_refs", "pr_context", "instruction"],
     requiredInput: [],
     output: "pr_content",
     maxOutputChars: 20_000,

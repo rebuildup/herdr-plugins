@@ -68,6 +68,7 @@ const TASK_INSTRUCTIONS: Record<TaskKind, (input: Record<string, string | number
     section("Diff", field(input, "diff")) +
     section("Commits", field(input, "commits")) +
     section("Related issues/PRs", field(input, "issue_refs")) +
+    section("Existing PR context (JSON)", field(input, "pr_context")) +
     section("Additional instruction", field(input, "instruction")),
 
   review_guide: (input) =>
