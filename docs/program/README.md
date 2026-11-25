@@ -99,7 +99,8 @@ Issue 番号ベースの直列・blocked-by 関係 (release-0-2-0):
 | release-0-2-0 | #2, #23, #24, #25, #35-#39 | Source Control 一連: `git-files-diff`, `git-history-compare`, `git-write-local`, `git-remote-sync`, `forge-github` | 実装完了・リリース承認待ち (#25 残差は後続 train) |
 | release-0-3-0 | #26, #3, #48-#53 | `projects-multi-repo`, `project-scripts` | 実装完了・リリース承認待ち (#26 clone/init/publish・worktree 関連付けと #3 自動トリガーは残差→#60) |
 | release-0-4-0 | #4, #72-#75, #94 | `checkpoints` (#23/#24/#26/#5 と接続) | 実装完了・RC 検証済み (macOS/herdr 0.9.5, `rc-0-4-0-verification.md`)・リリース承認待ち。残差: turn boundary 等の上流 gap (spec 記録)・#83/#96・Linux/Windows 導入検証 |
-| 次期 train (暫定) | #5, #28 | `conversations`, `usage-quota` | 未着手 |
+| release-0-5-0 | #5, #86-#89 | `conversations` (#28 usage の index 前提) | 実装完了・契約 v1 stable・実データ検証済み (`conversations-v1-real-data-verification.md`)・リリース承認待ち。upstream gap は herdrdev/herdr#6191 起票済み |
+| 次期 train (暫定) | #28 | `usage-quota` | 未着手 |
 | 次期 train (暫定) | #27, #6, #29 | `provider-controls-composer`, `handoff-delegation`, `text-generation` | 未着手 |
 | 次期 train (暫定) | #33 | `inbox-extensions` (#8/#9 upstream gap 依存) | 未着手 |
 | 次期 train (暫定) | #30, #31, #32 | `mcp-outside-agents`, `artifacts-snapshots`, `automations` | 未着手 |

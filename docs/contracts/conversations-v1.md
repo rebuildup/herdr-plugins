@@ -52,7 +52,7 @@ bun run src/cli.ts show <ref> [--pane PANE] [--session-id ID] [--provider ID] [-
   "contract": "herdr-plugins.conversations/v1",
   "command": "capability",
   "plugin": "rebuildup.conversations",
-  "version": "0.1.0",
+  "version": "0.5.0",
   "read_only": false,
   "mutation_commands": ["index", "refresh"],
   "commands": ["capability", "index", "refresh", "sessions", "history", "search", "show", "usage"],
@@ -490,6 +490,27 @@ rewritten log), `read_failed` (event-log read error during
 surfaced per-session in `skipped` / `sessions[].error`. Usage errors
 exit 2 (including a malformed `search`/`usage` cursor token and an
 invalid `--type`).
+
+## Versioning
+
+`herdr-plugins.conversations/v1` is **stable** as of plugin v0.5.0
+(T4/#89): the command surface, event schema, error `kind` taxonomy,
+and paging-cursor semantics below are the finalized v1 contract.
+Additive fields may appear in any response or event; clients must
+ignore unknown fields. `capability.providers` and
+`capability.event_types` extend additively (new providers, new event
+types) without a contract bump.
+
+A breaking change — removing/renaming a command or field, changing an
+error `kind`'s meaning, altering cursor or event-id semantics — bumps
+the contract suffix to `herdr-plugins.conversations/v2`. During the
+v0.x train a `v2` contract would ship **alongside** v1 (both commands
+sets exposed, `capability.contract` identifying each) for at least one
+release so consumers can migrate; v1 is then frozen, not deleted.
+State on disk (`state.json` schema version, `events/*.jsonl`) is
+internal to the plugin and may change without a contract bump as long
+as reads stay honest (missing/corrupt state is reported, never
+fabricated).
 
 ## Out of scope (v1)
 

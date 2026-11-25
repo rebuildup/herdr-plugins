@@ -24,7 +24,7 @@
     },
     "plugins/conversations": {
       "name": "@herdr-plugins/conversations",
-      "version": "0.1.0",
+      "version": "0.5.0",
     },
     "plugins/git": {
       "name": "@herdr-plugins/git",

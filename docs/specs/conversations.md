@@ -1,14 +1,17 @@
 # Conversations plugin (`rebuildup.conversations`) — specification
 
 Scope: T1 foundation (#86) + T2 adapters/history (#87) + T3
-search/paging/references (#88, parent #5) — provider transcript
+search/paging/references (#88) + T4 contract finalization and
+real-data verification (#89, parent #5) — provider transcript
 discovery, normalization into structured events (claude JSONL, codex
 rollout JSONL, opencode SQLite), identity binding, staleness
 detection, and the `history`/`search`/`usage`/`show` read APIs.
-Contract: `herdr-plugins.conversations/v1`
-(`docs/contracts/conversations-v1.md`). Design: ADR-0012. Upstream
+Contract: `herdr-plugins.conversations/v1` — **stable** as of plugin
+v0.5.0 (versioning policy: contract doc). Design: ADR-0012. Upstream
 mechanism reference: T3 Code `apps/server/src/usage/usageTranscriptReader.ts`
-(pinned revision in `docs/program/feature-ledger.json`).
+(pinned revision in `docs/program/feature-ledger.json`). Real-data
+verification evidence:
+`docs/research/conversations-v1-real-data-verification.md`.
 
 ## Purpose
 
@@ -275,12 +278,21 @@ Nothing is written outside `HERDR_PLUGIN_STATE_DIR` /
 
 - **`agent_session_path` is not exposed** by herdr `AgentInfo` for
   claude/codex (hooks receive `transcript_path`/`agent_session_path`
-  but `agent_resume.rs` discards them for non-pi agents). The plugin
-  works around it with id+cwd+known-directory resolution; an additive
-  upstream `agent_session_path` field is recorded as an Issue
-  candidate for T4 (#89), benefiting #4/#6 too (ADR-0012).
+  but `session_ref_from_report` in `agent_resume.rs` keeps only
+  `agent_session_id` for non-pi/omp agents — verified against herdr
+  v0.9.5 source). The plugin works around it with
+  id+cwd+known-directory resolution; the additive upstream request
+  was filed as **herdrdev/herdr#6191** (T4/#89), benefiting #4/#6
+  too (ADR-0012).
 - **Attention granularity** (approval/user-input/tool events) is not
   in transcripts' scope here; `pane.agent_status_changed` remains
-  coarse — same root as #8.
+  coarse — same root as #8 (`attention-granularity`,
+  upstream-blocked). No local workaround is added by design.
+- **`pane.report_agent_session` session-id updates require
+  `session_start_source`** — observed during T4 verification: repeat
+  reports with a different `agent_session_id` are accepted (`ok`) but
+  ignored unless `session_start_source` is set (upstream
+  herdrdev/herdr#5838, maintainer-needed). Relevant only to manual
+  reporters; real integrations always send it.
 - No daemon, no hooks, no PTY reads. Indexing is explicit CLI
   invocation; trigger automation lands with consumers.

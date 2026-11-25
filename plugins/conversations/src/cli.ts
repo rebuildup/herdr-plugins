@@ -57,7 +57,7 @@ import {
   writeEventsFile,
 } from "./state";
 
-const PLUGIN_VERSION = "0.1.0";
+const PLUGIN_VERSION = "0.5.0";
 const DEFAULT_TIMEOUT_MS = 10_000;
 
 interface CliOptions extends CallOptions {

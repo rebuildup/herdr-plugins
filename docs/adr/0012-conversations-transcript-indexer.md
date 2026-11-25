@@ -72,10 +72,14 @@ while `agent_resume.rs` discards them for non-pi agents, so
   byte-offset cursor.
 - T3 (#88) adds search/filtering over `events/*.jsonl` on top of the
   `history` pager — the index already carries everything it needs.
-- **Upstream gap recorded** (Issue candidate for #89, benefits #4/#6):
-  herdr should expose `agent_session_path` (or equivalent) on
-  `AgentInfo` for claude/codex — additive, small, and would let the
-  plugin skip the cwd-encoding heuristic entirely.
+- **Upstream gap recorded** — filed as
+  [herdrdev/herdr#6191](https://github.com/herdrdev/herdr/issues/6191)
+  (T4/#89): herdr should expose `agent_session_path` (or equivalent)
+  on `AgentInfo` for claude/codex — additive, small, and would let the
+  plugin skip the cwd-encoding heuristic entirely. Verified against
+  herdr v0.9.5 `src/agent_resume.rs`: `session_ref_from_report`
+  discards `agent_session_path` for every agent except pi/omp even
+  though the claude/codex hook assets already send it.
 - Transcript formats can drift (claude 2.1.x observed); unknown line
   types are ignored rather than fatal, and `malformed_lines` surfaces
   decode failures honestly.
