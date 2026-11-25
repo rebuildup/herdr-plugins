@@ -110,3 +110,17 @@ gap and only manual `scripts run` ships — per #53's acceptance rule.
   creation, no exit-status channel, no ownership token on
   socket-created panes, inconsistent event-name casing
   (`pane_created` vs `pane.agent_status_changed`).
+
+## Addendum (#68): completion recovery mechanism
+
+`events.subscribe` `pane.output_matched` (per-pane match subscriptions)
+was evaluated as an event-driven complement to
+`pane.wait_for_output` and **rejected**: it requires a persistent
+subscription connection that a one-shot CLI cannot hold after exit,
+pushed events are not replayed to late subscribers, and ADR-0002
+forbids a plugin daemon. Instead the completion marker doubles as a
+**durable receipt**: `__HERDR_DONE_<run-id>__=<code>` persists in pane
+scrollback, so `scripts results`/`logs` lazily re-scan it via one
+bounded `pane.read` (`recent_unwrapped`) after ownership
+re-validation — no polling loop, exit code still parsed from marker
+digits only.
