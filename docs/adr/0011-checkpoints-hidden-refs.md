@@ -73,3 +73,18 @@ the minimal correct capture:
 - Restore (#73) must treat the checkpoint commit as a tree snapshot:
   apply via a scratch index + worktree checkout semantics, never by
   moving HEAD or rewriting the user's index.
+
+## Amendment (T2 / Issue #73): restore semantics
+
+The T2 restore does **not** use a scratch index. It mirrors upstream
+`GitVcsDriver.restoreCheckpoint` exactly: `git restore --source <oid>
+--worktree --staged -- .` syncs the real index and worktree to the
+checkpoint tree (deleting tracked paths absent from it), followed by
+bounded `git clean -fd` passes and a post-verify (`git diff` vs the
+commit for worktree+index, `git clean -dn` for leftovers). Rationale:
+the scratch-index approach cannot express "index equals checkpoint"
+semantics and would leave staged state inconsistent with the restored
+worktree; upstream chose the same trade-off. Safety instead comes from
+the surrounding contract: a mandatory persisted `pre-restore`
+checkpoint before any mutation, shared-worktree/session isolation
+gates, and structured failure kinds carrying the pre-restore ref.

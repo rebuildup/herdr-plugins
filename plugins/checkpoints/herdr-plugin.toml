@@ -2,7 +2,7 @@ id = "rebuildup.checkpoints"
 name = "Checkpoints"
 version = "0.1.0"
 min_herdr_version = "0.9.0"
-description = "Worktree checkpoints as hidden git refs: capture, list, show, diff, and delete without touching the user's index or staging area."
+description = "Worktree checkpoints as hidden git refs: capture, list, show, diff, plan, safe restore, and delete."
 platforms = ["linux", "macos", "windows"]
 
 # No build step: the plugin is dependency-free TypeScript executed by Bun
