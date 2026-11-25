@@ -23,6 +23,7 @@ clients through one versioned contract.
 | [usage](plugins/usage/) | `rebuildup.usage` | Token usage aggregation over the conversations index: per provider/model/host/project/session/pane totals with honest missing-data reporting. |
 | [controls](plugins/controls/) | `rebuildup.controls` | Agent operation core over the herdr `agent.*` API: send / command / wait / interrupt / read / rename / start with identity echo, stale-generation guards, and per-provider launch tables (`herdr-plugins.controls/v1`). |
 | [handoff](plugins/handoff/) | `rebuildup.handoff` | Handoff/delegation records: source pane/agent identity + reference payload (conversations, checkpoints, excerpts) + status lifecycle — foundation for context transfer (#6 T1). |
+| [textgen](plugins/textgen/) | `rebuildup.textgen` | Text generation (`herdr-plugins.textgen/v1`): six tasks over dedicated agent panes or opt-in API generators, with strict input/output boundaries. Generation only — execution stays with the caller. |
 
 ## Development
 
