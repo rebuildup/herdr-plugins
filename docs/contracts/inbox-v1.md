@@ -48,7 +48,7 @@ An external client resolves the CLI as follows:
 The CLI always talks to **the herdr server owning the socket it resolves**.
 Resolution order:
 
-1. `--socket PATH` (explicit; also accepts a forwarded/local socket path)
+1. `--socket PATH` (explicit; local socket path — see Remote hosts)
 2. `HERDR_SOCKET_PATH`
 3. `--session NAME` / `HERDR_SESSION` → `<config>/sessions/<name>/herdr.sock`
 4. default session socket `<config>/herdr.sock`
@@ -56,18 +56,23 @@ Resolution order:
 Operating-system rules match herdr: unix socket on macOS/Linux, named pipe
 `\\.\pipe\<path>` on Windows (handled inside the client).
 
-**Remote hosts**: the socket API is local-only (unix socket / named pipe).
-Plugin hooks, actions, and state always live on the herdr host. To operate
-a remote herdr host, run this CLI **on that host** — e.g. via
-`herdr --machine <label> <command>` / the existing SSH paths in the user's
-environment — or expose the socket through an existing forward
-(`ssh -L`, `socat`). The CLI itself adds no remote transport.
+**Remote hosts**: the socket API is local-only (unix socket / named pipe),
+and plugin hooks, actions, and durable state always live on the herdr host.
+The supported way to operate a remote herdr host is to run this CLI **on
+that host** — locally in a shell, via the user's existing SSH/device routes,
+or through `herdr --remote` / `herdr --machine` when the client supports
+remote command execution. The CLI itself adds no remote transport, and
+`--socket`/`HERDR_SOCKET_PATH` are intended for local sockets only.
 
-Do **not** point a local CLI at a forwarded remote socket: the state file
-is host-local, so that would create a separate organize namespace keyed by
-the forwarded path — invisible to the remote plugin's hooks and metadata
-projection. `--session` must name a session that exists **on the target
-host**; session names are not globally unique.
+Operating a remote host through a forwarded socket (`ssh -L`, `socat`) is
+**not a supported path**: the state file is host-local, so a local CLI
+pointed at a forwarded remote socket would resolve a separate organize
+namespace keyed by the forwarded path — invisible to the remote plugin's
+hooks and metadata projection, and split from the state the remote plugin
+actually owns. Clients that need remote inbox data must execute the CLI on
+the target host (or consume `watch` output relayed from it). `--session`
+must name a session that exists **on the target host**; session names are
+not globally unique.
 
 ## Commands
 
