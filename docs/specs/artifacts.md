@@ -2,9 +2,11 @@
 
 Scope: T1 foundation (#136) — upstream inventory confirmation,
 responsibility boundary, storage policy, v1 attachment definition, and
-the draft contract skeleton `herdr-plugins.artifacts/v1`. Registry
-implementation lands in T2 (#141), kind validation/search in T3
-(#142), delivery/integration in T4 (#143). Design:
+the draft contract skeleton `herdr-plugins.artifacts/v1`. T2 (#141)
+implements the registry core: `register`/`list`/`get`/`search`/`delete`
+with identity, traversal guards, size caps, leading-byte MIME sniff,
+sha256, and honest missing/stale reporting. Deeper kind validation
+lands in T3 (#142), delivery/integration in T4 (#143). Design:
 ADR-0024. Contract: `docs/contracts/artifacts-v1.md` (**draft**).
 
 ## Purpose
@@ -86,11 +88,22 @@ Index/record inconsistencies (missing entity, orphan file) are
 resolved deterministically at read and reported (`missing_ref`,
 `state_corrupt`) — never as success.
 
-## Plugin surface (T1 scaffold)
+## Plugin surface
 
 `plugins/artifacts/` is a CLI-only plugin: no `[[actions]]` /
 `[[events]]` in v1 (registry is explicit CLI invocation; a lazy drain
 or hook can be added once consumers define trigger semantics — same
-convention as `rebuildup.conversations`). `capability` reports
-`contract_status: "draft"` and the full planned command list;
-registry commands return `contract_draft` until implemented.
+convention as `rebuildup.conversations`).
+
+- T1 (#136): `capability`/`help`, contract skeleton.
+- T2 (#141): `register` (`--path` or `--stdin`; `state_copy` default /
+  `path_ref` opt-in; kind inference ext→MIME; html shape refusal;
+  per-kind caps; sha256), `list`/`get`/`search` (kind/pane/session/
+  since/limit filters; `missing_ref`/`owner_stale`/`oversize`
+  annotation; `orphans`/`corrupt` reporting), `delete` (`refs` →
+  `referenced` unless `--force`; payload cleanup for `state_copy`;
+  external files never removed for `path_ref`). All registry commands
+  resolve `session.snapshot` and fail `session_unreachable` when the
+  socket is down.
+- T3 (#142) / T4 (#143): `verify`, stricter validation, `deliver`,
+  `gc` — still `contract_draft`.

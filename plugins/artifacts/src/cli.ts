@@ -4,32 +4,145 @@
  * clients. Single JSON document on stdout; diagnostics on stderr.
  * Exit 0 success, 1 handled error, 2 usage.
  *
- * T1 (#136) ships the contract skeleton: `capability` reports the
- * draft contract, kinds, storage modes, and size caps; `help` prints
- * usage. Registry commands (register/list/get/search/verify/delete/
- * deliver/gc) are declared in the contract but return `contract_draft`
- * until T2–T4 (#141/#142/#143) implement them.
+ * T1 (#136) shipped `capability`/`help`; T2 (#141) implements the
+ * registry core: `register` (state_copy default / opt-in path_ref),
+ * `list`, `get`, `search`, `delete`. `verify`/`deliver`/`gc` remain
+ * contract_draft until T3–T4 (#142/#143).
  *
- * The plugin never executes or renders artifact content (ADR-0024 §4);
- * render-time sandbox/CSP is a herdr-t3 requirement.
+ * Registry commands resolve the live session via `session.snapshot`
+ * for host/session/owner identity and owner_stale reporting; an
+ * unreachable session fails with `session_unreachable` (contract
+ * error model). The plugin never executes or renders artifact content
+ * (ADR-0024 §4); render-time sandbox/CSP is a herdr-t3 requirement.
  */
 
+import os from "node:os";
+import {
+  type CallOptions,
+  type SessionSnapshot,
+  sessionSnapshot,
+} from "../../../packages/herdr-client/src/index";
 import {
   ARTIFACT_ID_PATTERN,
   ARTIFACT_KINDS,
+  type ArtifactKind,
   CONTRACT,
   CONTRACT_STATUS,
+  CREATED_BY,
+  type CreatedBy,
   IMPLEMENTED_COMMANDS,
   MAX_BYTES,
   PLANNED_COMMANDS,
   PLUGIN_ID,
   PLUGIN_VERSION,
   STORAGE_MODES,
+  type StorageMode,
 } from "./model";
+import {
+  agentSessionForPane,
+  deleteArtifact,
+  getArtifact,
+  listArtifacts,
+  RegistryError,
+  registerArtifact,
+  searchArtifacts,
+} from "./registry";
 
-const USAGE =
-  "bun run src/cli.ts <capability|help> — registry commands " +
-  `${PLANNED_COMMANDS.join("|")} are contract_draft until #141/#142/#143`;
+interface CliOptions extends CallOptions {
+  command: string;
+  /** Positional args plus per-command `--flag value` pairs, in order. */
+  args: string[];
+}
+
+function parseArgs(argv: string[]): CliOptions {
+  const args = [...argv];
+  const command = args.shift() ?? "";
+  const options: CliOptions = { command, args, session: undefined };
+  const rest: string[] = [];
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i] as string;
+    if (arg === "--session") {
+      options.session = args[++i];
+    } else if (arg === "--socket") {
+      options.socketPath = args[++i];
+    } else if (arg === "--timeout") {
+      const value = Number(args[++i]);
+      if (Number.isFinite(value) && value > 0) options.timeoutMs = value;
+    } else {
+      rest.push(arg);
+    }
+  }
+  options.args = rest;
+  return options;
+}
+
+interface FlagSpec {
+  /** Flags that consume a value. */
+  valued?: readonly string[];
+  /** Boolean flags (no value). */
+  boolean?: readonly string[];
+  /** Valued flags that may repeat (last wins unless listed here). */
+  multi?: readonly string[];
+}
+
+interface ParsedFlags {
+  positionals: string[];
+  flags: Map<string, string | true>;
+  multi: Map<string, string[]>;
+}
+
+/** Minimal `--flag value` / `--flag` parser; unknown `--x` is a usage error. */
+function parseFlags(args: string[], spec: FlagSpec): ParsedFlags {
+  const valued = new Set(spec.valued ?? []);
+  const boolean = new Set(spec.boolean ?? []);
+  const multi = new Set(spec.multi ?? []);
+  const flags = new Map<string, string | true>();
+  const multiMap = new Map<string, string[]>();
+  const positionals: string[] = [];
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i] as string;
+    if (arg.startsWith("--")) {
+      const name = arg.slice(2);
+      if (boolean.has(name)) {
+        flags.set(name, true);
+      } else if (valued.has(name)) {
+        const value = args[++i];
+        if (value === undefined) usageFail(`missing value for --${name}`);
+        if (multi.has(name)) {
+          const list = multiMap.get(name) ?? [];
+          list.push(value);
+          multiMap.set(name, list);
+        } else {
+          flags.set(name, value);
+        }
+      } else {
+        usageFail(`unknown flag: ${arg}`);
+      }
+    } else {
+      positionals.push(arg);
+    }
+  }
+  return { positionals, flags, multi: multiMap };
+}
+
+function flagValue(flags: Map<string, string | true>, name: string): string | undefined {
+  const value = flags.get(name);
+  return typeof value === "string" ? value : undefined;
+}
+
+function flagInt(flags: Map<string, string | true>, name: string): number | undefined {
+  const raw = flagValue(flags, name);
+  if (raw === undefined) return undefined;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0) {
+    usageFail(`--${name} must be a non-negative integer`);
+  }
+  return value;
+}
+
+function usageFail(message: string): never {
+  fail(message, 2);
+}
 
 function emit(payload: unknown): void {
   process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
@@ -58,7 +171,7 @@ function cmdCapability(): void {
     plugin: PLUGIN_ID,
     version: PLUGIN_VERSION,
     read_only: false,
-    mutation_commands: ["register", "delete", "gc"],
+    mutation_commands: ["register", "delete"],
     commands: [...IMPLEMENTED_COMMANDS, ...PLANNED_COMMANDS],
     implemented_commands: [...IMPLEMENTED_COMMANDS],
     planned_commands: [...PLANNED_COMMANDS],
@@ -70,9 +183,10 @@ function cmdCapability(): void {
       path_ref_oversize: "warn",
     },
     notes: [
-      "Contract is DRAFT (T1, Issue #136): only capability/help are implemented; registry commands return contract_draft until T2-T4 (#141/#142/#143).",
+      "Contract is DRAFT: T2 (#141) implements register/list/get/search/delete; verify/deliver/gc remain contract_draft until T3-T4 (#142/#143).",
       "Plugin never executes or renders artifact content; render-time sandbox/CSP/network isolation is a herdr-t3 requirement (ADR-0024, docs/contracts/artifacts-v1.md).",
       "state_copy (default) enforces per-kind caps at register; path_ref records oversize as a warning flag and reports vanished targets as missing_ref.",
+      "Registry commands resolve the live session via session.snapshot; unreachable session fails with session_unreachable.",
       "v1 attachment delivery is the artifact's stable absolute path inside agent.prompt/pane.send_text text; no structured attachment API exists in herdr protocol 22 (upstream gap candidate, ADR-0024).",
       "SnapShots (OS capture), browser import, and MCP Apps UI are out of plugin scope: herdr-t3/desktop or upstream-blocked on #30 (ADR-0024 section 5).",
     ],
@@ -80,31 +194,238 @@ function cmdCapability(): void {
   });
 }
 
-function main(): void {
-  const command = process.argv[2];
-  if (command === undefined) {
-    fail(USAGE, 2);
+async function snapshotOrFail(options: CallOptions): Promise<SessionSnapshot> {
+  try {
+    return await sessionSnapshot(options);
+  } catch (err) {
+    fail(
+      `herdr session unreachable: ${err instanceof Error ? err.message : String(err)}`,
+      1,
+      "session_unreachable",
+    );
   }
-  switch (command) {
+}
+
+function sessionName(snapshot: SessionSnapshot, options: CallOptions): string {
+  const name = snapshot.session?.name;
+  if (typeof name === "string" && name !== "") return name;
+  return options.session ?? process.env.HERDR_SESSION ?? "default";
+}
+
+function parseKind(raw: string | undefined): ArtifactKind | undefined {
+  if (raw === undefined) return undefined;
+  if (!(ARTIFACT_KINDS as readonly string[]).includes(raw)) {
+    usageFail(`--kind must be one of: ${ARTIFACT_KINDS.join(", ")}`);
+  }
+  return raw as ArtifactKind;
+}
+
+function parseStorage(raw: string | undefined): StorageMode | undefined {
+  if (raw === undefined) return undefined;
+  if (!(STORAGE_MODES as readonly string[]).includes(raw)) {
+    usageFail(`--storage must be one of: ${STORAGE_MODES.join(", ")}`);
+  }
+  return raw as StorageMode;
+}
+
+function parseCreatedBy(raw: string | undefined): CreatedBy | undefined {
+  if (raw === undefined) return undefined;
+  if (!(CREATED_BY as readonly string[]).includes(raw)) {
+    usageFail(`--created-by must be one of: ${CREATED_BY.join(", ")}`);
+  }
+  return raw as CreatedBy;
+}
+
+async function readStdin(): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
+}
+
+async function cmdRegister(options: CliOptions): Promise<void> {
+  const parsed = parseFlags(options.args, {
+    valued: ["path", "kind", "storage", "title", "pane", "created-by", "ref"],
+    boolean: ["stdin"],
+    multi: ["ref"],
+  });
+  if (parsed.positionals.length > 0) usageFail(`unexpected argument: ${parsed.positionals[0]}`);
+  const pathValue = flagValue(parsed.flags, "path");
+  const useStdin = parsed.flags.get("stdin") === true || pathValue === "-";
+  if (useStdin && pathValue !== undefined && pathValue !== "-") {
+    usageFail("--stdin cannot be combined with --path");
+  }
+  if (!useStdin && pathValue === undefined) {
+    usageFail("register requires --path FILE or --stdin");
+  }
+  const snapshot = await snapshotOrFail(options);
+  const paneId = flagValue(parsed.flags, "pane");
+  const record = await registerArtifact({
+    sourcePath: useStdin ? undefined : pathValue,
+    bytes: useStdin ? await readStdin() : undefined,
+    kind: parseKind(flagValue(parsed.flags, "kind")),
+    storage: parseStorage(flagValue(parsed.flags, "storage")),
+    title: flagValue(parsed.flags, "title"),
+    paneId,
+    agentSession: paneId !== undefined ? agentSessionForPane(snapshot, paneId) : undefined,
+    createdBy: parseCreatedBy(flagValue(parsed.flags, "created-by")),
+    refs: parsed.multi.get("ref"),
+    host: os.hostname(),
+    session: sessionName(snapshot, options),
+  });
+  emit({
+    contract: CONTRACT,
+    ok: true,
+    command: "register",
+    artifact: record,
+    generated_at: now(),
+  });
+}
+
+async function cmdList(options: CliOptions): Promise<void> {
+  const parsed = parseFlags(options.args, {
+    valued: ["kind", "pane", "session", "limit"],
+  });
+  if (parsed.positionals.length > 0) usageFail(`unexpected argument: ${parsed.positionals[0]}`);
+  const snapshot = await snapshotOrFail(options);
+  const result = await listArtifacts({
+    kind: parseKind(flagValue(parsed.flags, "kind")),
+    paneId: flagValue(parsed.flags, "pane"),
+    session: flagValue(parsed.flags, "session"),
+    limit: flagInt(parsed.flags, "limit"),
+    snapshot,
+  });
+  emit({
+    contract: CONTRACT,
+    ok: true,
+    command: "list",
+    session: sessionName(snapshot, options),
+    ...result,
+    generated_at: now(),
+  });
+}
+
+async function cmdGet(options: CliOptions): Promise<void> {
+  const parsed = parseFlags(options.args, {});
+  const id = parsed.positionals[0];
+  if (id === undefined || parsed.positionals.length !== 1) {
+    usageFail("get requires exactly one artifact_id");
+  }
+  const snapshot = await snapshotOrFail(options);
+  const artifact = await getArtifact(id, snapshot);
+  emit({
+    contract: CONTRACT,
+    ok: true,
+    command: "get",
+    session: sessionName(snapshot, options),
+    artifact,
+    generated_at: now(),
+  });
+}
+
+async function cmdSearch(options: CliOptions): Promise<void> {
+  const parsed = parseFlags(options.args, {
+    valued: ["kind", "pane", "session", "since", "limit"],
+  });
+  const query = parsed.positionals[0];
+  if (query === undefined || parsed.positionals.length !== 1) {
+    usageFail("search requires exactly one query");
+  }
+  const snapshot = await snapshotOrFail(options);
+  const result = await searchArtifacts({
+    query,
+    kind: parseKind(flagValue(parsed.flags, "kind")),
+    paneId: flagValue(parsed.flags, "pane"),
+    session: flagValue(parsed.flags, "session"),
+    since: flagValue(parsed.flags, "since"),
+    limit: flagInt(parsed.flags, "limit"),
+    snapshot,
+  });
+  emit({
+    contract: CONTRACT,
+    ok: true,
+    command: "search",
+    session: sessionName(snapshot, options),
+    ...result,
+    generated_at: now(),
+  });
+}
+
+async function cmdDelete(options: CliOptions): Promise<void> {
+  const parsed = parseFlags(options.args, { boolean: ["force"] });
+  const id = parsed.positionals[0];
+  if (id === undefined || parsed.positionals.length !== 1) {
+    usageFail("delete requires exactly one artifact_id");
+  }
+  const snapshot = await snapshotOrFail(options);
+  const result = await deleteArtifact(id, parsed.flags.get("force") === true);
+  emit({
+    contract: CONTRACT,
+    ok: true,
+    command: "delete",
+    session: sessionName(snapshot, options),
+    ...result,
+    generated_at: now(),
+  });
+}
+
+async function main(): Promise<void> {
+  const options = parseArgs(process.argv.slice(2));
+  switch (options.command) {
     case "capability":
       cmdCapability();
       return;
     case "help":
     case "--help":
     case "-h":
-      emit({ contract: CONTRACT, plugin: PLUGIN_ID, version: PLUGIN_VERSION, usage: USAGE });
+      emit({
+        contract: CONTRACT,
+        plugin: PLUGIN_ID,
+        version: PLUGIN_VERSION,
+        usage:
+          "bun run src/cli.ts <capability|help|register|list|get|search|delete> " +
+          `— planned: ${PLANNED_COMMANDS.join("|")}`,
+      });
+      return;
+    case "register":
+      await cmdRegister(options);
+      return;
+    case "list":
+      await cmdList(options);
+      return;
+    case "get":
+      await cmdGet(options);
+      return;
+    case "search":
+      await cmdSearch(options);
+      return;
+    case "delete":
+      await cmdDelete(options);
       return;
     default:
-      if ((PLANNED_COMMANDS as readonly string[]).includes(command)) {
+      if ((PLANNED_COMMANDS as readonly string[]).includes(options.command)) {
         fail(
-          `command '${command}' is part of the draft contract but not implemented yet (T2-T4: #141/#142/#143)`,
+          `command '${options.command}' is part of the draft contract but not implemented yet (T3-T4: #142/#143)`,
           1,
           "contract_draft",
-          { command },
+          { command: options.command },
         );
       }
-      fail(`unknown command: ${command}`, 2);
+      fail(`unknown command: ${options.command}`, 2);
   }
 }
 
-main();
+main().catch((err) => {
+  if (err instanceof RegistryError) {
+    const error: Record<string, unknown> = {
+      code: err.code === "usage" ? "usage" : "error",
+      message: err.message,
+      kind: err.kind,
+    };
+    if (err.extra) Object.assign(error, err.extra);
+    process.stderr.write(`${JSON.stringify({ contract: CONTRACT, ok: false, error })}\n`);
+    process.exit(err.code === "usage" ? 2 : 1);
+  }
+  fail(err instanceof Error ? err.message : String(err), 1);
+});

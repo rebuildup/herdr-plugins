@@ -8,8 +8,8 @@ platforms = ["linux", "macos", "windows"]
 # No build step: the plugin is dependency-free TypeScript executed by Bun
 # (runtime prerequisite, see plugins/artifacts/README.md).
 #
-# T1 scaffold (#136): contract `herdr-plugins.artifacts/v1` is DRAFT.
-# Only `capability`/`help` are implemented; the registry commands
-# (register/list/get/search/verify/delete/deliver/gc) land in T2-T4
-# (#141/#142/#143). No [[actions]] / [[events]] in v1: the registry is
+# T1 scaffold (#136) + T2 registry core (#141): contract
+# `herdr-plugins.artifacts/v1` is DRAFT. Implemented: capability, help,
+# register, list, get, search, delete; verify/deliver/gc land in
+# T3-T4 (#142/#143). No [[actions]] / [[events]] in v1: the registry is
 # explicit CLI invocation (same convention as rebuildup.conversations).

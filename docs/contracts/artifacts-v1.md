@@ -7,11 +7,12 @@ generic files). Design boundary:
 [`docs/adr/0024-artifacts-boundary.md`](../adr/0024-artifacts-boundary.md).
 Specification: [`docs/specs/artifacts.md`](../specs/artifacts.md).
 
-**Status: DRAFT (T1, Issue #136).** Only `capability` and `help` are
-implemented in this revision; the registry commands below are the
-committed skeleton that T2–T4 (#141/#142/#143) implement. The contract
-is versioned `herdr-plugins.artifacts/v1` from the start; fields may
-be added additively, removals/renames require a version bump.
+**Status: DRAFT.** T1 (#136) shipped `capability`/`help`; T2 (#141)
+implements the registry core `register`/`list`/`get`/`search`/`delete`;
+`verify`/`deliver`/`gc` remain planned for T3–T4 (#142/#143). The
+contract is versioned `herdr-plugins.artifacts/v1` from the start;
+fields may be added additively, removals/renames require a version
+bump.
 
 ## Discovery
 
@@ -27,14 +28,16 @@ be added additively, removals/renames require a version bump.
 cd <plugin_root>
 bun run src/cli.ts capability          # implemented (T1)
 bun run src/cli.ts help                # implemented (T1)
-# --- planned registry surface (T2 #141 / T3 #142 / T4 #143) ---
+# --- registry core (implemented T2 #141) ---
 bun run src/cli.ts register --path FILE [--kind KIND] [--storage state_copy|path_ref]
-                                 [--title TEXT] [--pane PANE] [--session NAME]
+                                 [--title TEXT] [--pane PANE] [--created-by CREATED_BY]
+                                 [--ref REF ...] | --stdin
 bun run src/cli.ts list    [--kind KIND] [--pane PANE] [--session NAME] [--limit N]
 bun run src/cli.ts get     <artifact_id>
-bun run src/cli.ts search  <query> [--kind KIND] [--pane PANE] [--since ISO] [--limit N]
-bun run src/cli.ts verify  [<artifact_id>]
+bun run src/cli.ts search  <query> [--kind KIND] [--pane PANE] [--session NAME] [--since ISO] [--limit N]
 bun run src/cli.ts delete  <artifact_id> [--force]
+# --- planned (T3 #142 / T4 #143) ---
+bun run src/cli.ts verify  [<artifact_id>]
 bun run src/cli.ts deliver --pane PANE|--agent PANE <artifact_id>
 bun run src/cli.ts gc      [--older-than ISO] [--dry-run]
 ```
@@ -43,9 +46,16 @@ bun run src/cli.ts gc      [--older-than ISO] [--dry-run]
   errors print `{contract, ok:false, error:{code,message,kind?}}` on
   **stderr** and exit 1; usage errors exit 2.
 - `capability`/`help` work without a reachable herdr session.
-  Registry commands resolve the live session via `session.snapshot`
-  unless `--offline`-style read-only operation is documented per
-  command; unreachable session → `kind:"session_unreachable"` exit 1.
+  Registry commands (`register`/`list`/`get`/`search`/`delete`) resolve
+  the live session via `session.snapshot` for host/session/owner
+  identity and `owner_stale` reporting; unreachable session →
+  `kind:"session_unreachable"` exit 1.
+- `register` accepts `--path FILE` or `--stdin` (bytes on stdin;
+  `path_ref` storage requires `--path` since stdin has no stable
+  ref). `--kind` is inferred from extension then leading-byte MIME
+  when omitted. `--ref` is repeatable and lands in `refs` (additive
+  back-references). `delete` refuses records with non-empty `refs`
+  unless `--force` is passed (`referenced`).
 
 ## `capability`
 
@@ -57,7 +67,7 @@ bun run src/cli.ts gc      [--older-than ISO] [--dry-run]
   "plugin": "rebuildup.artifacts",
   "version": "0.1.0",
   "read_only": false,
-  "mutation_commands": ["register", "delete", "gc"],
+  "mutation_commands": ["register", "delete"],
   "commands": ["capability", "register", "list", "get", "search", "verify", "delete", "deliver", "gc"],
   "kinds": ["html", "image", "pdf", "file", "other"],
   "storage_modes": ["state_copy", "path_ref"],
@@ -126,6 +136,19 @@ atomic-rename discipline (AGENTS §4):
   with `too_large`; `path_ref` records `oversize: true` + warning when
   over the kind cap.
 
+### Read surfaces (T2)
+
+`list`/`get`/`search` return records annotated at read time:
+`missing_ref: true` + `storage_ref_missing` warning when the payload
+is gone, unsafe (symlink inside the artifacts tree), or the recorded
+`resolved_path` does not match the index layout; `owner_stale: true` +
+`owner_stale` warning when `owner.pane_id` is absent from the live
+snapshot. `oversize` is recomputed for `path_ref` (a file that grew
+past the cap after register is reported, not hidden). `list`/`search`
+also report top-level `orphans` (payload dirs with no index record)
+and `corrupt` (index ids whose records failed parsing). None of these
+are failures — they are honest degradation, per AGENTS §4.
+
 ## Error model
 
 ```json
@@ -140,8 +163,9 @@ on stderr, exit 1. Planned `error.code` values (draft):
 | `artifact_not_found` | `not_found` | unknown or malformed artifact_id |
 | `path_outside_root` / `traversal_denied` | `invalid` | path-traversal / symlink escape attempt |
 | `too_large` | `invalid` | state_copy exceeds per-kind cap |
-| `mime_mismatch` | `warning`-class; refusal only for `html` kind per spec | sniffed type disagrees with declared kind |
-| `storage_ref_missing` (`missing_ref`) | `unavailable` | path_ref target vanished/unreadable |
+| `mime_mismatch` | `invalid` on refusal | sniffed type disagrees with declared kind; refusal only for `kind:"html"`, warning otherwise |
+| `source_not_found` / `source_not_file` / `source_unreadable` | `not_found` / `invalid` / `unavailable` | register source missing, not a regular file, or unreadable |
+| `storage_ref_missing` (`missing_ref`) | reported on reads (`missing_ref: true` + `storage_ref_missing` warning) | path_ref target vanished/unreadable, or state_copy payload missing/symlinked |
 | `owner_stale` | `stale` | owner identity no longer matches live snapshot (warning, not failure, on reads) |
 | `referenced` | `warning` | delete/gc target still referenced by handoff/conversations/checkpoint payloads; requires `--force` |
 | `session_unreachable` | `unavailable` | herdr socket unreachable |
