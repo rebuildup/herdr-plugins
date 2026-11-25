@@ -61,42 +61,6 @@ export interface AgentReadResult {
 
 // --- Methods ----------------------------------------------------------------
 
-export interface AgentStartParams {
-  /** Display name for the started agent. */
-  name: string;
-  /** herdr-detected agent kind (e.g. "claude", "codex"). */
-  kind: string;
-  /** Pane that hosts the agent process. */
-  pane_id: string;
-  /** Provider CLI args passed through by herdr (server-side validated). */
-  args?: string[] | undefined;
-  /**
-   * Server-side startup timeout in ms; upstream bounds are >3000 and
-   * <=300000. The client request timeout must exceed this value.
-   */
-  timeout_ms?: number | undefined;
-}
-
-/**
- * `agent.start` — launch a detected agent kind inside an existing pane.
- * herdr owns process spawning and detection; `args` are passed through to
- * the provider executable (control chars rejected upstream). There is no
- * argv-at-creation for panes — panes are shells, agents attach to them.
- */
-export async function agentStart(
-  params: AgentStartParams,
-  options: CallOptions & RequestOptions = {},
-): Promise<unknown> {
-  const wire: Record<string, unknown> = {
-    name: params.name,
-    kind: params.kind,
-    pane_id: params.pane_id,
-  };
-  if (params.args !== undefined) wire.args = params.args;
-  if (params.timeout_ms !== undefined) wire.timeout_ms = params.timeout_ms;
-  return request(socketFor(options), "agent.start", wire, options);
-}
-
 /** `agent.get` — resolve a target to its live AgentInfo; rejects when unknown. */
 export async function agentGet(target: string, options: CallOptions = {}): Promise<AgentGetResult> {
   const result = asRecord(await request(socketFor(options), "agent.get", { target }, options));

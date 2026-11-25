@@ -27,7 +27,7 @@
 import {
   type AgentGetResult,
   type AgentPromptWaitOptions,
-  type AgentStartParams,
+  type AgentStartOptions,
   type AgentStatus,
   agentGet,
   agentPrompt,
@@ -91,7 +91,7 @@ export interface HandoffTransport {
   tabCreate(
     params: SurfaceCreateParams & { workspace_id?: string | undefined },
   ): Promise<TabCreatedResult>;
-  agentStart(params: AgentStartParams): Promise<unknown>;
+  agentStart(params: AgentStartOptions): Promise<unknown>;
   agentGet(target: string): Promise<AgentGetResult>;
   agentPrompt(
     target: string,
@@ -123,7 +123,7 @@ export function herdrTransport(options: CallOptions = {}): HandoffTransport {
         ...options,
         timeoutMs: Math.max(
           options.timeoutMs ?? 0,
-          (params.timeout_ms ?? AGENT_START_TIMEOUT_MS) + CLIENT_MARGIN_MS,
+          (params.timeoutMs ?? AGENT_START_TIMEOUT_MS) + CLIENT_MARGIN_MS,
         ),
       }),
     agentGet: (target) => agentGet(target, options),
@@ -678,9 +678,9 @@ export async function executeHandoff(
       await transport.agentStart({
         name: agentName,
         kind: decision.provider_kind,
-        pane_id: surface.pane_id,
+        paneId: surface.pane_id,
         ...(startArgs.length > 0 ? { args: startArgs } : {}),
-        timeout_ms: AGENT_START_TIMEOUT_MS,
+        timeoutMs: AGENT_START_TIMEOUT_MS,
       });
     } catch (err) {
       return await fail("agent_start", err);

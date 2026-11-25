@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type {
   AgentGetResult,
-  AgentStartParams,
+  AgentStartOptions,
   PaneInfo,
   SessionSnapshot,
   TabCreatedResult,
@@ -150,7 +150,7 @@ class FakeTransport implements HandoffTransport {
   workspaceCreates = 0;
   tabCreates = 0;
   paneCloses: string[] = [];
-  starts: AgentStartParams[] = [];
+  starts: AgentStartOptions[] = [];
   prompts: { target: string; text: string }[] = [];
   waits: { target: string; timeoutMs: number | null }[] = [];
   /** Sequential agentGet responses; falls back to agentGetDefault. */
@@ -184,7 +184,7 @@ class FakeTransport implements HandoffTransport {
       root_pane: pane(paneId, { workspace_id: wsId, tab_id: tabId }),
     };
   }
-  async agentStart(params: AgentStartParams): Promise<unknown> {
+  async agentStart(params: AgentStartOptions): Promise<unknown> {
     this.starts.push(params);
     if (this.failures.agentStart) throw this.failures.agentStart;
     return { started: true };
