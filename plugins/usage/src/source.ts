@@ -30,6 +30,12 @@ import {
   type UsageEventRecord,
 } from "./model";
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
 /** This plugin's own root (plugins/usage). */
 export function pluginRoot(): string {
   const envRoot = process.env.HERDR_PLUGIN_ROOT;
@@ -381,7 +387,13 @@ export async function exportUsageEvents(
 
 export interface CapabilityInfo {
   contract: string | null;
-  providers: { id: string; status: string; formats?: string[] }[];
+  providers: {
+    id: string;
+    status: string;
+    formats?: string[];
+    /** Adapter-declared usage accounting (e.g. cache_tokens). */
+    usage?: { cache_tokens?: string };
+  }[];
 }
 
 /** Fetch the conversations capability matrix (provider support statuses). */
@@ -393,13 +405,25 @@ export async function fetchConversationsCapability(
   if (run.status !== 0 || run.json === null) return null;
   const json = run.json;
   const providers = Array.isArray(json.providers)
-    ? (json.providers as { id?: unknown; status?: unknown; formats?: unknown }[])
+    ? (
+        json.providers as {
+          id?: unknown;
+          status?: unknown;
+          formats?: unknown;
+          usage?: unknown;
+        }[]
+      )
         .filter((p) => typeof p.id === "string")
-        .map((p) => ({
-          id: p.id as string,
-          status: typeof p.status === "string" ? p.status : "unknown",
-          ...(Array.isArray(p.formats) ? { formats: p.formats as string[] } : {}),
-        }))
+        .map((p) => {
+          const usageRaw = asRecord(p.usage);
+          const cacheTokens = usageRaw?.cache_tokens;
+          return {
+            id: p.id as string,
+            status: typeof p.status === "string" ? p.status : "unknown",
+            ...(Array.isArray(p.formats) ? { formats: p.formats as string[] } : {}),
+            ...(typeof cacheTokens === "string" ? { usage: { cache_tokens: cacheTokens } } : {}),
+          };
+        })
     : [];
   return {
     contract: typeof json.contract === "string" ? json.contract : null,

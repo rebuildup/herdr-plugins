@@ -52,7 +52,7 @@ interface QuotaProviderSpec {
  * declared unsupported up front: its auth store holds per-provider API
  * keys, and no subscription quota/reset artifact exists to read.
  */
-const QUOTA_PROVIDERS: readonly QuotaProviderSpec[] = [
+export const QUOTA_PROVIDERS: readonly QuotaProviderSpec[] = [
   { id: "claude", implemented: true },
   { id: "codex", implemented: true },
   {
@@ -83,7 +83,7 @@ function isoFromString(value: unknown): string | null {
   return Number.isNaN(ms) ? null : new Date(ms).toISOString();
 }
 
-function asRecord(value: unknown): Record<string, unknown> | null {
+export function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
@@ -211,7 +211,7 @@ async function readClaudeCredential(env: NodeJS.ProcessEnv): Promise<CredentialR
 }
 
 /** Decode a JWT payload without verifying; returns whitelisted claims only. */
-function decodeJwtClaims(token: string): Record<string, unknown> | null {
+export function decodeJwtClaims(token: string): Record<string, unknown> | null {
   const parts = token.split(".");
   if (parts.length !== 3) return null;
   try {
@@ -471,7 +471,7 @@ export function codexUsageToWindows(body: unknown): MappedQuota {
 
 // --- HTTP -----------------------------------------------------------------------
 
-type FetchImpl = (url: string, init: RequestInit) => Promise<Response>;
+export type FetchImpl = (url: string, init: RequestInit) => Promise<Response>;
 
 interface FetchOutcome {
   ok: boolean;
@@ -482,17 +482,19 @@ interface FetchOutcome {
   detail: string | null;
 }
 
-async function fetchJson(
+export async function fetchJson(
   url: string,
   headers: Record<string, string>,
   timeoutMs: number,
   fetchImpl: FetchImpl,
+  request?: { method?: string; body?: string },
 ): Promise<FetchOutcome> {
   let response: Response;
   try {
     response = await fetchImpl(url, {
-      method: "GET",
+      method: request?.method ?? "GET",
       headers,
+      ...(request?.body !== undefined ? { body: request.body } : {}),
       signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (err) {
@@ -691,6 +693,27 @@ async function fetchClaudeQuota(
   };
 }
 
+/**
+ * Count banked Codex reset credits from a `rate-limit-reset-credits`
+ * response body: `reset_type === "codex_rate_limits"`, `status ===
+ * "available"`, and not yet expired. Pure — shared by the direct
+ * quota probe and the hub (api-call) path. Returns null when the
+ * body is not the expected shape (missing is never zero-fabricated).
+ */
+export function codexResetCreditsAvailable(body: unknown, nowMs: number): number | null {
+  const root = asRecord(body);
+  if (root === null || !Array.isArray(root.credits)) return null;
+  let count = 0;
+  for (const entry of root.credits) {
+    const c = asRecord(entry);
+    if (c?.reset_type !== "codex_rate_limits" || c.status !== "available") continue;
+    const expires = typeof c.expires_at === "string" ? Date.parse(c.expires_at) : NaN;
+    if (!Number.isFinite(expires) || expires <= nowMs) continue;
+    count += 1;
+  }
+  return count;
+}
+
 async function fetchCodexCredits(
   cred: CredentialOk,
   endpoint: string,
@@ -704,18 +727,7 @@ async function fetchCodexCredits(
     fetchImpl,
   );
   if (!res.ok) return null;
-  const root = asRecord(res.json);
-  const credits = Array.isArray(root?.credits) ? root.credits : [];
-  const nowMs = Date.now();
-  let count = 0;
-  for (const entry of credits) {
-    const c = asRecord(entry);
-    if (c?.reset_type !== "codex_rate_limits" || c.status !== "available") continue;
-    const expires = typeof c.expires_at === "string" ? Date.parse(c.expires_at) : NaN;
-    if (!Number.isFinite(expires) || expires <= nowMs) continue;
-    count += 1;
-  }
-  return count;
+  return codexResetCreditsAvailable(res.json, Date.now());
 }
 
 async function fetchCodexQuota(

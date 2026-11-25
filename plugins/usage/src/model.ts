@@ -166,6 +166,34 @@ export interface UsageAggregate {
   sessions: SessionCoverageEntry[];
 }
 
+// --- cache token breakdown (T3 / #92) ------------------------------------------
+
+/**
+ * Whether a provider's cache-token accounting can be trusted in the
+ * aggregated output. `reported` = the conversations adapter declares
+ * cache-token mapping and the provider is supported; `unsupported` =
+ * the provider/adapter has no cache-token accounting (explicit, never
+ * a silent zero); `unknown` = the capability matrix could not verify
+ * (provider absent from it or capability fetch failed).
+ */
+export type CacheTokenStatus = "reported" | "unsupported" | "unknown";
+
+/** Per-provider cache-token row of the `usage` cache breakdown. */
+export interface CacheTokenProviderEntry {
+  provider: string;
+  status: CacheTokenStatus;
+  /** Usage-carrying events summed for this provider (0 = none measured). */
+  events: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+  /** Why the status is not `reported`; null when reported. */
+  detail: string | null;
+}
+
+export interface UsageCacheTokens {
+  providers: CacheTokenProviderEntry[];
+}
+
 // --- subscription quota (T2 / #91, ADR-0014) ---------------------------------
 
 /**
@@ -233,4 +261,99 @@ export interface QuotaEndpoints {
   claude?: string | undefined;
   codexUsage?: string | undefined;
   codexCredits?: string | undefined;
+}
+
+// --- HTTP quota hubs / CLIProxyAPI-equivalent sources (T3 / #92, ADR-0015) ------
+
+/**
+ * One configured quota hub (CLIProxyAPI-compatible management API).
+ * `url` is not secret; the management key is NEVER stored here —
+ * `keyEnv` names the environment variable that holds it (ADR-0015).
+ */
+export interface QuotaHubConfig {
+  id: string;
+  url: string;
+  /** Env var holding the hub management key. Default when absent. */
+  keyEnv?: string | undefined;
+}
+
+/** Per-account outcome inside a hub report. */
+export interface HubAccountResult {
+  /** Hub-side auth-file id — a local label, not a credential. */
+  account: string;
+  /** Provider id reported by the hub (`claude`, `codex`, …). */
+  provider: string;
+  status: QuotaStatus | "skipped";
+  detail: string | null;
+  plan: string | null;
+  windows: QuotaWindow[];
+  checked_at: string | null;
+  reset_credits_available: number | null;
+}
+
+/** Hub-level quota report inside a `quota`/`divergence` result. */
+export interface QuotaHubResult {
+  id: string;
+  kind: "cliproxy-api";
+  /** Sanitized hub base URL (origin + path); null when unparseable. */
+  endpoint: string | null;
+  status: "ok" | "no_credential" | "unauthorized" | "request_failed";
+  detail: string | null;
+  checked_at: string | null;
+  fetched_at: string;
+  stale: boolean;
+  stale_reason: string | null;
+  cache: QuotaCacheInfo;
+  accounts: HubAccountResult[];
+}
+
+// --- quota vs measured divergence report (T3 / #92) ----------------------------
+
+/**
+ * How the measured token window relates to the provider's quota
+ * windows. Quota `used_percent` and transcript token sums are
+ * different units from different sources — this field only describes
+ * window alignment, never equivalence.
+ */
+export type DivergenceWindowAlignment =
+  | "unbounded"
+  | "matches_quota_window"
+  | "custom_window"
+  | "unknown";
+
+export type DivergenceVerdict =
+  /** Both sides present; units differ — reported side by side. */
+  | "different_units"
+  /** Quota side answered but nothing was measured for the provider. */
+  | "no_measured_usage"
+  /** Quota side could not answer (any non-ok status). */
+  | "quota_unavailable"
+  /** Neither side has data. */
+  | "no_data";
+
+export interface DivergenceMeasured {
+  events: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+  total_tokens: number;
+}
+
+export interface DivergenceQuotaSide {
+  status: QuotaStatus;
+  detail: string | null;
+  plan: string | null;
+  checked_at: string | null;
+  stale: boolean;
+  windows: QuotaWindow[];
+}
+
+export interface DivergenceComparison {
+  provider: string;
+  verdict: DivergenceVerdict;
+  detail: string | null;
+  quota: DivergenceQuotaSide | null;
+  measured: DivergenceMeasured | null;
+  window_alignment: DivergenceWindowAlignment;
 }

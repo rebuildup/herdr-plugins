@@ -5,12 +5,14 @@ output / cache-read / cache-creation (+ thinking detail) — over the
 provider transcripts already normalized by `rebuildup.conversations`,
 with honest reporting of what is missing, unsupported, or stale.
 
-This is T1+T2 of #28. T1 (#90) shipped the aggregation core +
-`herdr-plugins.usage/v1` contract; T2 (#91) adds subscription
+This is T1–T3 of #28. T1 (#90) shipped the aggregation core +
+`herdr-plugins.usage/v1` contract; T2 (#91) added subscription
 quota/reset surfacing (`quota` command) and the credential-boundary
-ADR-0014. Cache-token refinements, HTTP quota sources, and
-CLIProxyAPI-style integration remain **T3 (#92)**; estimated API cost
-vs. real billing and history retention are **T4 (#93)**.
+ADR-0014; T3 (#92) adds the per-provider cache-token breakdown, the
+CLIProxyAPI-equivalent HTTP quota hub source (`quotaHubs` config,
+ADR-0015), and the `divergence` report comparing quota windows vs
+measured tokens. Estimated API cost vs. real billing and history
+retention remain **T4 (#93)**.
 
 ## Source decision (ADR-0013)
 
@@ -49,7 +51,14 @@ Plugin root resolution: explicit override (flag/env/config) → sibling
   Independent of the conversations index and of any herdr session.
   Per-provider `status` is data (`ok`/`unsupported`/`no_credential`/
   `credential_expired`/`request_failed`); the command exits 0 whenever
-  it can emit the envelope.
+  it can emit the envelope. `hubs[]` reports configured
+  CLIProxyAPI-compatible hubs with per-account outcomes.
+- `divergence [--provider] [--from|--to] [--refresh]` — places
+  subscription-quota windows and transcript-measured token sums side
+  by side per provider. Verdicts: `different_units` (both present —
+  reported, never reconciled), `no_measured_usage`, `quota_unavailable`,
+  `no_data`. Hub readings are reported under `hubs` but excluded from
+  `comparisons` (account identity is unverifiable).
 
 ## Aggregation rules
 
@@ -73,6 +82,13 @@ Plugin root resolution: explicit override (flag/env/config) → sibling
   `sessions_events_missing`, per-provider status) from measured
   totals; a supported provider with zero measured usage is
   distinguishable from an unsupported one.
+- `cache_tokens.providers[]` (T3) is the per-provider cache-token
+  view: measured `cache_read`/`cache_creation` sums plus a `status`
+  derived from the adapter capability matrix
+  (`capability.providers[].usage.cache_tokens`, additive in
+  conversations v1): `reported` / `unsupported` / `unknown`. A
+  provider that does not account for cache tokens is `unsupported`
+  explicitly — zeros are never presented as "no cache support".
 
 ## Quota sources (T2 / ADR-0014)
 
@@ -109,6 +125,41 @@ Rules (ADR-0014 is the canonical boundary):
 - HTTP/transport failure → `request_failed`; with cache → `ok` +
   `stale: true`. Missing data is never a fabricated zero.
 
+## Quota hubs / CLIProxyAPI-equivalent (T3 / ADR-0015)
+
+`config.json` `quotaHubs: [{id, url, keyEnv?}]` declares hubs speaking
+the CLIProxyAPI management API (`GET /v0/management/auth-files`,
+`POST /v0/management/api-call`), the same integration shape as T3
+Code's `cliproxyApi.ts`. The hub holds provider credentials; the
+plugin holds only the hub management key.
+
+- `keyEnv` names the env var holding the management key (default
+  `HERDR_USAGE_QUOTA_HUB_KEY`); the value is never stored in config,
+  state, cache, logs, or output (ADR-0015).
+- Upstream provider calls go through `api-call` with
+  `Authorization: Bearer $TOKEN$` — real provider tokens never enter
+  this process. Mappers exist for claude and codex accounts (same
+  window parsers as the direct path, incl. Codex reset credits);
+  other hub providers report per-account `unsupported`.
+- Hub statuses: `ok` / `no_credential` / `unauthorized` (401/403) /
+  `request_failed`; per-account failures stay per-account. Cache:
+  `quota-cache/hub-<id>.json`, same TTL, only `ok`/`unsupported`
+  readings cached; stale serve flagged.
+- No hub configured → `hubs: []`; unreachable/credential-less →
+  structured non-`ok` statuses, never an error exit.
+
+## Divergence report (T3)
+
+`divergence` compares subscription-quota windows (`used_percent` +
+reset instants, provider-side, all clients) against transcript-measured
+token sums (local index, requested window). These are different units
+from different sources: the report emits both sides per provider with
+verdict `different_units` and never reconciles or converts. Window
+alignment (`window_alignment`) only notes whether the `--from`/`--to`
+span matches a reported quota window duration. Hub readings appear
+under `hubs` but are excluded from comparisons — a hub account cannot
+be proven to be the same subscription as local transcripts.
+
 ## Concurrency / state
 
 `usage` keeps no durable state: every call re-exports and
@@ -120,10 +171,10 @@ GET-only. Export paging is bounded (500 events/page, 2M-event safety
 cap → `export_incomplete_page_limit` warning + `source.complete:
 false`).
 
-## Explicit non-goals (T3–T4)
+## Explicit non-goals (T4)
 
-- No HTTP quota sources / CLIProxyAPI / divergence reports — #92.
-- No reset-credit redemption or any credential mutation — #92+.
 - No estimated API pricing, no cost-vs-billing distinction beyond the
   `provider_reported_cost_usd` label, no history GC — #93.
+- No reset-credit redemption or any credential/hub mutation — out of
+  scope per ADR-0014/0015.
 - No PTY scraping, no transcript scanning, no fabricated states.

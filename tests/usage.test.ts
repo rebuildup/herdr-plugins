@@ -483,7 +483,11 @@ describe("usage plugin contract", () => {
     const index = sources.find((s) => s.id === "conversations-index");
     expect(index?.status).toBe("available");
     expect(index?.contract).toBe("herdr-plugins.conversations/v1");
-    expect(sources.some((s) => s.status === "unsupported")).toBe(true);
+    // T3 (#92): the HTTP quota hub slot is implemented, not a placeholder.
+    const hub = sources.find((s) => s.id === "cliproxy-api");
+    expect(hub?.status).toBe("available");
+    expect(hub?.credential_boundary).toContain("0015");
+    expect((r.json?.commands as string[]).includes("divergence")).toBe(true);
   });
 
   t("aggregates claude+codex fixtures end-to-end with cache tokens", async () => {
