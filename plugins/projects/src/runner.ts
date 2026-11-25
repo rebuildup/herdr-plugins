@@ -142,6 +142,12 @@ export const DEFAULT_STOP_GRACE_MS = 2_000;
 export const DEFAULT_STOP_CONFIRM_MS = 5_000;
 /** Hard cap on stop-confirmation polls regardless of configured timings. */
 const MAX_STOP_CONFIRM_ATTEMPTS = 20;
+/**
+ * Scrollback window for the lazy completion re-scan (#68). The marker is
+ * echoed immediately after the command exits, so it sits at the tail of
+ * scrollback; 2000 unwrapped lines is generous headroom for noisy output.
+ */
+const RESCAN_SCROLLBACK_LINES = 2_000;
 
 export function runMarkerToken(runId: string): string {
   return `${MARKER_PREFIX}${runId}__`;
@@ -621,6 +627,109 @@ async function checkPaneOwnership(
   return { kind: "owned", pane };
 }
 
+// --- Lazy completion recovery via scrollback re-scan (#68) ------------------
+//
+// The `__HERDR_DONE_<run-id>__=<code>` marker is durable: once the shell
+// echoes it, it stays in pane scrollback even after `pane.wait_for_output`
+// has timed out and the CLI process has exited. `scripts results`/`logs`
+// therefore recover completions WITHOUT polling or a daemon: after pane
+// ownership re-validation, one bounded `pane.read`
+// (`recent_unwrapped`) is scanned for the marker. `events.subscribe`'s
+// `pane.output_matched` was evaluated and rejected as the recovery
+// mechanism — it needs a persistent subscription connection, which a
+// one-shot CLI cannot hold after exit (ADR-0002 forbids a daemon), and
+// events are not replayed to late subscribers. The scrollback receipt is
+// the durable record instead; see docs/specs/projects.md.
+
+export type ScrollbackScan =
+  | { kind: "marker"; exitCode: number; text: string }
+  | { kind: "no_marker"; text: string }
+  | { kind: "gone" }
+  | { kind: "unreachable" };
+
+/**
+ * Read the tail of an OWNED pane's scrollback and look for this run's
+ * completion marker. Callers must run `checkPaneOwnership` FIRST — this
+ * helper performs no ownership checks itself. A pane that vanished
+ * between the ownership check and the read reports `gone`; other
+ * transport failures report `unreachable` (record left unchanged).
+ */
+async function rescanScrollback(
+  run: ScriptRun,
+  transport: ScriptTransport,
+): Promise<ScrollbackScan> {
+  let read: PaneReadResult;
+  try {
+    read = await transport.paneRead(run.pane_id, {
+      source: "recent_unwrapped",
+      lines: RESCAN_SCROLLBACK_LINES,
+    });
+  } catch (err) {
+    if (isPaneGoneError(err)) return { kind: "gone" };
+    return { kind: "unreachable" };
+  }
+  const text = read.text ?? "";
+  const exitCode = parseMarkerExitCode(text, run.run_id);
+  if (exitCode === null) return { kind: "no_marker", text };
+  return { kind: "marker", exitCode, text };
+}
+
+/**
+ * Finalize an active run from a recovered marker exit code. The marker
+ * is the ONLY accepted evidence — `success`/`failed` is derived from its
+ * digits exactly like the live wait path. The write is guarded to still
+ * ACTIVE records so a concurrent `scripts stop` (or another writer) that
+ * already finalized the run is never clobbered. Returns the fresh stored
+ * record.
+ */
+async function finalizeCompletedRun(
+  run: ScriptRun,
+  exitCode: number,
+  text: string,
+  d: ResolvedDeps,
+  deps: RunnerDeps,
+): Promise<ScriptRun> {
+  const result: RunResult = exitCode === 0 ? "success" : "failed";
+  await captureLog(d, run, text);
+  await updateRuns((state) => {
+    const existing = state.runs[run.run_id];
+    if (existing && ACTIVE_RUN_RESULTS.has(existing.result)) {
+      state.runs[run.run_id] = {
+        ...existing,
+        result,
+        finished_at: iso(d),
+        exit_code: exitCode,
+        error: null,
+        log_path: run.log_path ?? existing.log_path,
+      };
+    }
+  });
+  const fresh = (await loadRuns()).runs[run.run_id];
+  const stored = fresh ?? { ...run, result, finished_at: iso(d), exit_code: exitCode };
+  await reportRunState(deps, stored, stored.result);
+  return stored;
+}
+
+/**
+ * Persist the "pane vanished" outcome for an active run during lazy
+ * reconciliation: `running` → `unknown` (outcome undetermined),
+ * `stopping`/`stop_unconfirmed` → `stopped` (pane absence after a stop
+ * request IS exit evidence). Returns the fresh stored record.
+ */
+async function markPaneGone(
+  run: ScriptRun,
+  d: ResolvedDeps,
+  errorFallback = "pane gone before completion marker",
+): Promise<ScriptRun> {
+  const result: RunResult = run.result === "running" ? "unknown" : "stopped";
+  await markRun(run.run_id, {
+    result,
+    finished_at: iso(d),
+    error: result === "unknown" ? (run.error ?? errorFallback) : null,
+  });
+  return (await loadRuns()).runs[run.run_id] ?? { ...run, result };
+}
+
 // --- start -----------------------------------------------------------------
 
 export interface StartRunInput {
@@ -1078,6 +1187,10 @@ async function reconcileStopState(
  * ownership re-validation (#66):
  * - foreign host/session records are never touched through this socket
  *   (error annotated, result preserved for the owning session);
+ * - an OWNED pane's scrollback is re-scanned once for the durable
+ *   completion marker (#68): marker found → `success`/`failed` with the
+ *   parsed exit code and a bounded log tail, even for runs whose wait
+ *   timed out long ago;
  * - a vanished pane flips `running` → `unknown`, and confirms
  *   `stopping`/`stop_unconfirmed` → `stopped` (pane absence IS the exit
  *   evidence once a stop was requested);
@@ -1128,20 +1241,33 @@ export async function listRuns(
       continue;
     }
     if (ownership.kind === "gone") {
-      // running → outcome undetermined (unknown); stopping states → the
-      // pane being gone confirms the stop (stopped).
-      const result: RunResult = run.result === "running" ? "unknown" : "stopped";
-      await markRun(run.run_id, {
-        result,
-        finished_at: iso(d),
-        error: result === "unknown" ? (run.error ?? "pane gone before completion marker") : null,
-      });
-      const fresh = (await loadRuns()).runs[run.run_id];
-      reconciled.push(fresh ?? { ...run, result });
+      reconciled.push(await markPaneGone(run, d));
       continue;
     }
-    // owned: `running` stays running (marker simply not seen yet);
-    // stopping states may now have exit evidence.
+    // owned: lazily re-scan the pane's scrollback for the durable
+    // completion marker (#68). The marker persists after the bounded
+    // wait timed out, so a `running`/`stopping`/`stop_unconfirmed` run
+    // whose command has since finished is finalized here with its real
+    // exit code — recovered across CLI invocations and herdr restarts,
+    // with no polling loop and no daemon.
+    const scan = await rescanScrollback(run, deps.transport);
+    if (scan.kind === "gone") {
+      // The pane vanished between the ownership check and the read.
+      reconciled.push(await markPaneGone(run, d));
+      continue;
+    }
+    if (scan.kind === "unreachable") {
+      reconciled.push(run);
+      continue;
+    }
+    if (scan.kind === "marker") {
+      reconciled.push(await finalizeCompletedRun(run, scan.exitCode, scan.text, d, deps));
+      continue;
+    }
+    // no_marker: `running` stays running (the command genuinely has not
+    // finished — or finished without printing, which stays unknown
+    // until the pane goes away); stopping states may now have exit
+    // evidence via process inspection.
     if (run.result === "running") {
       reconciled.push(run);
       continue;
@@ -1166,8 +1292,12 @@ export interface RunLogResult {
 }
 
 /**
- * Return the stored log for a run, capturing a bounded pane tail on
- * demand when no log exists yet and the pane is still alive.
+ * Return the stored log for a run. For ACTIVE runs (`running`/
+ * `stopping`/`stop_unconfirmed`) the pane's scrollback is re-scanned
+ * once for the durable completion marker (#68) — `scripts logs`
+ * recovers the exit code and finalizes the record exactly like
+ * `scripts results` does, then serves the captured tail. Non-active
+ * runs only ever serve the stored log; nothing is fabricated.
  */
 export async function runLog(runId: string, deps: RunnerDeps): Promise<RunLogResult> {
   const d = resolveDeps(deps);
@@ -1177,17 +1307,14 @@ export async function runLog(runId: string, deps: RunnerDeps): Promise<RunLogRes
     throw structuredError(`run not found: ${runId}`, "run_not_found");
   }
 
-  const stored = await readRunLog(run.run_id);
-  if (stored !== null) {
+  if (!ACTIVE_RUN_RESULTS.has(run.result)) {
+    const stored = await readRunLog(run.run_id);
     return { run, log: stored, log_path: run.log_path };
   }
 
-  // No stored log: a live bounded read is only attempted for ACTIVE runs
-  // whose recorded pane passes ownership re-validation (#66) — a foreign
+  // A live bounded read is only attempted for ACTIVE runs whose
+  // recorded pane passes ownership re-validation (#66) — a foreign
   // or mismatched pane is never read.
-  if (!ACTIVE_RUN_RESULTS.has(run.result)) {
-    return { run, log: null, log_path: run.log_path };
-  }
   const ownership = await checkPaneOwnership(run, d, deps.transport);
   if (ownership.kind === "foreign" || ownership.kind === "pane_mismatch") {
     const error =
@@ -1206,42 +1333,43 @@ export async function runLog(runId: string, deps: RunnerDeps): Promise<RunLogRes
     return { run: fresh, log: null, log_path: fresh.log_path };
   }
   if (ownership.kind === "gone") {
-    // running → outcome undetermined; stopping states → pane absence
-    // confirms the stop.
-    const result: RunResult = run.result === "running" ? "unknown" : "stopped";
-    await markRun(run.run_id, {
-      result,
-      finished_at: iso(d),
-      error: result === "unknown" ? "pane gone before log capture" : null,
-    });
-    const updated = (await loadRuns()).runs[run.run_id] ?? { ...run, result };
+    const updated = await markPaneGone(run, d, "pane gone before log capture");
     return { run: updated, log: null, log_path: updated.log_path };
   }
   if (ownership.kind === "unreachable") {
-    return { run, log: null, log_path: run.log_path };
+    const stored = await readRunLog(run.run_id);
+    return { run, log: stored, log_path: run.log_path };
   }
 
-  try {
-    const read = await deps.transport.paneRead(run.pane_id, {
-      source: "recent",
-      lines: 500,
-    });
-    await captureLog(d, run, read.text ?? null);
-    await markRun(run.run_id, { log_path: run.log_path });
-    const fresh = await readRunLog(run.run_id);
-    const updated = (await loadRuns()).runs[run.run_id] ?? run;
-    return { run: updated, log: fresh, log_path: updated.log_path };
-  } catch (err) {
-    if (isPaneGoneError(err)) {
-      const result: RunResult = run.result === "running" ? "unknown" : "stopped";
-      await markRun(run.run_id, {
-        result,
-        finished_at: iso(d),
-        error: result === "unknown" ? (err instanceof Error ? err.message : String(err)) : null,
-      });
-      const updated = (await loadRuns()).runs[run.run_id] ?? { ...run, result };
-      return { run: updated, log: null, log_path: updated.log_path };
-    }
-    return { run, log: null, log_path: run.log_path };
+  // owned: one bounded scrollback re-scan serves BOTH completion
+  // recovery (#68) and the on-demand log tail.
+  const scan = await rescanScrollback(run, deps.transport);
+  if (scan.kind === "marker") {
+    const fresh = await finalizeCompletedRun(run, scan.exitCode, scan.text, d, deps);
+    const log = (await readRunLog(fresh.run_id)) ?? scan.text;
+    return { run: fresh, log, log_path: fresh.log_path };
   }
+  if (scan.kind === "gone") {
+    const updated = await markPaneGone(run, d, "pane gone before log capture");
+    return { run: updated, log: null, log_path: updated.log_path };
+  }
+  if (scan.kind === "unreachable") {
+    const stored = await readRunLog(run.run_id);
+    return { run, log: stored, log_path: run.log_path };
+  }
+
+  // no_marker: serve the stored log when present; otherwise persist the
+  // scan's bounded tail (the re-scan read already covers it).
+  const stored = await readRunLog(run.run_id);
+  if (stored !== null) {
+    const fresh = (await loadRuns()).runs[run.run_id] ?? run;
+    return { run: fresh, log: stored, log_path: fresh.log_path };
+  }
+  if (scan.text.length > 0) {
+    await captureLog(d, run, scan.text);
+    await markRun(run.run_id, { log_path: run.log_path });
+  }
+  const freshLog = await readRunLog(run.run_id);
+  const updated = (await loadRuns()).runs[run.run_id] ?? run;
+  return { run: updated, log: freshLog, log_path: updated.log_path };
 }

@@ -39,8 +39,8 @@ Foundation delivered by #49 (CRUD/overrides), #50 (t3.json/scripts),
 | `scripts list <project\|repo>` | Resolved script definitions with per-script `source`; read-only. |
 | `scripts run <project> <name> [--repo PATH] [--shell auto\|sh\|cmd\|powershell]` | Execute a script in a dedicated herdr pane; waits for the completion marker up to `runTimeoutMs`. |
 | `scripts stop <run-id\|project>` | ctrl+c + close the recorded pane of running run(s); only plugin-owned pane ids. |
-| `scripts results [project]` | Run records newest-first; `running` records lazily reconciled via `pane.get`. |
-| `scripts logs <run-id>` | Bounded stored/captured log tail for one run. |
+| `scripts results [project]` | Run records newest-first; active records lazily reconciled (ownership + scrollback marker re-scan). |
+| `scripts logs <run-id>` | Bounded stored/captured log tail; also recovers completion via the scrollback marker re-scan. |
 | `repos list <project>` | Member repos with live `branch`/`dirty`/`has_submodules`; unreachable members reported in `skipped`. |
 | `repos add <project> --path DIR` | Add a repo/checkout to a project; same code path and errors as `update --repo-add`. |
 | `repos remove <project> --path DIR` | Drop membership (live or stale path); same code path as `update --repo-remove`. |
@@ -147,6 +147,20 @@ CLI invocations — no manifest actions.
   untouched, never auto-killed); pane vanished before marker →
   `unknown`. `running` asserts only "marker not yet observed" —
   liveness is re-checked lazily by `scripts results`/`logs`.
+- Durable completion receipt (#68): the `__HERDR_DONE_<run-id>__=<code>`
+  marker persists in pane scrollback, so `scripts results`/`logs`
+  recover post-timeout completions lazily — after ownership
+  re-validation, one bounded `pane.read` (`recent_unwrapped`, last
+  2000 lines) is scanned for the marker; found → finalize
+  `success`/`failed` + `exit_code` + `finished_at` + log tail (also
+  for `stopping`/`stop_unconfirmed` records — the marker's real exit
+  code is more truthful than `stopped`). No polling loop, no daemon.
+  `events.subscribe` `pane.output_matched` was evaluated and rejected:
+  it needs a persistent subscription a one-shot CLI cannot hold after
+  exit, events are not replayed to late subscribers, and ADR-0002
+  forbids a daemon. Missing receipt stays honest: pane gone /
+  scrollback without marker / unreachable socket → `unknown`,
+  `running`, or unchanged — never fabricated exit 0.
 - Ownership (#66): each record persists the ownership tuple —
   `host` + `session_key` (`sessionKeyFor`: hostname + canonical socket
   path, shared via herdr-client) + `pane_id` + `workspace_id`/`tab_id`
