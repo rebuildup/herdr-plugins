@@ -1,12 +1,13 @@
 id = "rebuildup.automations"
 name = "Automations"
-version = "0.1.0"
+version = "0.2.0"
 min_herdr_version = "0.9.0"
 description = "Scheduled and triggered agent runs: interval/fixed-time/once tasks fired by OS schedulers or an opt-in watch process (contract herdr-plugins.automations/v1, draft)."
 platforms = ["linux", "macos", "windows"]
 
 # No build step: dependency-free TypeScript executed by Bun
-# (ADR-0003). T1 scaffold (#137): capability discovery only.
-# Registry CRUD lands in #144, firing drivers in #145, event hooks in
-# #146, webhook evaluation in #147 — manifest actions/events/startup
-# are added by those tickets.
+# (ADR-0003). T2 (#144): task registry core — schedule model, CRUD,
+# pause/resume, run-now/runs records, missed-run derivation.
+# Firing drivers (`fire`/`tick`/`watch`/`schedule`) land in #145,
+# event hooks in #146, webhook evaluation in #147 — manifest
+# actions/events/startup are added by those tickets.
