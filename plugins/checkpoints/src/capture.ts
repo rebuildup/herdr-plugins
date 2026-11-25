@@ -336,7 +336,9 @@ export async function deleteRef(
 ): Promise<boolean> {
   const oid = await verifyRef(repoRoot, ref, options);
   if (oid === null) return false;
-  await gitOk(repoRoot, ["update-ref", "-d", ref], options);
+  // --no-deref mirrors prune: delete the checkpoint ref itself, never a
+  // symbolic ref's target.
+  await gitOk(repoRoot, ["update-ref", "--no-deref", "-d", ref], options);
   return true;
 }
 

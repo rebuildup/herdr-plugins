@@ -52,7 +52,7 @@ import { panesSharingRepo, planRestore, restoreWorktree } from "./restore";
 import { type CheckpointEntry, loadState, PLUGIN_ID, sessionKeyFor, updateState } from "./state";
 
 const CONTRACT = "herdr-plugins.checkpoints/v1";
-const PLUGIN_VERSION = "0.1.0";
+const PLUGIN_VERSION = "0.4.0";
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_DIFF_MAX_BYTES = 256 * 1024;
 const DEFAULT_SHOW_MAX_BYTES = 64 * 1024;
@@ -146,6 +146,31 @@ function emitError(
 
 function fail(message: string, code = 1, kind?: string, extra?: Record<string, unknown>): never {
   emitError(message, code, kind, extra);
+}
+
+/**
+ * Exit-1 tail for gc/prune when NO repo could be evaluated (every
+ * wanted repo unreachable). The stdout payload already reports
+ * ok:false; this mirrors the save/restore-group partial-failure
+ * convention of a structured stderr error + non-zero exit.
+ */
+function failUnreachable(
+  command: string,
+  unreachable: Array<{ repo_root: string; kind: string; message: string }>,
+): void {
+  const detail = unreachable.map((u) => `${u.repo_root} (${u.kind}: ${u.message})`).join("; ");
+  process.stderr.write(
+    `${JSON.stringify({
+      contract: CONTRACT,
+      ok: false,
+      error: {
+        code: "error",
+        message: `${command}: no repository could be evaluated — ${detail}`,
+        kind: "unreachable_repos",
+      },
+    })}\n`,
+  );
+  process.exitCode = 1;
 }
 
 function flagValue(args: string[], name: string): string | undefined {
@@ -1427,10 +1452,15 @@ async function cmdGc(options: CliOptions): Promise<void> {
     });
   }
 
+  // ok is false only when NOTHING could be evaluated (every wanted repo
+  // unreachable); partial unreachable is reported in `unreachable` with
+  // ok:true. A false ok must not exit 0 — same honesty rule as
+  // save/restore-group partial failures.
+  const ok = unreachable.length === 0 || repoReports.length > 0;
   emit({
     contract: CONTRACT,
     command: "gc",
-    ok: unreachable.length === 0 || repoReports.length > 0,
+    ok,
     dry_run: dryRun,
     policy: {
       max_count: policy.maxCount,
@@ -1448,6 +1478,7 @@ async function cmdGc(options: CliOptions): Promise<void> {
     },
     generated_at: new Date().toISOString(),
   });
+  if (!ok) failUnreachable("gc", unreachable);
 }
 
 /**
@@ -1528,10 +1559,13 @@ async function cmdPrune(options: CliOptions): Promise<void> {
     });
   }
 
+  // Same honesty rule as gc: ok is false only when NO repo could be
+  // scanned (every wanted repo unreachable or ref listing failed).
+  const ok = unreachable.length === 0 || repoReports.length > 0;
   emit({
     contract: CONTRACT,
     command: "prune",
-    ok: true,
+    ok,
     dry_run: dryRun,
     repos: repoReports,
     unreachable,
@@ -1543,6 +1577,7 @@ async function cmdPrune(options: CliOptions): Promise<void> {
     },
     generated_at: new Date().toISOString(),
   });
+  if (!ok) failUnreachable("prune", unreachable);
 }
 
 async function cmdCapability(): Promise<void> {

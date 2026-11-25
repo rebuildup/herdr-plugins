@@ -269,7 +269,10 @@ entry together; an entry whose ref deletion fails keeps its state
 entry (reported under the repo's `errors`, retried next run). Repos
 that no longer resolve are listed under `unreachable` and skipped —
 their state is never touched. `--repo PATH` scopes to one repo;
-`--dry-run` reports `would_delete` without mutating.
+`--dry-run` reports `would_delete` without mutating. `ok` is false
+only when no repo could be evaluated at all; that case also exits 1
+with a `{kind:"unreachable_repos"}` stderr error (partial unreachable
+stays `ok:true`, exit 0).
 
 `{contract, command:"gc", ok, dry_run, policy:{max_count,
 max_age_days, pre_restore_protect_days}, repos:[{repo_root,
@@ -286,7 +289,8 @@ referenced ref is never deleted in any scanned repo. Repos scanned:
 `--repo PATH`, else every repo root known to state (linked worktrees
 sharing one git common dir are scanned once). Orphan deletion uses
 `update-ref --no-deref -d`, mirroring upstream. `--dry-run` lists
-orphans without deleting.
+orphans without deleting. Same `ok`/exit rule as `gc`: `ok:false` +
+exit 1 (`unreachable_repos`) only when no repo could be scanned.
 
 `{contract, command:"prune", ok, dry_run, repos:[{repo_root, scanned,
 orphans:[refs], deleted?, errors?}], unreachable:[...],

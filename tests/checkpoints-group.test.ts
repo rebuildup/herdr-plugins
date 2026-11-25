@@ -539,6 +539,17 @@ describe("checkpoints gc/prune", () => {
     }
     expect(expectOk(runCli(["list"])).total).toBe(2);
   });
+
+  t("gc/prune exit 1 with unreachable_repos when no repo can be evaluated", () => {
+    useStateDir();
+    const missing = path.join(tempDir(), "does-not-exist");
+    for (const command of ["gc", "prune"]) {
+      const result = runCli([command, "--repo", missing]);
+      expect(result.status).toBe(1);
+      expect((result.json as Record<string, unknown>).ok).toBe(false);
+      expect(result.error?.kind).toBe("unreachable_repos");
+    }
+  });
 });
 
 describe("checkpoints linked worktrees", () => {
