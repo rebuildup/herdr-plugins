@@ -1,0 +1,167 @@
+/**
+ * Persistent organize state for the inbox plugin.
+ *
+ * Stored as a single JSON document under the plugin state dir
+ * (`HERDR_PLUGIN_STATE_DIR`, falling back to the platform state dir for
+ * external clients). Writes are serialized through an exclusive lock file and
+ * committed via tmp+rename so concurrent CLI/hook invocations cannot corrupt
+ * or interleave state.
+ */
+
+import { realpathSync } from "node:fs";
+import { mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { pluginDirs, resolveSocketPath } from "../../../packages/herdr-client/src/socket";
+
+export const PLUGIN_ID = "rebuildup.inbox";
+export const STATE_SCHEMA_VERSION = 2;
+
+const LOCK_STALE_MS = 30_000;
+const LOCK_TIMEOUT_MS = 10_000;
+const LOCK_RETRY_MS = 25;
+
+export interface AgentSessionRef {
+  agent?: string;
+  kind?: string;
+  value?: string;
+}
+
+export interface SettledMark {
+  at: string;
+  /** state_change_seq observed when the pane was settled. */
+  seq: number;
+  agent_session?: AgentSessionRef | null;
+}
+
+export interface SnoozedMark {
+  at: string;
+  until: string;
+  seq: number;
+  agent_session?: AgentSessionRef | null;
+}
+
+export interface InboxEntry {
+  pane_id: string;
+  workspace_id?: string | undefined;
+  settled?: SettledMark | undefined;
+  snoozed?: SnoozedMark | undefined;
+  updated_at: string;
+}
+
+/**
+ * State is namespaced per herdr session AND per host. The session key is
+ * `hostname + canonical socket path`: pane ids are only unique within one
+ * session (`w1:p1` exists in every session), and a state file shared across
+ * hosts (synced home dir, forwarded socket) must not merge organize marks.
+ */
+export interface InboxState {
+  version: typeof STATE_SCHEMA_VERSION;
+  sessions: Record<string, Record<string, InboxEntry>>;
+}
+
+export function emptyState(): InboxState {
+  return { version: STATE_SCHEMA_VERSION, sessions: {} };
+}
+
+/** Inner per-session entry map, created on demand for writes. */
+export function sessionEntries(state: InboxState, sessionKey: string): Record<string, InboxEntry> {
+  const entries = state.sessions[sessionKey];
+  if (entries) return entries;
+  const created: Record<string, InboxEntry> = {};
+  state.sessions[sessionKey] = created;
+  return created;
+}
+
+/**
+ * Session discriminator for state namespacing: hostname plus the canonical
+ * (symlink-resolved) socket path the command will talk to. Socket path is
+ * the only session identity the socket API exposes; canonicalization keeps
+ * `/var` vs `/private/var` spellings of the same socket identical.
+ */
+export function sessionKeyFor(options: {
+  session?: string | undefined;
+  socketPath?: string | undefined;
+}): string {
+  const socketPath = options.socketPath ?? resolveSocketPath({ session: options.session });
+  let canonical = socketPath;
+  try {
+    canonical = realpathSync(socketPath);
+  } catch {
+    canonical = path.resolve(socketPath);
+  }
+  return `${os.hostname()} ${canonical}`;
+}
+
+export function stateFilePath(): string {
+  return path.join(pluginDirs(PLUGIN_ID).stateDir, "state.json");
+}
+
+function lockPath(): string {
+  return `${stateFilePath()}.lock`;
+}
+
+export async function loadState(): Promise<InboxState> {
+  try {
+    const raw = await readFile(stateFilePath(), "utf8");
+    const parsed = JSON.parse(raw) as Partial<InboxState>;
+    if (
+      parsed.version !== STATE_SCHEMA_VERSION ||
+      typeof parsed.sessions !== "object" ||
+      parsed.sessions === null
+    ) {
+      return emptyState();
+    }
+    return { version: STATE_SCHEMA_VERSION, sessions: parsed.sessions };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return emptyState();
+    throw err;
+  }
+}
+
+async function acquireLock(): Promise<() => Promise<void>> {
+  const file = lockPath();
+  await mkdir(path.dirname(file), { recursive: true });
+  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+  for (;;) {
+    try {
+      const handle = await open(file, "wx");
+      await handle.writeFile(JSON.stringify({ pid: process.pid, at: new Date().toISOString() }));
+      await handle.close();
+      return async () => {
+        await rm(file, { force: true });
+      };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      try {
+        const info = await stat(file);
+        if (Date.now() - info.mtimeMs > LOCK_STALE_MS) {
+          await rm(file, { force: true });
+          continue;
+        }
+      } catch {
+        continue;
+      }
+      if (Date.now() > deadline) {
+        throw new Error("inbox state lock timed out; another command may be running");
+      }
+      await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_MS));
+    }
+  }
+}
+
+/** Read-modify-write under the exclusive lock; mutations must be synchronous. */
+export async function updateState<T>(mutate: (state: InboxState) => T | Promise<T>): Promise<T> {
+  const release = await acquireLock();
+  try {
+    const state = await loadState();
+    const result = await mutate(state);
+    await mkdir(path.dirname(stateFilePath()), { recursive: true });
+    const tmp = `${stateFilePath()}.tmp-${process.pid}`;
+    await writeFile(tmp, `${JSON.stringify(state, null, 2)}\n`);
+    await rename(tmp, stateFilePath());
+    return result;
+  } finally {
+    await release();
+  }
+}
