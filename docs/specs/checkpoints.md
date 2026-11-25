@@ -289,7 +289,11 @@ and entry sets differ):
   fails to delete keeps its state entry (reported, retried next run);
 - unreachable repos are listed under `unreachable` and skipped —
   their state is never touched;
-- `--dry-run` reports `would_delete` with zero mutations.
+- `--dry-run` reports `would_delete` with zero mutations;
+- `ok` is false only when *no* repo could be evaluated (every wanted
+  repo unreachable) — that case also exits 1 with an
+  `unreachable_repos` stderr error, matching the save/restore-group
+  honesty rule. Partial unreachable keeps `ok:true` + exit 0.
 
 ### `prune` — orphan refs (deleteStaleRefs equivalent)
 
@@ -301,7 +305,8 @@ worktrees sharing a git common dir are scanned once) and deletes any
 ref **not named by a state entry**. Protection is by full ref name
 globally, so a state-referenced ref can never be pruned from any
 repo. Deletion uses `update-ref --no-deref -d` like upstream;
-`--dry-run` lists orphans only.
+`--dry-run` lists orphans only. Same `ok`/exit rule as `gc`: false +
+exit 1 (`unreachable_repos`) only when no repo could be scanned.
 
 ## Error taxonomy
 
@@ -310,8 +315,9 @@ repo. Deletion uses `update-ref --no-deref -d` like upstream;
 `cross_repo`, `pane_not_found`, `no_pane_cwd`, `repo_mismatch`,
 `checkpoint_ref_missing`, `shared_worktree`, `session_unreachable`,
 `restore_failed`, `clean_failed`, `clean_incomplete`,
-`restore_verify_failed`, `partial_save`, `partial_restore`, plus
-shared `git_missing` / `timeout` / `git_error`. Unsupported
+`restore_verify_failed`, `partial_save`, `partial_restore`,
+`unreachable_repos` (gc/prune: no repo could be evaluated at all),
+plus shared `git_missing` / `timeout` / `git_error`. Unsupported
 conditions are structured errors, never success-shaped output.
 
 ## v1 limits (explicit)
