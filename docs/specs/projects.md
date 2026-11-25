@@ -37,7 +37,7 @@ Foundation delivered by #49 (CRUD/overrides), #50 (t3.json/scripts),
 | `archive`/`unarchive`/`pin`/`unpin <id>` | Non-destructive flag setters; no delete. |
 | `settings get/set/unset` | Per-project override keys under `<stateDir>/settings/`; allow-listed keys only. |
 | `scripts list <project\|repo>` | Resolved script definitions with per-script `source`; read-only. |
-| `scripts run <project> <name> [--repo PATH]` | Execute a script in a dedicated herdr pane; waits for the completion marker up to `runTimeoutMs`. |
+| `scripts run <project> <name> [--repo PATH] [--shell auto\|sh\|cmd\|powershell]` | Execute a script in a dedicated herdr pane; waits for the completion marker up to `runTimeoutMs`. |
 | `scripts stop <run-id\|project>` | ctrl+c + close the recorded pane of running run(s); only plugin-owned pane ids. |
 | `scripts results [project]` | Run records newest-first; `running` records lazily reconciled via `pane.get`. |
 | `scripts logs <run-id>` | Bounded stored/captured log tail for one run. |
@@ -114,17 +114,34 @@ CLI invocations — no manifest actions.
 ## Script execution (#53, ADR-0010)
 
 - Execution surface: `workspace.create {cwd: repoRoot, label,
-  focus:false}` per run → `root_pane` receives
-  `<command>; echo "__HERDR_DONE_<run-id>__=$?"` via a single
-  `pane.send_input {text, keys:["Enter"]}`. Newline/>4000-char commands
-  go through an executable `/bin/sh` file under
-  `<stateDir>/runs/<run-id>.sh` (POSIX-sh limitation, documented).
+  focus:false}` per run → `root_pane` receives TWO
+  `pane.send_input {text, keys:["Enter"]}` lines: the command (or a
+  script-file invocation), then the shell-family marker echo. Separate
+  parsed lines make cmd.exe's `%ERRORLEVEL%` correct (parse-time
+  expansion on a shared `cmd1 & echo ...` line would read the PRE-command
+  value) and work uniformly for sh/cmd/powershell.
+- Shell family (#67): resolved before composing the marker, precedence
+  `--shell` flag → `pane.process_info` foreground name (`shell_pid`
+  preferred) → host-OS default (`win32`→cmd else sh, recorded
+  `shell_source:"host_default"`). Unsupported shells fail
+  `shell_unknown`, non-shell foreground `not_a_shell` — the fresh pane
+  is closed and NO record persists; a wrong-shell wrapper is never
+  injected. Marker lines: sh `echo __HERDR_DONE_<id>__=$?`, cmd
+  `echo __HERDR_DONE_<id>__=%ERRORLEVEL%`, powershell
+  `echo "__HERDR_DONE_<id>__=$( if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } elseif ($?) { 0 } else { 1 } )"`.
+- Script files: newline/>4000-char commands go to
+  `<stateDir>/runs/<run-id>.sh|.cmd|.ps1` (per family; `.cmd` is CRLF)
+  invoked via `sh '<path>'` / `call "<path>"` / `& '<path>'`; retained
+  as audit trail. Caveats: `.ps1` obeys the pane execution policy;
+  script paths use host-native separators; a stdin-reading command can
+  consume the queued marker line (bounded wait → stays `running`,
+  never a wrong result).
 - Completion: `pane.wait_for_output` (`recent_unwrapped`, regex
   `__HERDR_DONE_<run-id>__=(-?\d+)`, `timeout_ms = runTimeoutMs`,
-  config default 600000). Exit code comes ONLY from marker digits —
-  the echoed input line cannot match (`$?` literal), the run-id nonce
-  prevents cross-run collisions, and pane text/process state is never
-  used to infer success.
+  config default 600000). The echoed input line cannot match (rc
+  expression, never bare digits), the run-id nonce prevents cross-run
+  collisions, and pane text/process state is never used to infer
+  success.
 - Result enum: `running | stopping | stop_unconfirmed | success |
   failed | stopped | unknown`. Wait timeout leaves `running` (pane
   untouched, never auto-killed); pane vanished before marker →

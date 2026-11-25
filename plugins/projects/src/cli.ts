@@ -31,6 +31,8 @@ import {
   listRuns,
   type RunnerDeps,
   runLog,
+  SHELL_OVERRIDE_VALUES,
+  type ShellOverride,
   type StopOutcome,
   startRun,
   stopRuns,
@@ -873,10 +875,18 @@ function pickScript(scripts: ResolvedScript[], wanted: string): ResolvedScript {
  */
 async function cmdScriptsRun(options: CliOptions): Promise<void> {
   const config = await loadConfig();
-  const parsed = parseCommandArgs(options.args, new Set(["--repo"]));
+  const parsed = parseCommandArgs(options.args, new Set(["--repo", "--shell"]));
   const [projectId, name] = parsed.positionals;
   if (!projectId || !name || parsed.positionals.length > 2) {
-    fail("scripts run requires <project> <name> [--repo PATH]", 2);
+    fail("scripts run requires <project> <name> [--repo PATH] [--shell auto|sh|cmd|powershell]", 2);
+  }
+  const shellOpt = parsed.values.get("--shell");
+  if (shellOpt !== undefined && !(SHELL_OVERRIDE_VALUES as readonly string[]).includes(shellOpt)) {
+    fail(
+      `invalid --shell value: ${shellOpt} (expected ${SHELL_OVERRIDE_VALUES.join("|")})`,
+      1,
+      "invalid_shell",
+    );
   }
 
   const state = await loadState();
@@ -917,6 +927,7 @@ async function cmdScriptsRun(options: CliOptions): Promise<void> {
         },
         repoRoot: member.root,
         remote: member.remote,
+        shell: shellOpt as ShellOverride | undefined,
       },
       runnerDeps(options, config),
     );
@@ -1080,7 +1091,7 @@ Usage:
   projects settings set <id> <key> <value>
   projects settings unset <id> <key>
   projects scripts list <project|repo> [--repo PATH]
-  projects scripts run <project> <name> [--repo PATH]
+  projects scripts run <project> <name> [--repo PATH] [--shell auto|sh|cmd|powershell]
   projects scripts stop <run-id|project>
   projects scripts results [project]
   projects scripts logs <run-id>
