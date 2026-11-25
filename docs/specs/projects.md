@@ -37,13 +37,18 @@ Foundation delivered by #49 (CRUD/overrides), #50 (t3.json/scripts),
 | `archive`/`unarchive`/`pin`/`unpin <id>` | Non-destructive flag setters; no delete. |
 | `settings get/set/unset` | Per-project override keys under `<stateDir>/settings/`; allow-listed keys only. |
 | `scripts list <project\|repo>` | Resolved script definitions with per-script `source`; read-only. |
+| `scripts run <project> <name> [--repo PATH]` | Execute a script in a dedicated herdr pane; waits for the completion marker up to `runTimeoutMs`. |
+| `scripts stop <run-id\|project>` | ctrl+c + close the recorded pane of running run(s); only plugin-owned pane ids. |
+| `scripts results [project]` | Run records newest-first; `running` records lazily reconciled via `pane.get`. |
+| `scripts logs <run-id>` | Bounded stored/captured log tail for one run. |
 | `repos list <project>` | Member repos with live `branch`/`dirty`/`has_submodules`; unreachable members reported in `skipped`. |
 | `repos add <project> --path DIR` | Add a repo/checkout to a project; same code path and errors as `update --repo-add`. |
 | `repos remove <project> --path DIR` | Drop membership (live or stale path); same code path as `update --repo-remove`. |
 
-All commands accept `--session`/`--socket`/`--timeout`; only `discover`
-needs a live herdr session. Mutations are explicit-argument CLI
-invocations — no manifest actions.
+All commands accept `--session`/`--socket`/`--timeout`; `discover` and
+the `scripts run|stop|results|logs` family need a reachable herdr
+session socket (the rest work offline). Mutations are explicit-argument
+CLI invocations — no manifest actions.
 
 ## Mutation rules
 
@@ -106,8 +111,56 @@ invocations — no manifest actions.
   `scripts list` only reads definitions — execution gating is #53's
   runner concern.
 
+## Script execution (#53, ADR-0010)
+
+- Execution surface: `workspace.create {cwd: repoRoot, label,
+  focus:false}` per run → `root_pane` receives
+  `<command>; echo "__HERDR_DONE_<run-id>__=$?"` via a single
+  `pane.send_input {text, keys:["Enter"]}`. Newline/>4000-char commands
+  go through an executable `/bin/sh` file under
+  `<stateDir>/runs/<run-id>.sh` (POSIX-sh limitation, documented).
+- Completion: `pane.wait_for_output` (`recent_unwrapped`, regex
+  `__HERDR_DONE_<run-id>__=(-?\d+)`, `timeout_ms = runTimeoutMs`,
+  config default 600000). Exit code comes ONLY from marker digits —
+  the echoed input line cannot match (`$?` literal), the run-id nonce
+  prevents cross-run collisions, and pane text/process state is never
+  used to infer success.
+- Result enum: `running | success | failed | stopped | unknown`.
+  Wait timeout leaves `running` (pane untouched, never auto-killed);
+  pane vanished before marker → `unknown`. `running` asserts only
+  "marker not yet observed" — liveness is re-checked lazily by
+  `scripts results`/`logs` via `pane.get` (one call per running run).
+- Stop: `pane.send_keys ["ctrl+c"]` → `stopGraceMs` (config default
+  2000) → bounded `pane.read` log capture → `pane.close`, all against
+  the `pane_id` recorded in `runs.json`. Target = exact/unique-prefix
+  run_id or project id (`ambiguous_run`/`run_not_found`/
+  `no_running_runs` structured errors).
+- Run records: `<stateDir>/runs.json` under a dedicated
+  `runs.json.lock` + tmp+rename (same discipline as `state.ts`);
+  corrupt file reads as empty. Persisted BEFORE injection.
+- Logs: bounded tail (`runLogMaxBytes`, config default 65536) stored
+  at `<stateDir>/runs/<run-id>.log`; on-demand `pane.read` (500 lines)
+  when no stored log and the pane is alive. No rotation — one file per
+  run, overwritten only by re-capture of the same run.
+- Metadata: display-only `script_<name>` token (≤32 chars, herdr token
+  alphabet) projected via `pane.report_metadata` (source
+  `rebuildup.projects`) on state transitions; failures ignored.
+- Repo selection: `--repo` must match a member root; multi-repo project
+  without `--repo` fails `repo_ambiguous` — never silently first.
+- Concurrency: unlimited runs; `run_id = run-<ts36>-<rand6>`; stop and
+  results address only recorded pane ids (herdr socket panes carry no
+  ownership token — client-side discipline per ADR-0010).
+- **Auto triggers gap:** `runOnWorktreeCreate`/`runOnSettle`/
+  `stopOnSettle` are listed but not executed — no faithful herdr event
+  mapping exists (upstream gap, follow-up Issue). Scheduled/event
+  execution belongs to #32 automations.
+- `mutation_commands` += `scripts run`, `scripts stop`.
+
 ## Non-goals
 
-- No script execution — #52/#53.
-- No worktree/workspace creation — herdr/Worktrunk own lifecycle.
+- No worktree/workspace creation for projects themselves — herdr/
+  Worktrunk own lifecycle (script runs do create dedicated execution
+  workspaces per ADR-0010).
+- No auto triggers (`runOnWorktreeCreate`/`runOnSettle`/`stopOnSettle`)
+  — upstream gap, manual run/stop only this release.
 - No per-session namespacing of the registry.

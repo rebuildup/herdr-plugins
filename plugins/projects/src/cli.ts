@@ -25,6 +25,16 @@ import {
   projectIdFromRoot,
   repoIndex,
 } from "./model";
+import {
+  herdrTransport,
+  listRuns,
+  type RunnerDeps,
+  runLog,
+  type StopOutcome,
+  startRun,
+  stopRuns,
+} from "./runner";
+import { loadRuns, type ScriptRun } from "./runs";
 import { BUILTIN_SCRIPTS, type ResolvedScript, resolveScripts, ScriptError } from "./scripts";
 import {
   loadSettings,
@@ -46,6 +56,12 @@ interface PluginConfig {
   timeoutMs?: number | undefined;
   /** Env-default script list (`scripts list` layer 2); shape validated lazily. */
   defaultScripts?: unknown;
+  /** `scripts run` marker-wait ceiling; default 600_000 (10 min). */
+  runTimeoutMs?: number | undefined;
+  /** Byte cap for persisted run logs (tail kept); default 65_536. */
+  runLogMaxBytes?: number | undefined;
+  /** ctrl+c→close grace on `scripts stop`; default 2_000. */
+  stopGraceMs?: number | undefined;
 }
 
 interface CliOptions extends CallOptions {
@@ -169,6 +185,18 @@ async function loadConfig(): Promise<PluginConfig> {
       timeoutMs:
         typeof parsed.timeoutMs === "number" && parsed.timeoutMs > 0 ? parsed.timeoutMs : undefined,
       defaultScripts: parsed.defaultScripts,
+      runTimeoutMs:
+        typeof parsed.runTimeoutMs === "number" && parsed.runTimeoutMs > 0
+          ? parsed.runTimeoutMs
+          : undefined,
+      runLogMaxBytes:
+        typeof parsed.runLogMaxBytes === "number" && parsed.runLogMaxBytes > 0
+          ? parsed.runLogMaxBytes
+          : undefined,
+      stopGraceMs:
+        typeof parsed.stopGraceMs === "number" && parsed.stopGraceMs >= 0
+          ? parsed.stopGraceMs
+          : undefined,
     };
   } catch {
     return {};
@@ -701,10 +729,32 @@ async function cmdScriptsList(options: CliOptions): Promise<void> {
     projectId = repoIndex(state).get(canonicalRepoRoot(root)) ?? null;
   }
 
+  const scripts = await resolveScriptsForRepo(root, projectId, config);
+
+  emit({
+    contract: CONTRACT,
+    command: "scripts list",
+    project_id: projectId,
+    repo_root: root,
+    scripts,
+    generated_at: now(),
+  });
+}
+
+/**
+ * Resolve the effective script list for one repo root: project settings
+ * override (when `projectId` is known) → plugin env default → the repo's
+ * `t3.json` → builtin. Shared by `scripts list` and `scripts run`.
+ */
+async function resolveScriptsForRepo(
+  root: string,
+  projectId: string | null,
+  config: PluginConfig,
+): Promise<ResolvedScript[]> {
   let overrideRaw: string | undefined;
   if (projectId !== null) {
     const settings = await loadSettings(projectId);
-    const value = settings["defaultProjectScripts"];
+    const value = settings.defaultProjectScripts;
     overrideRaw = typeof value === "string" ? value : undefined;
   }
 
@@ -719,9 +769,8 @@ async function cmdScriptsList(options: CliOptions): Promise<void> {
     throw err;
   }
 
-  let scripts: ResolvedScript[];
   try {
-    scripts = resolveScripts({
+    return resolveScripts({
       override: overrideRaw,
       envDefault: config.defaultScripts,
       t3Scripts,
@@ -733,13 +782,223 @@ async function cmdScriptsList(options: CliOptions): Promise<void> {
     }
     throw err;
   }
+}
 
+function runnerError(err: unknown): never {
+  const kind = (err as { kind?: string }).kind;
+  fail(err instanceof Error ? err.message : String(err), 1, kind ?? "script_run_error");
+}
+
+function runnerDeps(options: CliOptions, config: PluginConfig): RunnerDeps {
+  return {
+    transport: herdrTransport(options),
+    waitTimeoutMs: config.runTimeoutMs,
+    logMaxBytes: config.runLogMaxBytes,
+    stopGraceMs: config.stopGraceMs,
+  };
+}
+
+/**
+ * Pick the execution member repo for `scripts run`. `--repo` must
+ * canonicalize to a registered member; without it a single-repo project
+ * uses that repo, and a multi-repo project FAILS `repo_ambiguous` —
+ * the runner never silently picks the first repo (issue #53).
+ */
+function selectRunRepo(
+  project: Project,
+  repoOption: string | undefined,
+): { root: string; remote: string | null } {
+  if (project.repos.length === 0) {
+    throw new CommandError(`project has no registered repos: ${project.id}`, "no_repos", {
+      project_id: project.id,
+    });
+  }
+  if (repoOption !== undefined) {
+    const wanted = canonicalRepoRoot(path.resolve(repoOption));
+    const member = project.repos.find((r) => canonicalRepoRoot(r.root) === wanted);
+    if (member === undefined) {
+      throw new CommandError(`repo not registered to project: ${repoOption}`, "repo_not_found", {
+        project_id: project.id,
+        root: repoOption,
+      });
+    }
+    return { root: member.root, remote: member.remote };
+  }
+  if (project.repos.length > 1) {
+    throw new CommandError(
+      `project has ${project.repos.length} repos; pass --repo PATH to choose the execution target`,
+      "repo_ambiguous",
+      {
+        project_id: project.id,
+        repos: project.repos.map((r) => r.root),
+      },
+    );
+  }
+  const member = project.repos[0] as Project["repos"][number];
+  return { root: member.root, remote: member.remote };
+}
+
+/** Match a script by `name` or `id`; exact name wins over id collisions. */
+function pickScript(scripts: ResolvedScript[], wanted: string): ResolvedScript {
+  const matches = scripts.filter((s) => s.name === wanted || s.id === wanted);
+  if (matches.length === 0) {
+    throw new CommandError(`no script named: ${wanted}`, "unknown_script", { name: wanted });
+  }
+  const byName = matches.filter((s) => s.name === wanted);
+  if (byName.length === 1) return byName[0] as ResolvedScript;
+  if (matches.length === 1) return matches[0] as ResolvedScript;
+  throw new CommandError(`ambiguous script name: ${wanted}`, "ambiguous_script", {
+    name: wanted,
+    matches: matches.map((s) => s.id),
+  });
+}
+
+/**
+ * `scripts run <project> <name> [--repo PATH]` — execute a resolved
+ * project script in a dedicated herdr pane (ADR-0010). Waits up to
+ * `runTimeoutMs` (config, default 10 min) for the completion marker;
+ * on timeout the run stays `running` and is never killed implicitly.
+ */
+async function cmdScriptsRun(options: CliOptions): Promise<void> {
+  const config = await loadConfig();
+  const parsed = parseCommandArgs(options.args, new Set(["--repo"]));
+  const [projectId, name] = parsed.positionals;
+  if (!projectId || !name || parsed.positionals.length > 2) {
+    fail("scripts run requires <project> <name> [--repo PATH]", 2);
+  }
+
+  const state = await loadState();
+  const project = state.projects[projectId as string];
+  if (!project) {
+    fail(`project not found: ${projectId}`, 1, "project_not_found", {
+      project_id: projectId,
+    });
+  }
+
+  let member: { root: string; remote: string | null };
+  try {
+    member = selectRunRepo(project, parsed.values.get("--repo"));
+  } catch (err) {
+    if (err instanceof CommandError) fail(err.message, 1, err.kind, err.extra);
+    throw err;
+  }
+
+  const scripts = await resolveScriptsForRepo(member.root, project.id, config);
+  let script: ResolvedScript;
+  try {
+    script = pickScript(scripts, name as string);
+  } catch (err) {
+    if (err instanceof CommandError) fail(err.message, 1, err.kind, err.extra);
+    throw err;
+  }
+
+  let run: ScriptRun;
+  try {
+    run = await startRun(
+      {
+        project,
+        script: {
+          id: script.id,
+          name: script.name,
+          command: script.command,
+          source: script.source,
+        },
+        repoRoot: member.root,
+        remote: member.remote,
+      },
+      runnerDeps(options, config),
+    );
+  } catch (err) {
+    runnerError(err);
+  }
+  emit({ contract: CONTRACT, command: "scripts run", run, generated_at: now() });
+}
+
+/**
+ * `scripts stop <run-id|project>` — ctrl+c the recorded pane, brief
+ * grace, then close it. Only pane ids persisted in run records are
+ * addressed; nothing else in the session can be hit.
+ */
+async function cmdScriptsStop(options: CliOptions): Promise<void> {
+  const config = await loadConfig();
+  const parsed = parseCommandArgs(options.args, new Set());
+  const target = parsed.positionals[0];
+  if (!target || parsed.positionals.length > 1) {
+    fail("scripts stop requires <run-id|project>", 2);
+  }
+  let outcomes: StopOutcome[];
+  try {
+    outcomes = await stopRuns(target as string, runnerDeps(options, config));
+  } catch (err) {
+    runnerError(err);
+  }
+  if (!outcomes.some((o) => o.action === "stopped")) {
+    fail(`no running runs matched: ${target}`, 1, "no_running_runs", { target });
+  }
   emit({
     contract: CONTRACT,
-    command: "scripts list",
-    project_id: projectId,
-    repo_root: root,
-    scripts,
+    command: "scripts stop",
+    outcomes: outcomes.map((o) => ({ run: o.run, action: o.action })),
+    generated_at: now(),
+  });
+}
+
+/** `scripts results [project]` — run records, lazily reconciling panes. */
+async function cmdScriptsResults(options: CliOptions): Promise<void> {
+  const config = await loadConfig();
+  const parsed = parseCommandArgs(options.args, new Set());
+  const projectId = parsed.positionals[0];
+  if (parsed.positionals.length > 1) {
+    fail("scripts results accepts at most one <project> argument", 2);
+  }
+  if (projectId !== undefined) {
+    const state = await loadState();
+    if (!state.projects[projectId]) {
+      fail(`project not found: ${projectId}`, 1, "project_not_found", {
+        project_id: projectId,
+      });
+    }
+  }
+  const runs = await listRuns(runnerDeps(options, config), {
+    projectId: projectId as string | undefined,
+  });
+  emit({
+    contract: CONTRACT,
+    command: "scripts results",
+    ...(projectId !== undefined ? { project_id: projectId } : {}),
+    runs,
+    generated_at: now(),
+  });
+}
+
+/** `scripts logs <run-id>` — bounded stored/captured log for one run. */
+async function cmdScriptsLogs(options: CliOptions): Promise<void> {
+  const config = await loadConfig();
+  const parsed = parseCommandArgs(options.args, new Set());
+  const wanted = parsed.positionals[0];
+  if (!wanted || parsed.positionals.length > 1) {
+    fail("scripts logs requires <run-id>", 2);
+  }
+  // Accept a unique run-id prefix, matching `scripts stop` ergonomics.
+  const state = await loadRuns();
+  const all = Object.values(state.runs);
+  const exact = all.find((r) => r.run_id === wanted);
+  const byPrefix = exact ? [exact] : all.filter((r) => r.run_id.startsWith(wanted as string));
+  if (byPrefix.length === 0) {
+    fail(`run not found: ${wanted}`, 1, "run_not_found", { run_id: wanted });
+  }
+  if (byPrefix.length > 1) {
+    fail(`ambiguous run id prefix: ${wanted}`, 1, "ambiguous_run", { run_id: wanted });
+  }
+  const runId = (byPrefix[0] as { run_id: string }).run_id;
+  const result = await runLog(runId, runnerDeps(options, config)).catch(runnerError);
+  emit({
+    contract: CONTRACT,
+    command: "scripts logs",
+    run_id: runId,
+    run: result.run,
+    log_path: result.log_path,
+    log: result.log,
     generated_at: now(),
   });
 }
@@ -777,8 +1036,14 @@ async function cmdCapability(): Promise<void> {
       "unpin",
       "settings set",
       "settings unset",
+      "scripts run",
+      "scripts stop",
     ],
-    requires: { git: true, bun: true, herdr: "session snapshot (discover only)" },
+    requires: {
+      git: true,
+      bun: true,
+      herdr: "session snapshot (discover); pane execution (scripts run/stop/results/logs)",
+    },
     defaults: { timeoutMs: config.timeoutMs ?? DEFAULT_TIMEOUT_MS },
   });
 }
@@ -797,6 +1062,10 @@ Usage:
   projects settings set <id> <key> <value>
   projects settings unset <id> <key>
   projects scripts list <project|repo> [--repo PATH]
+  projects scripts run <project> <name> [--repo PATH]
+  projects scripts stop <run-id|project>
+  projects scripts results [project]
+  projects scripts logs <run-id>
   projects repos list <project>
   projects repos add <project> --path DIR [--path DIR]...
   projects repos remove <project> --path DIR [--path DIR]...
@@ -826,12 +1095,24 @@ async function main(): Promise<void> {
       return flagCommand(options, "unpin", "pinned", false);
     case "settings":
       return cmdSettings(options);
-    case "scripts":
-      if (options.args[0] !== "list") {
-        fail(`unknown scripts subcommand: ${options.args[0] ?? ""}`, 2);
+    case "scripts": {
+      const [sub, ...rest] = options.args;
+      options.args = rest;
+      switch (sub) {
+        case "list":
+          return cmdScriptsList(options);
+        case "run":
+          return cmdScriptsRun(options);
+        case "stop":
+          return cmdScriptsStop(options);
+        case "results":
+          return cmdScriptsResults(options);
+        case "logs":
+          return cmdScriptsLogs(options);
+        default:
+          return fail(`unknown scripts subcommand: ${sub ?? ""}`, 2);
       }
-      options.args = options.args.slice(1);
-      return cmdScriptsList(options);
+    }
     case "repos":
       return cmdRepos(options);
     case "capability":
