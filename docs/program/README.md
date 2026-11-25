@@ -96,7 +96,7 @@ Issue 番号ベースの直列・blocked-by 関係 (release-0-2-0):
 | Train | Issue | 機能エリア (台帳 id) | 状態 |
 | --- | --- | --- | --- |
 | release-0-1-0 | (済) | `inbox-organize` (#7 契約), `git-readonly` (#20/#21) | リリース済み |
-| release-0-2-0 | #2, #23, #24, #25, #35-#39 | Source Control 一連: `git-files-diff`, `git-history-compare`, `git-write-local`, `git-remote-sync`, `forge-github` | 進行中 |
+| release-0-2-0 | #2, #23, #24, #25, #35-#39 | Source Control 一連: `git-files-diff`, `git-history-compare`, `git-write-local`, `git-remote-sync`, `forge-github` | 実装完了・リリース承認待ち (#25 残差は後続 train) |
 | 次期 train (暫定) | #26, #3 | `projects-multi-repo`, `project-scripts` | 未着手 |
 | 次期 train (暫定) | #4 | `checkpoints` (#23/#24/#26/#5 と接続) | 未着手 |
 | 次期 train (暫定) | #5, #28 | `conversations`, `usage-quota` | 未着手 |
