@@ -5,7 +5,13 @@
 
 import { realpathSync } from "node:fs";
 import path from "node:path";
-import { GitError, repoRemoteIdentity, resolveRepo } from "../../../packages/git-core/src/index";
+import {
+  GitError,
+  gitOk,
+  repoRemoteIdentity,
+  resolveRepo,
+  runGit,
+} from "../../../packages/git-core/src/index";
 import type { ProjectsState } from "./state";
 
 export interface DiscoveredRepo {
@@ -84,6 +90,35 @@ export async function discoverRepos(
     });
   }
   return { repos: [...byRoot.values()], skipped };
+}
+
+/**
+ * Live per-repo inspection for `repos list`: current branch, dirty flag,
+ * and submodule presence. Three cheap git calls (rev-parse, status
+ * --porcelain, submodule status), each under the caller's timeout.
+ * `has_submodules` is false when `git submodule status` exits non-zero
+ * or prints nothing. Throws GitError when the repo is unreachable.
+ */
+export interface RepoLiveInfo {
+  branch: string;
+  dirty: boolean;
+  has_submodules: boolean;
+}
+
+export async function inspectRepo(
+  root: string,
+  options: { timeoutMs?: number } = {},
+): Promise<RepoLiveInfo> {
+  const [branch, status, submodules] = await Promise.all([
+    gitOk(root, ["rev-parse", "--abbrev-ref", "HEAD"], options).then((s) => s.trim()),
+    gitOk(root, ["status", "--porcelain"], options),
+    runGit(root, ["submodule", "status"], options),
+  ]);
+  return {
+    branch,
+    dirty: status.trim().length > 0,
+    has_submodules: submodules.code === 0 && submodules.stdout.trim().length > 0,
+  };
 }
 
 /** Derive a stable project id candidate from a repo root basename. */

@@ -18,7 +18,13 @@ import {
   type SessionSnapshot,
   sessionSnapshot,
 } from "../../../packages/herdr-client/src/index";
-import { canonicalRepoRoot, discoverRepos, projectIdFromRoot, repoIndex } from "./model";
+import {
+  canonicalRepoRoot,
+  discoverRepos,
+  inspectRepo,
+  projectIdFromRoot,
+  repoIndex,
+} from "./model";
 import { BUILTIN_SCRIPTS, type ResolvedScript, resolveScripts, ScriptError } from "./scripts";
 import {
   loadSettings,
@@ -348,6 +354,59 @@ async function cmdRegister(options: CliOptions): Promise<void> {
   emitProject("register", project as Project);
 }
 
+/**
+ * Append resolved repos to `project.repos`, enforcing cross-project
+ * ownership. Shared by `update --repo-add` and `repos add`.
+ */
+function addReposToProject(
+  state: ProjectsState,
+  project: Project,
+  additions: ResolvedRepo[],
+): void {
+  const index = repoIndex(state);
+  for (const add of additions) {
+    const existing = project.repos.find((r) => canonicalRepoRoot(r.root) === add.root);
+    if (existing) continue;
+    const owner = index.get(add.root);
+    if (owner && owner !== project.id) {
+      throw new CommandError(
+        `repo already registered to project: ${owner}`,
+        "repo_already_registered",
+        { project_id: owner },
+      );
+    }
+    project.repos.push({ root: add.root, remote: add.remote, added_at: now() });
+    index.set(add.root, project.id);
+  }
+}
+
+/**
+ * Drop canonical repo roots from `project.repos`. Shared by
+ * `update --repo-remove` and `repos remove`.
+ */
+function removeReposFromProject(state: ProjectsState, project: Project, removals: string[]): void {
+  const index = repoIndex(state);
+  for (const root of removals) {
+    const before = project.repos.length;
+    project.repos = project.repos.filter((r) => canonicalRepoRoot(r.root) !== root);
+    if (project.repos.length === before) {
+      throw new CommandError(`repo not registered to project: ${root}`, "repo_not_found", {
+        project_id: project.id,
+        root,
+      });
+    }
+    index.delete(root);
+  }
+}
+
+function lookupProject(state: ProjectsState, id: string): Project {
+  const project = state.projects[id];
+  if (!project) {
+    throw new CommandError(`project not found: ${id}`, "project_not_found", { project_id: id });
+  }
+  return project;
+}
+
 async function cmdUpdate(options: CliOptions): Promise<void> {
   const config = await loadConfig();
   const timeoutMs = effectiveTimeoutMs(options, config);
@@ -397,37 +456,115 @@ async function cmdUpdate(options: CliOptions): Promise<void> {
       if (title !== undefined) project.title = title;
       if (pinned !== undefined) project.pinned = pinned;
       if (archived !== undefined) project.archived = archived;
-      const index = repoIndex(state);
-      for (const add of additions) {
-        const existing = project.repos.find((r) => canonicalRepoRoot(r.root) === add.root);
-        if (existing) continue;
-        const owner = index.get(add.root);
-        if (owner && owner !== project.id) {
-          throw new CommandError(
-            `repo already registered to project: ${owner}`,
-            "repo_already_registered",
-            { project_id: owner },
-          );
-        }
-        project.repos.push({ root: add.root, remote: add.remote, added_at: now() });
-        index.set(add.root, project.id);
-      }
-      for (const root of removals) {
-        const before = project.repos.length;
-        project.repos = project.repos.filter((r) => canonicalRepoRoot(r.root) !== root);
-        if (project.repos.length === before) {
-          throw new CommandError(`repo not registered to project: ${root}`, "repo_not_found", {
-            project_id: project.id,
-            root,
-          });
-        }
-        index.delete(root);
-      }
+      addReposToProject(state, project, additions);
+      removeReposFromProject(state, project, removals);
       project.updated_at = now();
       return project;
     }),
   );
   emitProject("update", project as Project);
+}
+
+/**
+ * `repos list <project>` — registered members plus cheap live git
+ * inspection (branch, dirty, submodules). Unreachable repos keep their
+ * stored identity with null live fields and are reported in `skipped`.
+ */
+async function cmdReposList(options: CliOptions): Promise<void> {
+  const config = await loadConfig();
+  const timeoutMs = effectiveTimeoutMs(options, config);
+  const parsed = parseCommandArgs(options.args, new Set());
+  const id = parsed.positionals[0];
+  if (!id || parsed.positionals.length > 1) {
+    fail("repos list requires exactly one <project> argument", 2);
+  }
+  const state = await loadState();
+  const project = state.projects[id as string];
+  if (!project) {
+    fail(`project not found: ${id}`, 1, "project_not_found", { project_id: id });
+  }
+
+  const repos: Record<string, unknown>[] = [];
+  const skipped: { root: string; reason: string }[] = [];
+  for (const member of (project as Project).repos) {
+    const entry: Record<string, unknown> = {
+      root: member.root,
+      remote: member.remote,
+      added_at: member.added_at,
+      branch: null,
+      dirty: null,
+      has_submodules: null,
+    };
+    try {
+      const live = await inspectRepo(member.root, { timeoutMs });
+      entry.branch = live.branch;
+      entry.dirty = live.dirty;
+      entry.has_submodules = live.has_submodules;
+    } catch (err) {
+      if (!(err instanceof GitError)) throw err;
+      skipped.push({ root: member.root, reason: err.kind });
+    }
+    repos.push(entry);
+  }
+  emit({
+    contract: CONTRACT,
+    command: "repos list",
+    project_id: (project as Project).id,
+    repos,
+    skipped,
+    generated_at: now(),
+  });
+}
+
+/**
+ * `repos add|remove <project> --path DIR` (repeatable) — explicit repo
+ * membership management. Thin aliases over the same locked helpers as
+ * `update --repo-add/--repo-remove`; errors are identical.
+ */
+async function cmdReposMutate(options: CliOptions, op: "add" | "remove"): Promise<void> {
+  const config = await loadConfig();
+  const timeoutMs = effectiveTimeoutMs(options, config);
+  const parsed = parseCommandArgs(options.args, new Set(["--path"]));
+  const id = parsed.positionals[0];
+  const paths = parsed.multi.get("--path") ?? [];
+  if (!id || parsed.positionals.length > 1 || paths.length === 0) {
+    fail(`repos ${op} requires <project> and at least one --path DIR`, 2);
+  }
+
+  // Resolve repo paths outside the state lock; membership checks run inside.
+  const project = await runMutation(async () => {
+    if (op === "add") {
+      const additions = await Promise.all(paths.map((p) => resolveRepoPath(p, timeoutMs)));
+      return updateState((state) => {
+        const project = lookupProject(state, id as string);
+        addReposToProject(state, project, additions);
+        project.updated_at = now();
+        return project;
+      });
+    }
+    const removals = await Promise.all(paths.map((p) => resolveRemovalRoot(p, timeoutMs)));
+    return updateState((state) => {
+      const project = lookupProject(state, id as string);
+      removeReposFromProject(state, project, removals);
+      project.updated_at = now();
+      return project;
+    });
+  });
+  emitProject(`repos ${op}`, project as Project);
+}
+
+async function cmdRepos(options: CliOptions): Promise<void> {
+  const [sub, ...rest] = options.args;
+  options.args = rest;
+  switch (sub) {
+    case "list":
+      return cmdReposList(options);
+    case "add":
+    case "remove":
+      return cmdReposMutate(options, sub);
+    default:
+      fail(`unknown repos subcommand: ${sub ?? ""}`, 2);
+  }
 }
 
 async function flagCommand(
@@ -626,11 +763,14 @@ async function cmdCapability(): Promise<void> {
       "unpin",
       "settings",
       "scripts",
+      "repos",
     ],
     read_only: false,
     mutation_commands: [
       "register",
       "update",
+      "repos add",
+      "repos remove",
       "archive",
       "unarchive",
       "pin",
@@ -657,6 +797,9 @@ Usage:
   projects settings set <id> <key> <value>
   projects settings unset <id> <key>
   projects scripts list <project|repo> [--repo PATH]
+  projects repos list <project>
+  projects repos add <project> --path DIR [--path DIR]...
+  projects repos remove <project> --path DIR [--path DIR]...
   projects capability
 `;
 
@@ -689,6 +832,8 @@ async function main(): Promise<void> {
       }
       options.args = options.args.slice(1);
       return cmdScriptsList(options);
+    case "repos":
+      return cmdRepos(options);
     case "capability":
       return cmdCapability();
     case "help":

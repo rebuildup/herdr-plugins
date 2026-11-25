@@ -29,6 +29,9 @@ bun run src/cli.ts settings get <id> [key]
 bun run src/cli.ts settings set <id> <key> <value>
 bun run src/cli.ts settings unset <id> <key>
 bun run src/cli.ts scripts list <project|repo> [--repo PATH]
+bun run src/cli.ts repos list <project>
+bun run src/cli.ts repos add <project> --path DIR [--path DIR]...
+bun run src/cli.ts repos remove <project> --path DIR [--path DIR]...
 ```
 
 - All commands print exactly one JSON document on stdout. Handled errors
@@ -36,9 +39,10 @@ bun run src/cli.ts scripts list <project|repo> [--repo PATH]
   exit 1; usage errors exit 2.
 - Mutations are explicit-argument CLI invocations only — never manifest
   actions. `capability` reports `read_only: false` and
-  `mutation_commands: ["register","update","archive","unarchive","pin",
-  "unpin","settings set","settings unset"]`. Read outputs are unchanged;
-  script commands (#50–#53) extend v1 additively.
+  `mutation_commands: ["register","update","repos add","repos remove",
+  "archive","unarchive","pin","unpin","settings set","settings unset"]`.
+  Read outputs are unchanged; script commands (#50–#53) extend v1
+  additively.
 
 ## Model
 
@@ -143,6 +147,65 @@ Mutates title/pin/archive and repo membership in one locked write:
 All checks run inside the registry lock, so concurrent updates cannot
 interleave. Unknown id → `project_not_found` (with `project_id`).
 Response: `{contract, command:"update", project, generated_at}`.
+
+## `repos list <project>`
+
+Lists the repos bound to a project — the read side of multi-checkout
+grouping (#51). Each entry carries the stored membership fields plus
+cheap live git inspection:
+
+```json
+{
+  "contract": "herdr-plugins.projects/v1",
+  "command": "repos list",
+  "project_id": "my-app",
+  "repos": [
+    {
+      "root": "/abs/repo",
+      "remote": "github.com/org/repo",
+      "added_at": "…",
+      "branch": "main",
+      "dirty": false,
+      "has_submodules": true
+    }
+  ],
+  "skipped": [{ "root": "/abs/gone", "reason": "git_error" }],
+  "generated_at": "…"
+}
+```
+
+- `root`/`remote`/`added_at` are the stored `ProjectRepo` fields;
+  `remote` is the normalized cross-checkout identity (`null` without a
+  remote — the identity then falls back to the root path).
+- `branch` (`git rev-parse --abbrev-ref HEAD`), `dirty`
+  (`git status --porcelain` non-empty), and `has_submodules`
+  (`git submodule status` non-empty; non-zero exit or empty output =
+  false) are fetched live per repo under the command timeout.
+- A repo that is unreachable or no longer a work tree keeps its stored
+  fields with `branch`/`dirty`/`has_submodules` = `null` and is also
+  reported in `skipped` with a git-contract `reason` — never fabricated.
+- Read-only; unknown project id → `project_not_found`.
+
+## `repos add` / `repos remove <project>`
+
+Explicit repo-membership management, thin aliases over the exact same
+locked code path as `update --repo-add`/`--repo-remove` (#51):
+
+- `repos add <project> --path DIR` (repeatable) resolves each path via
+  `resolveRepo` + `repoRemoteIdentity` and appends
+  `{root, remote, added_at}`. Same rules as `update`: a root owned by
+  another project fails `repo_already_registered`; a root already in
+  this project is a no-op; non-git paths surface the git kinds
+  (`not_a_repo`, `bare_repo`, …). Use it to attach another checkout or
+  clone of the same `remote` identity (worktrees resolve to their own
+  root and share the identity).
+- `repos remove <project> --path DIR` (repeatable) drops membership by
+  canonical root; the path may be live or stale (lexically
+  canonicalized), so entries can be removed after a checkout is
+  deleted. Unknown roots fail `repo_not_found`.
+- Both are non-destructive state mutations; there is still no delete.
+  Response: `{contract, command:"repos add"|"repos remove", project,
+  generated_at}`.
 
 ## `archive` / `unarchive` / `pin` / `unpin <id>`
 

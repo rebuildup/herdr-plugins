@@ -10,8 +10,8 @@ overrides. Contract: `herdr-plugins.projects/v1`
 Provide the project entity upstream T3 Code centers its UX on — a
 logical grouping of one or more git repositories with settings and
 scripts — as plugin-owned state, without touching herdr core state.
-Foundation for #49 (CRUD/overrides), #50 (t3.json/scripts), #51 (repo
-membership), and #3 (script execution).
+Foundation delivered by #49 (CRUD/overrides), #50 (t3.json/scripts),
+#51 (repo membership/grouping); #52/#53 own script execution.
 
 ## Identity and resolution
 
@@ -37,6 +37,9 @@ membership), and #3 (script execution).
 | `archive`/`unarchive`/`pin`/`unpin <id>` | Non-destructive flag setters; no delete. |
 | `settings get/set/unset` | Per-project override keys under `<stateDir>/settings/`; allow-listed keys only. |
 | `scripts list <project\|repo>` | Resolved script definitions with per-script `source`; read-only. |
+| `repos list <project>` | Member repos with live `branch`/`dirty`/`has_submodules`; unreachable members reported in `skipped`. |
+| `repos add <project> --path DIR` | Add a repo/checkout to a project; same code path and errors as `update --repo-add`. |
+| `repos remove <project> --path DIR` | Drop membership (live or stale path); same code path as `update --repo-remove`. |
 
 All commands accept `--session`/`--socket`/`--timeout`; only `discover`
 needs a live herdr session. Mutations are explicit-argument CLI
@@ -53,6 +56,28 @@ invocations — no manifest actions.
 - Settings keys are allow-listed (`SETTINGS_ALLOW_LIST`): upstream
   project-scoped keys relevant to scripts/display. Values are verbatim
   strings; #50 owns typed resolution.
+
+## Repo membership and grouping (#51)
+
+- `repos[].remote` is the `repositoryIdentity` equivalent: normalized
+  `origin` URL (`host/path`, scp/https/case/`.git` unified via
+  `normalizeRemoteUrl`), `null` → identity falls back to root path.
+  Distinct checkouts/clones of the same remote share the identity and
+  can be grouped under one project via `repos add`.
+- `repos add`/`repos remove` are thin aliases over the same locked
+  helpers as `update --repo-add`/`--repo-remove`
+  (`addReposToProject`/`removeReposFromProject` in `cli.ts`) — no
+  duplicated logic, identical `repo_already_registered` /
+  `repo_not_found` semantics.
+- `repos list` enriches each member live via `inspectRepo`
+  (`model.ts`): `rev-parse --abbrev-ref HEAD`, `status --porcelain`,
+  `submodule status` — one timeout-bounded call set per repo.
+  `has_submodules` feeds the upstream `worktreeSubmodules` connection
+  point. Unreachable members keep stored fields with null live values
+  plus a `skipped` entry; nothing is fabricated.
+- #26 acceptance: same-name repos (distinct roots → distinct
+  identities), non-git roots (`not_a_repo`), and external folders are
+  never absorbed into a project — covered by contract tests.
 
 ## t3.json and script resolution (#50)
 

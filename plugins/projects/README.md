@@ -25,6 +25,8 @@ bun run src/cli.ts update <id> [--title T] [--pinned|--unpinned]
 bun run src/cli.ts archive|unarchive|pin|unpin <id>
 bun run src/cli.ts settings get|set|unset <id> [key] [value]
 bun run src/cli.ts scripts list <project|repo> [--repo PATH]
+bun run src/cli.ts repos list <project>
+bun run src/cli.ts repos add|remove <project> --path DIR [--path DIR]...
 ```
 
 Registry mutations are explicit-argument CLI invocations (never pane
