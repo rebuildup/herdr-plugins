@@ -18,3 +18,14 @@ title = "Checkpoints: capture pane state"
 description = "Capture the focused pane repository's worktree state as a hidden-ref checkpoint."
 contexts = ["pane"]
 command = ["bun", "run", "src/cli.ts", "create"]
+
+# Event hooks (Issue #74): a working→idle/done agent-status transition
+# records a capture-pending mark — the hook does no git work; the next
+# CLI invocation captures lazily. pane.closed drops the pane's marks.
+[[events]]
+on = "pane.agent_status_changed"
+command = ["bun", "run", "src/hook.ts"]
+
+[[events]]
+on = "pane.closed"
+command = ["bun", "run", "src/hook.ts"]

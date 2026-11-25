@@ -6,8 +6,10 @@ plugin — worktree checkpoints stored as hidden git refs
 (`list`, `show`, `diff`, `plan`) are side-effect free against the
 user's index/worktree; `create`, `delete`, and `restore` write hidden
 refs, plugin state, and — for `restore` only — the worktree/index.
-Follows the same conventions as `herdr-plugins.git/v1`
-(`docs/contracts/git-v1.md`).
+Every command (except `capability`/`help`) first drains pending
+work-unit auto-captures recorded by the plugin's event hooks — see
+"Auto-capture" below. Follows the same conventions as
+`herdr-plugins.git/v1` (`docs/contracts/git-v1.md`).
 
 ## Discovery
 
@@ -25,7 +27,7 @@ Follows the same conventions as `herdr-plugins.git/v1`
 cd <plugin_root>
 bun run src/cli.ts capability
 bun run src/cli.ts create [--repo PATH | <pane_id>] [--label TEXT]
-    [--session NAME] [--socket PATH] [--timeout MS]
+    [--auto] [--session NAME] [--socket PATH] [--timeout MS]
 bun run src/cli.ts list [--repo PATH] [--limit N]
 bun run src/cli.ts show <checkpoint-id> [--max-bytes N]
 bun run src/cli.ts diff <checkpoint-id|HEAD> <checkpoint-id|HEAD>
@@ -41,6 +43,10 @@ bun run src/cli.ts delete <checkpoint-id>
   `HERDR_PLUGIN_CONTEXT_JSON.focused_pane_id` — resolved through the
   herdr session snapshot (same path as `rebuildup.git`). `--repo` and a
   pane id are mutually exclusive. `list --repo` filters by repo.
+- `create --auto` records the entry with `kind:"auto"` instead of
+  `"manual"` — for agents that detect their own work-unit boundary.
+  An explicit `create` for a pane clears that pane's pending
+  auto-capture mark (the manual capture supersedes it).
 - Repo target for `plan`/`restore`: the checkpoint's recorded
   `repo_root` by default. `--repo PATH` may select **another worktree
   of the same repository** (same git common dir / object store — the
@@ -84,8 +90,15 @@ mutation_commands:["create","delete","restore"], requires:{git,bun}, defaults}`.
 
 `checkpoint` entry fields: `id`, `repo_root`, `repo_key`, `ref`,
 `commit`, `head_sha`, `branch` (null when detached), `created_at`,
-optional `label`, `files_summary` (bounded `git diff --name-status
-head commit`), `files_summary_truncated`, `submodules` (gitlink paths).
+optional `label`, `kind`, `files_summary` (bounded `git diff
+--name-status head commit`), `files_summary_truncated`, `submodules`
+(gitlink paths).
+
+`kind` records capture provenance: `"manual"` (explicit `create`),
+`"auto"` (lazy work-unit capture drained from the agent-status hook,
+or `create --auto`), `"pre_restore"` (mandatory pre-restore safety
+capture). Entries written before auto-capture existed carry no `kind`
+and are treated as `"manual"`.
 
 ### `list`
 
@@ -189,6 +202,49 @@ hidden ref when it still exists (`ref_existed:false` when already gone
 or the repo is unreachable — idempotent cleanup, reported via
 `warnings`). Deleting an unknown id is `unknown_checkpoint`.
 
+## Auto-capture (work-unit checkpoints)
+
+The manifest registers two event hooks (`src/hook.ts`):
+
+- `pane.agent_status_changed` — folds the transition into per-session
+  auto-capture state. Only an observed `working → idle|done` edge
+  records a capture-pending mark (guarded by `state_change_seq` +
+  `agent_session`); a return to `working` clears it; the first status
+  ever seen never pends. The hook runs no git — it is a fast,
+  non-blocking state write.
+- `pane.closed` — drops the pane's marks.
+
+Every CLI command then **lazily drains** pending marks before doing
+its own work: each mark whose generation still matches the live
+snapshot becomes an `auto` checkpoint of the pane's repo; stale or
+unresolvable marks are dropped. Drain outcomes appear in the payload
+as `auto_captures` (omitted when empty):
+
+```json
+"auto_captures": {
+  "captured": ["<checkpoint-id>"],
+  "skipped": [{"pane_id": "w1:p1", "reason": "stale_generation"}],
+  "session_unreachable": true
+}
+```
+
+`skipped[].reason` is one of `stale_generation`, `pane_or_agent_gone`,
+`no_pane_cwd`, or a git/checkpoint error `kind`. An unreachable herdr
+session sets `session_unreachable: true` and leaves all marks pending
+for a later invocation — auto-capture never fails the command.
+
+Auto-capture granularity is herdr `agent_status` — a **work-unit**
+checkpoint, deliberately coarser than upstream T3 Code's per-turn
+boundary (no per-message turn signal exists upstream of the plugin;
+recorded as an upstream gap in `docs/specs/checkpoints.md`).
+
+After a pane-targeted capture (auto drain or `create` via pane id),
+the plugin projects display-only metadata tokens via
+`pane.report_metadata` (source `rebuildup.checkpoints`):
+`checkpoint_latest` (checkpoint id) and `checkpoint_count` (entries
+for that repo root). Projection is best-effort and never fails the
+command.
+
 ## Error kinds
 
 | kind | meaning |
@@ -209,7 +265,8 @@ or the repo is unreachable — idempotent cleanup, reported via
 
 ## Explicit non-goals (v1)
 
-No turn-boundary auto-capture, no multi-repo orchestration, no
+No turn-confirmed (per-message) auto-capture — work-unit captures key
+on `agent_status` transitions only — no multi-repo orchestration, no
 checkpoint GC, no private object store/quarantine, no submodule
 worktree capture/restore (record-and-warn only). Those are tickets
-#74–#75 and later hardening.
+#75+ and upstream herdr requests.

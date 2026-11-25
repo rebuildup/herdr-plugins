@@ -67,9 +67,13 @@ the minimal correct capture:
   submodule HEAD only; submodule worktree contents are not captured in
   v1 (`submodules[]` field + CLI warning). Upstream's per-submodule
   checkpoint fan-out is deferred.
-- No turn-boundary machinery: every `create` is an explicit manual
-  checkpoint; `#74` adds triggers once herdr exposes settle/turn
-  signals worth keying on.
+- No turn-boundary machinery in T1/T2: every `create` is an explicit
+  manual checkpoint. Amendment (T3 / Issue #74): `agent_status`
+  transitions turned out to be a usable work-unit signal — the
+  `pane.agent_status_changed` event hook records capture-pending
+  marks and CLI invocations drain them lazily into `kind:"auto"`
+  checkpoints. These are work-unit checkpoints, not turn-confirmed
+  ones; per-message turn boundaries remain an upstream gap.
 - Restore (#73) must treat the checkpoint commit as a tree snapshot:
   apply via a scratch index + worktree checkout semantics, never by
   moving HEAD or rewriting the user's index.
