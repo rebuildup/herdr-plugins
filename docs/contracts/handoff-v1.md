@@ -7,8 +7,11 @@ lifecycle. External clients (herdr-t3, agents, scripts) MUST depend only
 on this contract, never on the plugin's internal state file format.
 
 T1 scope (issue #103): `create` / `list` / `status` / `capability`.
-Execution commands (`execute`, status transitions) are T2 (#104) and will
-extend this contract additively within v1 where possible.
+T2 scope (issue #104): `execute` (same-host target creation + `agent.start`
++ payload injection + status transitions) and `resume-info`, plus `status`
+extensions (`target_check`, lazy `delivered → done` reconciliation).
+Cross-machine execution is T3 (#105) and will extend this contract
+additively within v1 where possible.
 
 ## Invocation and discovery
 
@@ -28,25 +31,38 @@ An external client resolves the CLI as follows:
 {
   "contract": "herdr-plugins.handoff/v1",
   "plugin": "rebuildup.handoff",
-  "version": "0.1.0",
-  "commands": ["create", "list", "status", "capability"],
+  "version": "0.2.0",
+  "commands": ["create", "list", "status", "execute", "resume-info", "capability"],
   "actions": [],
   "events": [],
   "startup": [],
   "state_file": "…",
   "config_dir": "…",
   "socket": null,
-  "execution": "not_implemented",
+  "execution": "same_host",
+  "execution_surface": {
+    "strategies": ["native_resume", "portable_context"],
+    "target_selection": ["--target-pane", "--target-workspace", "--new-workspace"],
+    "agent_api": ["workspace.create", "tab.create", "agent.start", "agent.prompt", "agent.wait"],
+    "failure_cleanup_flag": "--cleanup-on-failure",
+    "observation_flag": "--wait-ms",
+    "provider_hint": "opaque label; first '.'-segment is used as the agent.start kind only"
+  },
   "limits": {
     "max_excerpt_chars": 8192,
     "max_payload_refs": 32,
-    "max_requirements": 32
+    "max_requirements": 32,
+    "max_prompt_chars": 65536
   }
 }
 ```
 
-`execution: "not_implemented"` is explicit: T1 records intent only and
-never creates panes, starts agents, or mutates herdr execution state.
+`execution: "same_host"` means `execute` performs same-host handoffs only:
+target surfaces are created exclusively through herdr's socket API
+(`workspace.create` / `tab.create` + `agent.start` / `agent.prompt` /
+`agent.wait`); the plugin never owns a PTY and never invokes the Agent
+Router launcher. `execution: "not_implemented"` (T1) meant records were
+intent-only.
 
 ## Target selection (Host / Session)
 
@@ -72,7 +88,9 @@ machine handoff is T3 (#105) and will extend `transfer.host` semantics.
 | --- | --- | --- |
 | `create` | `pane_id` + flags | Build payload, persist record (`--dry-run` previews without writing). |
 | `list` | `--status S --limit N` | Enumerate records, newest first. |
-| `status` | `handoff_id` | Full record + staleness + per-ref resolution. |
+| `status` | `handoff_id` | Full record + staleness + target check + per-ref resolution. |
+| `execute` | `handoff_id` + flags | Run the same-host handoff (see below). |
+| `resume-info` | `--provider KIND` | Provider native-resume capability table. |
 | `capability` | — | Discovery document (above). |
 
 Global flags (after the command): `--session NAME`, `--socket PATH`,
@@ -155,9 +173,14 @@ Field semantics:
   - `external` → `uri | path | issue` pointer, never fetched.
 - `payload.excerpt` — bounded inline context (`source: "note"` in v1).
 - `status` — `pending | ready | delivered | done | failed | superseded`.
-  T1 only ever writes `pending`; later tickets drive transitions.
+  `create` writes `pending`; `execute` drives the rest (below).
 - `strategy` — `native_resume | portable_context | checkpoint_ref |
-  manual` (T3 ContextHandoff strategies, simplified).
+  manual` (T3 ContextHandoff strategies, simplified). `execute` honors
+  `native_resume`/`portable_context`; `checkpoint_ref`/`manual` are
+  recorded intent and refused with `unsupported_strategy`.
+- `execution` — optional `HandoffExecution` object present once
+  `execute` has run (see "Execution record" below). Absent on records
+  created before T2.
 
 ## `list` output
 
@@ -174,6 +197,7 @@ Field semantics:
       "created_at": "…", "updated_at": "…",
       "transfer": { "…": "TransferIdentity" },
       "target": null,
+      "target_pane_id": null,
       "ref_count": 2, "has_excerpt": true,
       "transfer_check": { "state": "ok" }
     }
@@ -223,6 +247,135 @@ never judged stale (or applicable) from them.
 `--no-resolve-refs` skips owner CLI calls and returns
 `payload_resolution: null`, `missing_refs: null`.
 
+`status` also returns `target_check` and performs **lazy
+reconciliation**: when the record is `delivered` and has an execution
+target, the target pane's raw `agent_status`/`state_change_seq` inside
+the current session's snapshot is evaluated and `execution.observed` is
+persisted; `delivered → done` is applied only when the done verdict
+holds (`agent_status === "done"`, or `"idle"` with seq advanced past
+the pre-prompt baseline). `--no-reconcile` skips the write.
+
+`target_check`:
+
+```json
+{ "state": "ok", "reason": null, "agent_status": "working",
+  "pane_present": true, "agent_session": { "…": "AgentSessionRef" },
+  "state_change_seq": 9 }
+```
+
+`state` is `ok` (target pane present), `pane_missing` (target pane gone —
+reported, NOT auto-failed: a user may have closed it after completion),
+or `unchecked` with `reason` ∈ `not_executed | snapshot_unavailable |
+other_session`.
+
+## `execute`
+
+```
+handoff execute <handoff-id>
+  [--target-pane ID | --target-workspace ID | --new-workspace]
+  [--provider HINT] [--model M]
+  [--wait-ms MS] [--cleanup-on-failure] [--dry-run]
+  [--session NAME] [--socket PATH] [--timeout MS]
+```
+
+Runs the same-host handoff end-to-end:
+
+1. **Gate** — record must be `pending`/`ready`; a live
+   `session.snapshot` is mandatory; `checkTransfer` must be `ok`
+   (stale/`other_session`/unreachable → structured error, record
+   untouched, nothing created).
+2. **Plan** — strategy decision + prompt build + target resolution are
+   all read-only. `--dry-run` returns `{plan, decision, prompt_text}`
+   and mutates nothing.
+3. **`ready`** — payload built; `execution` persisted with
+   `strategy_used`, `provider_kind`, `decision`, `resume_args`.
+4. **Surface** — target pane reuse (`--target-pane`, must be agent-free),
+   `tab.create` (`--target-workspace` / `record.target.workspace_id`),
+   or `workspace.create` (default / `--new-workspace`, cwd inherited
+   from `transfer.cwd`). Only plugin-*created* surfaces set
+   `execution.target.created: true`.
+5. **`agent.start`** — `kind` = first `.`-segment of the provider hint
+   (opaque label → kind only; Agent Router is never invoked);
+   `args` = resume argv (`native_resume`) + optional `--model` mapping.
+6. **Prompt** — `agent.prompt` injects the bounded payload preamble
+   (`max_prompt_chars` 65536; exceeding is `payload_too_large`, never
+   truncated silently).
+7. **`delivered`** — target pane/agent identity + `state_change_seq`
+   baseline + prompt metadata persisted; sibling `pending`/`ready`
+   records for the same source identity become `superseded` in the same
+   write.
+8. **Observation** — `--wait-ms MS` runs a bounded `agent.wait`
+   (`idle|done|blocked`) then re-observes; timeout stays `delivered`.
+   `done` requires the observed verdict above.
+
+Outcome semantics:
+
+- stdout JSON `{command:"execute", outcome:"delivered"|"done",
+  handoff}` on success (exit 0).
+- `outcome:"failed"` → stderr `execution_failed` error (exit 1) **and**
+  the record persists `status:"failed"` with
+  `execution.error{step,message,at}` — steps: `surface`, `agent_start`,
+  `prompt`. Success is never fabricated.
+- Pre-mutation refusals (stale source, busy/missing target pane,
+  `unsupported_strategy`, `provider_unknown`, unreachable socket,
+  invalid state) → structured stderr error, record unchanged.
+- `--cleanup-on-failure` closes the target pane ONLY when
+  `execution.target.created === true`; reused panes are never closed.
+  The source session's lifecycle is never judged or touched.
+
+### Strategy decision
+
+`record.strategy` requests; `execution.strategy_used` records reality:
+
+- `portable_context` → fresh session + payload as first prompt.
+- `native_resume` → requires provider `native_resume: "supported"` in
+  the resume table AND `transfer.agent_session.value`; otherwise falls
+  back to `portable_context` with `execution.decision` recording why.
+- `checkpoint_ref` / `manual` → `unsupported_strategy` error.
+
+Provider kind resolution: `--provider` flag > `target.provider_hint` >
+`transfer.provider_kind`; a `harness.provider` hint contributes its
+first `.`-segment as the `agent.start` kind.
+
+### `resume-info`
+
+```
+handoff resume-info [--provider KIND]
+```
+
+Returns the provider native-resume capability table:
+`{kind, native_resume: supported|unsupported|unknown,
+session_id_source, resume_args_template, model_flag, notes}`.
+`unknown` is honest non-support — `execute` falls back rather than
+guessing. The table is the handoff-side seed of the provider capability
+surface `rebuildup.controls` T2 (#100) is expected to own; until then
+unlisted providers report `unknown`.
+
+## Execution record (`execution` field)
+
+```json
+"execution": {
+  "decided_at": "…",
+  "strategy_used": "native_resume",
+  "provider_kind": "claude",
+  "decision": "provider \"claude\" supports native resume; …",
+  "resume_args": ["--resume", "<session-id>"],
+  "target": { "pane_id": "w9:p1", "workspace_id": "w9", "tab_id": "w9:t1",
+              "created": true },
+  "agent": { "name": "handoff ho-…", "kind": "claude", "pane_id": "w9:p1",
+             "agent_session": { "…": "AgentSessionRef" },
+             "state_change_seq": 5, "agent_status": "working" },
+  "prompt": { "delivered_at": "…", "chars": 4210, "waited": true },
+  "error": null,
+  "cleaned_up": false,
+  "observed": { "agent_status": "done", "pane_present": true,
+                "checked_at": "…" }
+}
+```
+
+`agent.state_change_seq` is the **pre-prompt baseline** used by the done
+verdict; `observed.agent_status` is always the raw herdr value.
+
 Ref resolution consumes owner plugins **only through their public CLI
 contracts** (`conversations sessions --offline`, `checkpoints list
 --limit 1000`), located via the sibling `plugins/<name>` directory or
@@ -248,10 +401,11 @@ never persisted:
    `ok`: the handoff covers the recorded point; later source work is
    simply uncovered (T3 `coveredRunOrdinals` semantics).
 
-Downstream executors (#104+) MUST refuse to apply a record whose
-`transfer_check.state` is not `ok`. T1 performs no application, so the
-guarantee is contractual: `status`/`list` surface the verdict and no
-command mutates anything outside plugin state.
+Downstream executors MUST refuse to apply a record whose
+`transfer_check.state` is not `ok` — `execute` enforces this as a
+pre-mutation gate (T2, #104). `status`/`list` surface the verdict; the
+only mutations `execute` performs outside plugin state are the herdr API
+calls described above, and only after the gate passes.
 
 ## Output contract
 

@@ -54,6 +54,31 @@ export const HANDOFF_STRATEGIES = [
 ] as const;
 export type HandoffStrategy = (typeof HANDOFF_STRATEGIES)[number];
 
+/**
+ * Allowed status transitions (#104). `pending → ready` happens when the
+ * payload is built and the execution plan validated; `ready → delivered`
+ * when `agent.start` + the first prompt are accepted by herdr;
+ * `delivered → done` on observed target-agent completion, `→ failed` on
+ * delivery/observation failure. `superseded` marks a live record
+ * replaced by a newer execution for the same source identity.
+ */
+const TRANSITIONS: Record<HandoffStatus, readonly HandoffStatus[]> = {
+  pending: ["ready", "failed", "superseded"],
+  ready: ["delivered", "failed", "superseded"],
+  delivered: ["done", "failed", "superseded"],
+  done: [],
+  failed: [],
+  superseded: [],
+};
+
+export function canTransitionStatus(from: HandoffStatus, to: HandoffStatus): boolean {
+  return TRANSITIONS[from].includes(to);
+}
+
+export function isTerminalStatus(status: HandoffStatus): boolean {
+  return TRANSITIONS[status].length === 0;
+}
+
 /** agent_session fingerprint — same convention as rebuildup.inbox/checkpoints. */
 export interface AgentSessionRef {
   agent?: string;
@@ -145,6 +170,79 @@ export interface HandoffPayload {
   requirements?: string[];
 }
 
+/**
+ * Execution record written by `execute` (#104). Absent on T1-era records;
+ * `status`/`list` treat a missing `execution` as "never executed".
+ *
+ * Everything here is *observed* state reported by herdr — the plugin
+ * never fabricates agent status. `observed.agent_status` is the raw
+ * `agent_status` last seen on the target pane; the record `status`
+ * (`done`) is a lifecycle verdict derived from it (see execute.ts).
+ */
+export interface ExecutionTarget {
+  pane_id: string;
+  workspace_id: string | null;
+  tab_id: string | null;
+  /** True when the plugin created the surface; false for `--target-pane` reuse. */
+  created: boolean;
+}
+
+export interface ExecutionAgent {
+  /** Name passed to `agent.start`. */
+  name: string;
+  /** herdr agent kind the provider hint resolved to (e.g. "claude"). */
+  kind: string;
+  pane_id: string;
+  /** Generation signals captured right after `agent.start` (pre-prompt). */
+  agent_session: AgentSessionRef | null;
+  state_change_seq: number | null;
+  agent_status: string | null;
+}
+
+export interface ExecutionError {
+  /** Pipeline step that failed: surface|agent_start|prompt|wait. */
+  step: string;
+  message: string;
+  at: string;
+}
+
+export interface ExecutionObservation {
+  /** Raw herdr `agent_status` on the target pane at `checked_at`. */
+  agent_status: string | null;
+  pane_present: boolean | null;
+  checked_at: string;
+}
+
+export interface HandoffExecution {
+  /** When the strategy decision + payload build completed (`ready`). */
+  decided_at: string;
+  /**
+   * Strategy actually used. May differ from `record.strategy`:
+   * `native_resume` falls back to `portable_context` when the provider
+   * cannot resume or no session id is known — `decision` records why.
+   */
+  strategy_used: "native_resume" | "portable_context";
+  /** Provider kind resolved for `agent.start` (opaque hint → kind). */
+  provider_kind: string | null;
+  /** Human/machine-readable reason for `strategy_used`. */
+  decision: string;
+  /** Resume argv actually passed to `agent.start` (native_resume only). */
+  resume_args: string[] | null;
+  target: ExecutionTarget | null;
+  agent: ExecutionAgent | null;
+  prompt: {
+    delivered_at: string;
+    /** UTF-16 length of the injected prompt text. */
+    chars: number;
+    /** Whether a post-delivery `agent.wait` observation was requested. */
+    waited: boolean;
+  } | null;
+  error: ExecutionError | null;
+  /** Whether `--cleanup-on-failure` closed a plugin-created pane. */
+  cleaned_up: boolean;
+  observed: ExecutionObservation | null;
+}
+
 export interface HandoffRecord {
   contract: typeof CONTRACT;
   /** `ho-<base36-ms>-<8hex>` — unique per record. */
@@ -156,6 +254,8 @@ export interface HandoffRecord {
   transfer: TransferIdentity;
   target: TargetSpec | null;
   payload: HandoffPayload;
+  /** Present once `execute` has run (ready or later). */
+  execution?: HandoffExecution;
 }
 
 // --- construction -----------------------------------------------------------
@@ -411,6 +511,70 @@ function parseTarget(v: unknown): TargetSpec | null {
   return target;
 }
 
+function parseExecution(v: unknown): HandoffExecution {
+  if (!isObj(v)) throw new Error("invalid execution");
+  const strategyUsed = v.strategy_used;
+  if (strategyUsed !== "native_resume" && strategyUsed !== "portable_context") {
+    throw new Error(`invalid execution.strategy_used: ${String(strategyUsed)}`);
+  }
+  const exec: HandoffExecution = {
+    decided_at: reqString(v.decided_at, "execution.decided_at"),
+    strategy_used: strategyUsed,
+    provider_kind: optNullableString(v.provider_kind),
+    decision: reqString(v.decision, "execution.decision"),
+    resume_args: Array.isArray(v.resume_args)
+      ? v.resume_args.map((a) => reqString(a, "resume_arg"))
+      : null,
+    target: null,
+    agent: null,
+    prompt: null,
+    error: null,
+    cleaned_up: v.cleaned_up === true,
+    observed: null,
+  };
+  if (isObj(v.target)) {
+    exec.target = {
+      pane_id: reqString(v.target.pane_id, "execution.target.pane_id"),
+      workspace_id: optNullableString(v.target.workspace_id),
+      tab_id: optNullableString(v.target.tab_id),
+      created: v.target.created === true,
+    };
+  }
+  if (isObj(v.agent)) {
+    exec.agent = {
+      name: reqString(v.agent.name, "execution.agent.name"),
+      kind: reqString(v.agent.kind, "execution.agent.kind"),
+      pane_id: reqString(v.agent.pane_id, "execution.agent.pane_id"),
+      agent_session: parseAgentSessionRef(v.agent.agent_session),
+      state_change_seq:
+        typeof v.agent.state_change_seq === "number" ? v.agent.state_change_seq : null,
+      agent_status: optNullableString(v.agent.agent_status),
+    };
+  }
+  if (isObj(v.prompt)) {
+    exec.prompt = {
+      delivered_at: reqString(v.prompt.delivered_at, "execution.prompt.delivered_at"),
+      chars: typeof v.prompt.chars === "number" ? v.prompt.chars : 0,
+      waited: v.prompt.waited === true,
+    };
+  }
+  if (isObj(v.error)) {
+    exec.error = {
+      step: reqString(v.error.step, "execution.error.step"),
+      message: reqString(v.error.message, "execution.error.message"),
+      at: reqString(v.error.at, "execution.error.at"),
+    };
+  }
+  if (isObj(v.observed)) {
+    exec.observed = {
+      agent_status: optNullableString(v.observed.agent_status),
+      pane_present: typeof v.observed.pane_present === "boolean" ? v.observed.pane_present : null,
+      checked_at: reqString(v.observed.checked_at, "execution.observed.checked_at"),
+    };
+  }
+  return exec;
+}
+
 /** Strict-ish parser for state.json records; throws on malformed data. */
 export function parseHandoffRecord(raw: unknown): HandoffRecord {
   if (!isObj(raw)) throw new Error("handoff record must be an object");
@@ -437,5 +601,8 @@ export function parseHandoffRecord(raw: unknown): HandoffRecord {
     transfer: parseTransfer(raw.transfer),
     target: parseTarget(raw.target),
     payload: parsePayload(raw.payload),
+    ...(raw.execution !== undefined && raw.execution !== null
+      ? { execution: parseExecution(raw.execution) }
+      : {}),
   };
 }
