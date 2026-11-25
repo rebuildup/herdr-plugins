@@ -29,6 +29,10 @@ bun run src/cli.ts settings get <id> [key]
 bun run src/cli.ts settings set <id> <key> <value>
 bun run src/cli.ts settings unset <id> <key>
 bun run src/cli.ts scripts list <project|repo> [--repo PATH]
+bun run src/cli.ts scripts run <project> <name> [--repo PATH]
+bun run src/cli.ts scripts stop <run-id|project>
+bun run src/cli.ts scripts results [project]
+bun run src/cli.ts scripts logs <run-id>
 bun run src/cli.ts repos list <project>
 bun run src/cli.ts repos add <project> --path DIR [--path DIR]...
 bun run src/cli.ts repos remove <project> --path DIR [--path DIR]...
@@ -40,7 +44,8 @@ bun run src/cli.ts repos remove <project> --path DIR [--path DIR]...
 - Mutations are explicit-argument CLI invocations only — never manifest
   actions. `capability` reports `read_only: false` and
   `mutation_commands: ["register","update","repos add","repos remove",
-  "archive","unarchive","pin","unpin","settings set","settings unset"]`.
+  "archive","unarchive","pin","unpin","settings set","settings unset",
+  "scripts run","scripts stop"]`.
   Read outputs are unchanged; script commands (#50–#53) extend v1
   additively.
 
@@ -307,8 +312,139 @@ malformed JSON or schema violations are structured errors.
 
 **Trust boundary:** a repository's `t3.json` is trusted because the
 user registered or explicitly operates that repository — its script
-commands run with the user's privileges. This command only *lists*
-definitions; execution permission is the runner's concern (#53).
+commands run with the user's privileges. `scripts list` only *lists*
+definitions; `scripts run` executes them (below) and inherits the same
+trust boundary: running a script is arbitrary code execution with the
+user's privileges inside a visible herdr pane.
+
+## `scripts run <project> <name> [--repo PATH]`
+
+Executes a resolved script definition in a **dedicated herdr execution
+surface** created via the Socket API (ADR-0010): `workspace.create
+{cwd: repoRoot, label}` → the workspace's `root_pane` receives the
+command via `pane.send_input`, and completion is awaited with
+`pane.wait_for_output` on a per-run output marker. The plugin never
+injects input into panes it did not create.
+
+- `<project>` must be a registered project id. `<name>` matches a
+  resolved script's `name` or `id`; zero matches fail `unknown_script`,
+  multiple fail `ambiguous_script`.
+- **Repo selection is explicit.** `--repo PATH` must canonicalize to a
+  registered member root (`repo_not_found` otherwise). Without `--repo`:
+  a single-repo project uses that repo; a multi-repo project FAILS
+  `repo_ambiguous` (carrying the member `repos` list) — the runner never
+  silently picks the first repo.
+- Script definitions resolve against the **selected repo's** `t3.json`
+  plus the project's settings/env/builtin layers (same machinery as
+  `scripts list`).
+- The command is injected as ONE `pane.send_input` line:
+  `<command>; echo "__HERDR_DONE_<run-id>__=$?"`. Commands containing
+  newlines or longer than 4000 chars are first written to an
+  executable `/bin/sh` script file under the plugin state dir
+  (`runs/<run-id>.sh`) and invoked by path — a documented POSIX-sh
+  limitation for that edge case.
+- **Completion:** `pane.wait_for_output` (`source:"recent_unwrapped"`,
+  regex `__HERDR_DONE_<run-id>__=(-?\d+)`) blocks up to `runTimeoutMs`
+  (plugin config `config.json`, default 600000 ms = 10 min). The echoed
+  input line cannot match (it contains literal `$?`), and the run-id
+  nonce prevents cross-run collisions. The exit code is parsed from the
+  marker digits ONLY — never inferred from pane text, process liveness,
+  or pane close events.
+- **Results:** marker exit 0 → `success`; non-zero → `failed` (with
+  `exit_code`). Wait timeout → the run stays `running`, the pane is left
+  alone (never killed implicitly), and `scripts results`/`logs`
+  re-check liveness lazily. Pane vanished before the marker →
+  `unknown` — never fabricated success.
+- A run record is persisted BEFORE the command is injected, so a crash
+  mid-run still leaves an honest trail.
+- `pane.report_metadata` projects a display-only `script_<name>` token
+  (`running`/`success`/`failed`/`stopped`/`unknown`) on the execution
+  pane; projection failures never fail the run.
+
+Response: `{contract, command:"scripts run", run: ScriptRun,
+generated_at}`.
+
+### `ScriptRun` record
+
+Persisted at `<stateDir>/runs.json` (single-writer lock + atomic
+rename, dedicated `runs.json.lock`):
+
+```json
+{
+  "run_id": "run-mj3k2x-9f3ab1",
+  "project_id": "my-app",
+  "script": { "id": "dev", "name": "Dev server", "command": "bun run dev", "source": "t3.json" },
+  "repo": { "root": "/abs/repo", "remote": "github.com/org/repo" },
+  "pane_id": "wKN:p1",
+  "workspace_id": "wKN",
+  "tab_id": "wKN:t1",
+  "cwd": "/abs/repo",
+  "command_line": "bun run dev; echo \"__HERDR_DONE_run-…__=$?\"",
+  "script_path": null,
+  "started_at": "…",
+  "finished_at": "…",
+  "exit_code": 0,
+  "result": "success",
+  "log_path": "runs/run-mj3k2x-9f3ab1.log",
+  "error": null
+}
+```
+
+`result` ∈ `running | success | failed | stopped | unknown`.
+`running` means the marker was not observed within the wait — it does
+NOT assert the process is alive. `log_path`/`script_path` are relative
+to the plugin state dir (`null` when absent).
+
+## `scripts stop <run-id|project>`
+
+Stops runs owned by this plugin. The target resolves to run records: an
+exact `run_id`, a unique `run_id` prefix (`ambiguous_run` on collision),
+or a project id (all its `running` runs; `run_not_found` when nothing
+matches). For each `running` run the plugin sends `pane.send_keys
+["ctrl+c"]` to the RECORDED `pane_id` only, waits `stopGraceMs` (config,
+default 2000), captures a bounded log tail, then `pane.close`. The run
+is recorded `stopped`. Already-finished runs are reported
+`already_finished`; a vanished pane is recorded `unknown`. There is no
+way to address any pane the plugin did not create and record.
+
+Response: `{contract, command:"scripts stop", outcomes:[{run, action}],
+generated_at}` where `action` ∈ `stopped | already_finished |
+pane_gone`. Fails `no_running_runs` when nothing was actually stopped.
+
+## `scripts results [project]`
+
+Lists run records newest-first, optionally filtered by project id
+(`project_not_found` for unknown ids). `running` records are reconciled
+lazily: `pane.get` is re-checked per running run and a vanished pane
+flips the record to `unknown` (persisted). Socket failures leave the
+record `running` — liveness is unknown, not fabricated. One socket call
+per running run; bounded by the small number of concurrent runs.
+
+Response: `{contract, command:"scripts results", project_id?, runs:
+ScriptRun[], generated_at}`.
+
+## `scripts logs <run-id>`
+
+Returns the bounded log for one run (`run_id` exact or unique prefix,
+`run_not_found`/`ambiguous_run` otherwise). On completion the runner
+stores the pane read tail — capped at `runLogMaxBytes` (config, default
+65536 bytes, tail kept with a truncation marker) at
+`<stateDir>/runs/<run-id>.log`. When no log exists yet and the pane is
+still alive, a bounded `pane.read` (last 500 lines) is captured on
+demand. A `running` run whose pane is gone is marked `unknown`.
+
+Response: `{contract, command:"scripts logs", run_id, run, log_path,
+log, generated_at}` (`log` may be `null`).
+
+### Auto triggers — not implemented (upstream gap)
+
+`t3.json` fields `runOnWorktreeCreate`/`runOnSettle`/`stopOnSettle` are
+resolved and listed but have **no execution mapping** in this release:
+herdr's `events.subscribe` exposes `worktree.*` and pane lifecycle
+events, but there is no faithful equivalent of upstream's
+worktree-creation/settle semantics to trigger on. Recorded as an
+upstream gap for a follow-up Issue; only manual `scripts run`/`stop`
+ship here. #32 automations own scheduled/event-driven execution.
 
 ## Errors
 
@@ -316,5 +452,8 @@ definitions; execution permission is the runner's concern (#53).
 `git_error`, `not_a_repo`, `bare_repo`, plus `project_not_found`,
 `project_exists`, `repo_already_registered`, `repo_not_found`,
 `invalid_project_id`, `settings_key_not_allowed`, `t3json_invalid`,
-`invalid_script_list`, `unknown_script`, `no_repos`. Errors may carry
-extra fields (`project_id`, `key`, `root`, `path`, `reason`, `layer`).
+`invalid_script_list`, `unknown_script`, `no_repos`, plus the script
+runner kinds `repo_ambiguous`, `ambiguous_script`, `ambiguous_run`,
+`run_not_found`, `no_running_runs`, `script_run_error`. Errors may
+carry extra fields (`project_id`, `key`, `root`, `repos`, `name`,
+`matches`, `run_id`, `target`, `path`, `reason`, `layer`).
