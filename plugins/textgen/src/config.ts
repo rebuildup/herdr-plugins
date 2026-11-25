@@ -41,6 +41,32 @@ export interface AgentProviderConfig {
   enabled?: boolean;
 }
 
+/**
+ * Pre-execution guards for costly agent-pane generation (Issue #109).
+ * All checks are cheap and read-only; a guard that cannot answer
+ * degrades to a warning, never a silent pass or a hard failure.
+ */
+export interface QuotaGuardConfig {
+  /** When true, agent-path generation probes usage-quota signals first. */
+  enabled: boolean;
+  /** Explicit rebuildup.usage plugin root; default resolves like gitPluginRoot. */
+  usagePluginRoot?: string;
+  /** Block generation when any reported window is at/above this percent. */
+  maxUsedPercent: number;
+  /** Per-probe timeout (ms). */
+  timeoutMs: number;
+}
+
+export interface TextgenGuardsConfig {
+  /**
+   * Opt-in required for tasks flagged `requiresOptIn` in the registry
+   * (currently `review_guide` — multi-step read-only investigation bills
+   * against the provider subscription like any agent turn).
+   */
+  expensiveTaskOptIn: boolean;
+  quota: QuotaGuardConfig;
+}
+
 export interface TextgenConfig {
   defaultProvider?: string;
   defaultModel?: string;
@@ -54,6 +80,7 @@ export interface TextgenConfig {
     promptTimeoutMs: number;
     readLines: number;
   };
+  guards: TextgenGuardsConfig;
   limits: TextgenLimits;
 }
 
@@ -156,9 +183,12 @@ export function normalizeConfig(raw: unknown): {
 
   const agentRaw = isRecord(root.agent) ? root.agent : {};
   const limitsRaw = isRecord(root.limits) ? root.limits : {};
+  const guardsRaw = isRecord(root.guards) ? root.guards : {};
+  const quotaRaw = isRecord(guardsRaw.quota) ? guardsRaw.quota : {};
   const defaultProvider = str(root.defaultProvider);
   const defaultModel = str(root.defaultModel);
   const gitPluginRoot = str(root.gitPluginRoot);
+  const usagePluginRoot = str(quotaRaw.usagePluginRoot);
 
   return {
     config: {
@@ -181,6 +211,15 @@ export function normalizeConfig(raw: unknown): {
           3_600_000,
         ),
         readLines: num(agentRaw.readLines, DEFAULT_AGENT_TIMEOUTS.readLines, 50, 5_000),
+      },
+      guards: {
+        expensiveTaskOptIn: guardsRaw.expensiveTaskOptIn === true,
+        quota: {
+          enabled: quotaRaw.enabled === true,
+          ...(usagePluginRoot !== undefined ? { usagePluginRoot } : {}),
+          maxUsedPercent: num(quotaRaw.maxUsedPercent, 95, 1, 100),
+          timeoutMs: num(quotaRaw.timeoutMs, 10_000, 1_000, 120_000),
+        },
       },
       limits: {
         maxInputChars: num(limitsRaw.maxInputChars, DEFAULT_LIMITS.maxInputChars, 1_000, 2_000_000),
@@ -277,6 +316,7 @@ export function redactConfig(config: TextgenConfig): Record<string, unknown> {
     })),
     agentProviders: config.agentProviders,
     agent: config.agent,
+    guards: config.guards,
     limits: config.limits,
     credential_boundary: "docs/adr/0018-textgen-api-credential-boundary.md",
   };

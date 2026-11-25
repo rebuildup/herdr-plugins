@@ -1,4 +1,4 @@
-# Spec: rebuildup.textgen (Issue #107 T1, #108 T2; parent #29)
+# Spec: rebuildup.textgen (Issue #107 T1, #108 T2, #109 T3; parent #29)
 
 Status: release-0-6-0 candidate. Contract: `herdr-plugins.textgen/v1`
 (`docs/contracts/textgen-v1.md`). Decisions: ADR-0017 (execution path),
@@ -40,6 +40,18 @@ CLI (cli.ts)
   `rebuildup.git` plugin root (override → sibling → `herdr plugin
   list`) and gathers task inputs through its read-only git-v1 CLI;
   probes repository convention files at the reported repo root.
+- `pluginroot.ts` — shared sibling-plugin root resolution + CLI
+  invocation (env-scrubbed, plugin dirs pinned); used by gitcontext
+  and the usage-quota guard.
+- `guards.ts` — pre-execution guards (#109): expensive-task opt-in,
+  agent-kind availability vs herdr manifests, optional usage-quota
+  probe. Runs before any pane is spawned.
+- `quota.ts` — read-only `rebuildup.usage` `quota` probe (soft
+  dependency; every failure degrades to a warning).
+- `watch.ts` — `watch-next-prompt` engine (#109): subscribes to
+  `pane.agent_status_changed`, triggers `next_prompt` generation on
+  observed `working → idle|done` transitions, records the result as
+  pane metadata + JSONL events.
 - `providers.ts` — provider refs (`agent:`, `api:`, bare), defaults,
   manifests-aware resolution.
 
@@ -88,6 +100,12 @@ Real-herdr verification (isolated session `verify107`, codex agent):
 fixed three races/format issues: pane shell-readiness and agent
 name-registration retries, TUI-decorated marker extraction, and agent
 name charset (`_` → `-`).
+
+Agent-only tasks (`review_guide`, `next_prompt`) default their prompt
+wait to the per-task `defaultTimeoutMs` (600 s / 120 s) rather than
+the generic `agent.promptTimeoutMs`; `--timeout` overrides. Every
+invocation still runs create → start → prompt → read → close with
+cleanup in `finally` — interrupt/timeout honesty is unchanged (#109).
 
 ### api (ADR-0018)
 
@@ -177,9 +195,43 @@ preview command) feeds the three git tasks from a pane's repository:
   repo_root, branch}` without provider invocation; `capability` reports
   `integrations.git` (`resolved`/`unavailable`).
 
+## Agent-task guards and watch (#109, T3)
+
+`review_guide` and `next_prompt` run entirely on the agent-pane path
+(API generators are rejected by the task×path matrix). Before any pane
+is spawned, `generate` runs `checkGenerationGuards`:
+
+- **Opt-in**: `review_guide` carries `requiresOptIn` in the registry —
+  multi-step read-only investigation is the largest subscription cost.
+  Requires `guards.expensiveTaskOptIn` in config.json or
+  `--allow-expensive`; otherwise `task_not_opted_in` (policy) with zero
+  transport calls.
+- **Availability**: with reachable `server.agent_manifests`, the
+  resolved kind must be listed → `provider_unavailable`; unreachable →
+  `agent_availability_unverified` warning (fail-open; `agent.start`
+  remains the authority).
+- **Quota (opt-in)**: `guards.quota.enabled` probes
+  `rebuildup.usage quota --provider <kind>` via the sibling-plugin CLI
+  contract. `used_percent` ≥ `maxUsedPercent` (default 95) →
+  `quota_exceeded`; plugin missing / non-zero exit / contract mismatch /
+  non-`ok` status → `quota_check_unavailable` warning. Soft dependency —
+  never hard-required, never consulted on the api path.
+
+`watch-next-prompt --pane <id>` subscribes to
+`pane.agent_status_changed` (`events.subscribe`) and generates one
+`next_prompt` per observed `working → idle|done` transition: context is
+the pane's recent scrollback (`pane.read`, tail-capped to the input
+budget) or a static `--input` payload; the validated result is recorded
+as pane metadata `textgen_next_prompt` and emitted as JSONL
+(`next_prompt.triggered|generated|skipped|error`, `watch.stopped`).
+Generations are sequential, debounced (`--debounce-ms`, default 5 s),
+bounded by `--max-triggers`/`--once`/per-task timeout, and each uses a
+dedicated workspace cleaned up by the agent executor. Composer/
+notification UI stays with the caller (herdr-t3). Only observed
+transitions trigger — statuses are seeded from `session.snapshot` and
+a missed `working` edge never fires.
+
 ## Downstream (not this ticket)
 
-- #109 T3: `review_guide`/`next_prompt` agent-pane flows, timeout/
-  interrupt/quota options, `agent_status` transition triggers.
 - #110 T4: contract finalization, real-provider verification matrix,
   billing-safeguard confirmation, ledger update.

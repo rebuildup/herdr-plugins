@@ -11,11 +11,13 @@
 import { type AgentTransport, executeAgentPrompt } from "./agent";
 import { executeApiPrompt, type FetchImpl } from "./api";
 import type { TextgenConfig } from "./config";
+import { checkGenerationGuards } from "./guards";
 import { validateTaskInput } from "./input";
 import { CONTRACT, type GenerationResult, type TaskKind, TextgenError, taskSpec } from "./model";
 import { validateGeneratedOutput } from "./output";
 import { buildPrompt } from "./prompts";
 import { type AgentManifestEntry, resolveProvider } from "./providers";
+import type { QuotaProbe } from "./quota";
 
 export interface GenerateOptions {
   task: TaskKind;
@@ -36,6 +38,13 @@ export interface GenerateOptions {
   configDir?: string | undefined;
   /** Per-call timeout override (ms) for the provider wait/request. */
   timeoutMs?: number | undefined;
+  /** Per-call opt-in for `requiresOptIn` tasks (e.g. `--allow-expensive`). */
+  allowExpensive?: boolean | undefined;
+  /** Injectable usage-quota probe (tests); default = usage plugin CLI. */
+  quotaProbe?: QuotaProbe | undefined;
+  /** Passed to the default quota probe for session/socket routing. */
+  session?: string | undefined;
+  socketPath?: string | undefined;
 }
 
 export interface GenerateSuccess {
@@ -68,6 +77,21 @@ export async function generate(options: GenerateOptions): Promise<GenerateSucces
     config: options.config,
     ...(options.manifests !== undefined ? { manifests: options.manifests } : {}),
   });
+
+  // Cheap pre-execution guards (Issue #109): expensive-task opt-in,
+  // agent-kind availability vs herdr manifests, optional usage-quota
+  // probe. All run before any pane is spawned; failures are structured.
+  const guard = await checkGenerationGuards({
+    spec,
+    provider,
+    config: options.config,
+    ...(options.manifests !== undefined ? { manifests: options.manifests } : {}),
+    ...(options.allowExpensive !== undefined ? { allowExpensive: options.allowExpensive } : {}),
+    ...(options.quotaProbe !== undefined ? { quotaProbe: options.quotaProbe } : {}),
+    ...(options.session !== undefined ? { session: options.session } : {}),
+    ...(options.socketPath !== undefined ? { socketPath: options.socketPath } : {}),
+  });
+  warnings.push(...guard.warnings);
 
   // Model resolution: explicit --model > provider default > config default.
   const model =
@@ -106,7 +130,15 @@ export async function generate(options: GenerateOptions): Promise<GenerateSucces
       ...(provider.agentArgs !== undefined ? { args: provider.agentArgs } : {}),
       prompt,
       startupTimeoutMs: options.config.agent.startupTimeoutMs,
-      promptTimeoutMs: options.timeoutMs ?? options.config.agent.promptTimeoutMs,
+      // Agent-only tasks (review_guide/next_prompt) use their per-task
+      // default timeout — review_guide's multi-step investigation needs
+      // far longer than the generic agent prompt wait. `--timeout`
+      // always wins; agent+api tasks keep the config default.
+      promptTimeoutMs:
+        options.timeoutMs ??
+        (spec.paths.length === 1 && spec.paths[0] === "agent"
+          ? spec.defaultTimeoutMs
+          : options.config.agent.promptTimeoutMs),
       readLines: options.config.agent.readLines,
       ...(cwd !== undefined ? { cwd } : {}),
       label: `textgen:${spec.kind}`,

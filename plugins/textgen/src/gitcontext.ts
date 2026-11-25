@@ -20,11 +20,15 @@
  * git-v1 `status` — that is the target repository, not plugin state.
  */
 
-import { spawn } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
-import { pluginDirs } from "../../../packages/herdr-client/src/index";
 import { type TaskKind, TextgenError } from "./model";
+import {
+  type PluginCliCallOptions,
+  type PluginRootResolution,
+  resolvePluginRoot,
+  runPluginCli,
+} from "./pluginroot";
 
 export const GIT_PLUGIN_ID = "rebuildup.git";
 export const GIT_CONTRACT = "herdr-plugins.git/v1";
@@ -40,177 +44,50 @@ export function isGitTask(kind: TaskKind): boolean {
   return GIT_TASKS.has(kind);
 }
 
-/** This plugin's own root (plugins/textgen). */
-function pluginRoot(): string {
-  const envRoot = process.env.HERDR_PLUGIN_ROOT;
-  if (envRoot && envRoot !== "") return envRoot;
-  // src/gitcontext.ts → plugins/textgen
-  return path.resolve(import.meta.dir, "..");
-}
-
-export type GitRootResolution =
-  | { ok: true; root: string; via: "override" | "sibling" | "herdr-plugin-list" }
-  | { ok: false; error: string };
-
-async function isGitPluginRoot(dir: string): Promise<boolean> {
-  try {
-    const tomlPath = path.join(dir, "herdr-plugin.toml");
-    const toml = await stat(tomlPath);
-    if (!toml.isFile()) return false;
-    const cli = await stat(path.join(dir, "src", "cli.ts"));
-    if (!cli.isFile()) return false;
-    const { readFile: rf } = await import("node:fs/promises");
-    const text = await rf(tomlPath, "utf8");
-    return text.includes(`id = "${GIT_PLUGIN_ID}"`);
-  } catch {
-    return false;
-  }
-}
-
-/** `herdr plugin list --json` → plugin_root for rebuildup.git. */
-async function discoverViaHerdr(): Promise<string | null> {
-  const herdrBin = process.env.HERDR_BIN_PATH || "herdr";
-  const stdout = await new Promise<string | null>((resolve) => {
-    const child = spawn(herdrBin, ["plugin", "list", "--json"], {
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 15_000,
-    });
-    let out = "";
-    child.stdout.on("data", (chunk: Buffer) => {
-      out += chunk.toString("utf8");
-    });
-    child.on("error", () => resolve(null));
-    child.on("close", (code) => resolve(code === 0 ? out : null));
-  });
-  if (stdout === null) return null;
-  try {
-    const parsed = JSON.parse(stdout) as unknown;
-    const list = Array.isArray(parsed)
-      ? parsed
-      : ((parsed as { plugins?: unknown[] }).plugins ?? []);
-    for (const entry of list) {
-      if (typeof entry !== "object" || entry === null) continue;
-      const e = entry as Record<string, unknown>;
-      const id = e.plugin_id ?? e.id;
-      const root = e.plugin_root ?? e.root;
-      if (id === GIT_PLUGIN_ID && typeof root === "string" && root !== "") {
-        return root;
-      }
-    }
-  } catch {
-    return null;
-  }
-  return null;
-}
+export type GitRootResolution = PluginRootResolution;
 
 /**
  * Resolve the rebuildup.git plugin root. Never throws — failures are
- * structured for the CLI error envelope.
+ * structured for the CLI error envelope. Discovery rules live in
+ * pluginroot.ts (shared with the usage-quota guard, #109).
  */
 export async function resolveGitPluginRoot(explicit?: string): Promise<GitRootResolution> {
-  if (explicit !== undefined && explicit !== "") {
-    const candidate = path.resolve(explicit);
-    if (await isGitPluginRoot(candidate)) {
-      return { ok: true, root: candidate, via: "override" };
-    }
+  const resolved = await resolvePluginRoot(GIT_PLUGIN_ID, explicit);
+  if (!resolved.ok && explicit !== undefined && explicit !== "") {
     return {
       ok: false,
-      error: `git plugin root ${candidate} is not a ${GIT_PLUGIN_ID} plugin`,
+      error: `git plugin root ${path.resolve(explicit)} is not a ${GIT_PLUGIN_ID} plugin`,
     };
   }
-  const sibling = path.resolve(pluginRoot(), "..", "git");
-  if (await isGitPluginRoot(sibling)) {
-    return { ok: true, root: sibling, via: "sibling" };
+  if (!resolved.ok) {
+    return {
+      ok: false,
+      error:
+        `${GIT_PLUGIN_ID} plugin not found; install it or pass --git-root / set ` +
+        "gitPluginRoot in config.json (resolution: override → sibling → herdr plugin list)",
+    };
   }
-  const discovered = await discoverViaHerdr();
-  if (discovered !== null && (await isGitPluginRoot(discovered))) {
-    return { ok: true, root: discovered, via: "herdr-plugin-list" };
-  }
-  return {
-    ok: false,
-    error:
-      `${GIT_PLUGIN_ID} plugin not found; install it or pass --git-root / set ` +
-      "gitPluginRoot in config.json (resolution: override → sibling → herdr plugin list)",
-  };
+  return resolved;
 }
 
 // --- git CLI invocation ---------------------------------------------------------
 
-export interface GitCallOptions {
-  session?: string | undefined;
-  socketPath?: string | undefined;
-  timeoutMs?: number | undefined;
-}
+export type GitCallOptions = PluginCliCallOptions;
 
-interface CliRunResult {
-  status: number;
-  stdout: string;
-  stderr: string;
-  json: Record<string, unknown> | null;
-}
+type CliRunResult = Awaited<ReturnType<typeof runPluginCli>>;
 
 /**
- * Run one read-only git-plugin CLI command. The child env is scrubbed of
- * this plugin's HERDR_PLUGIN_* values (they belong to rebuildup.textgen
- * and must never redirect the child's state resolution) and pinned to
- * the *git* plugin dirs, mirroring the usage→conversations pattern.
+ * Run one read-only git-plugin CLI command. Delegates to the shared
+ * sibling-plugin runner (pluginroot.ts): the child env is scrubbed of
+ * this plugin's HERDR_PLUGIN_* values and pinned to the *git* plugin
+ * dirs, mirroring the usage→conversations pattern.
  */
 export function runGitCli(
   root: string,
   args: string[],
   call: GitCallOptions,
 ): Promise<CliRunResult> {
-  const cliArgs = [path.join(root, "src", "cli.ts"), ...args];
-  if (call.session !== undefined) cliArgs.push("--session", call.session);
-  if (call.socketPath !== undefined) cliArgs.push("--socket", call.socketPath);
-  if (call.timeoutMs !== undefined) cliArgs.push("--timeout", String(call.timeoutMs));
-
-  const gitDirs = pluginDirs(GIT_PLUGIN_ID);
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value === undefined) continue;
-    if (
-      key === "HERDR_PLUGIN_STATE_DIR" ||
-      key === "HERDR_PLUGIN_CONFIG_DIR" ||
-      key === "HERDR_PLUGIN_ID" ||
-      key === "HERDR_PLUGIN_ROOT" ||
-      key === "HERDR_PLUGIN_CONTEXT_JSON" ||
-      key === "HERDR_PANE_ID"
-    ) {
-      continue;
-    }
-    env[key] = value;
-  }
-  env.HERDR_PLUGIN_STATE_DIR = gitDirs.stateDir;
-  env.HERDR_PLUGIN_CONFIG_DIR = gitDirs.configDir;
-  env.HERDR_PLUGIN_ID = GIT_PLUGIN_ID;
-
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, cliArgs, {
-      cwd: root,
-      env,
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: (call.timeoutMs ?? 30_000) + 15_000,
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString("utf8");
-    });
-    child.stderr.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString("utf8");
-    });
-    child.on("error", reject);
-    child.on("close", (code) => {
-      let json: Record<string, unknown> | null = null;
-      try {
-        json = JSON.parse(stdout) as Record<string, unknown>;
-      } catch {
-        /* non-JSON output */
-      }
-      resolve({ status: code ?? -1, stdout, stderr, json });
-    });
-  });
+  return runPluginCli(root, GIT_PLUGIN_ID, args, call);
 }
 
 function gitFail(message: string, kind = "git_error"): never {

@@ -38,6 +38,10 @@ function baseConfig(overrides?: Partial<TextgenConfig>): TextgenConfig {
     apiGenerators: [],
     agentProviders: {},
     agent: { startupTimeoutMs: 5_000, promptTimeoutMs: 5_000, readLines: 100 },
+    guards: {
+      expensiveTaskOptIn: false,
+      quota: { enabled: false, maxUsedPercent: 95, timeoutMs: 10_000 },
+    },
     limits: { maxInputChars: 200_000 },
     ...overrides,
   };

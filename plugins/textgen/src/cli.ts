@@ -4,14 +4,19 @@
  * Single JSON document on stdout; diagnostics on stderr.
  * Exit 0 success, 1 handled error, 2 usage.
  *
- * Commands: capability / generate / config. Generation is strictly
+ * Commands: capability / generate / git-context / watch-next-prompt /
+ * config. Generation is strictly
  * separated from execution — the plugin returns validated candidate
  * text; adopting it (git, forge, composer) is the caller's job, and a
  * manual path always exists (Issue #107, ADR-0017/0018).
  */
 
 import { readFile } from "node:fs/promises";
-import type { CallOptions } from "../../../packages/herdr-client/src/index";
+import {
+  type CallOptions,
+  reportPaneMetadata,
+  subscribeAgentEvents,
+} from "../../../packages/herdr-client/src/index";
 import { type AgentTransport, socketTransport } from "./agent";
 import {
   configFilePath,
@@ -41,6 +46,7 @@ import {
   taskSpec,
 } from "./model";
 import { type AgentManifestEntry, KNOWN_AGENT_KINDS } from "./providers";
+import { watchNextPrompt } from "./watch";
 
 interface CliOptions {
   command: string;
@@ -57,6 +63,12 @@ interface CliOptions {
   cwd: string | undefined;
   gitPane: string | undefined;
   gitRoot: string | undefined;
+  pane: string | undefined;
+  once: boolean;
+  maxTriggers: number | undefined;
+  debounceMs: number | undefined;
+  readLines: number | undefined;
+  allowExpensive: boolean;
 }
 
 function parseArgs(argv: string[]): CliOptions {
@@ -77,6 +89,12 @@ function parseArgs(argv: string[]): CliOptions {
     cwd: undefined,
     gitPane: undefined,
     gitRoot: undefined,
+    pane: undefined,
+    once: false,
+    maxTriggers: undefined,
+    debounceMs: undefined,
+    readLines: undefined,
+    allowExpensive: false,
   };
   const rest: string[] = [];
   for (let i = 0; i < args.length; i += 1) {
@@ -96,7 +114,19 @@ function parseArgs(argv: string[]): CliOptions {
     else if (arg === "--cwd") options.cwd = next();
     else if (arg === "--git-pane") options.gitPane = next();
     else if (arg === "--git-root") options.gitRoot = next();
-    else rest.push(arg);
+    else if (arg === "--pane") options.pane = next();
+    else if (arg === "--once") options.once = true;
+    else if (arg === "--allow-expensive") options.allowExpensive = true;
+    else if (arg === "--max-triggers") {
+      const value = Number(next());
+      if (Number.isFinite(value) && value > 0) options.maxTriggers = Math.floor(value);
+    } else if (arg === "--debounce-ms") {
+      const value = Number(next());
+      if (Number.isFinite(value) && value >= 0) options.debounceMs = Math.floor(value);
+    } else if (arg === "--read-lines") {
+      const value = Number(next());
+      if (Number.isFinite(value) && value > 0) options.readLines = Math.floor(value);
+    } else rest.push(arg);
   }
   options.args = rest;
   return options;
@@ -242,7 +272,23 @@ async function cmdCapability(options: CliOptions): Promise<void> {
       required_input: t.requiredInput,
       output: t.output,
       max_output_chars: t.maxOutputChars,
+      requires_opt_in: t.requiresOptIn === true,
+      ...(t.requiresOptIn === true
+        ? {
+            opt_in:
+              "guards.expensiveTaskOptIn in config.json or --allow-expensive; " +
+              "multi-step agent investigation bills like any agent turn",
+          }
+        : {}),
     })),
+    guards: {
+      expensive_task_opt_in: config.guards.expensiveTaskOptIn,
+      quota_check: {
+        enabled: config.guards.quota.enabled,
+        max_used_percent: config.guards.quota.maxUsedPercent,
+        provider: "rebuildup.usage quota (read-only, soft dependency)",
+      },
+    },
     providers: {
       agent: agentProviders,
       api: apiProviders,
@@ -255,7 +301,7 @@ async function cmdCapability(options: CliOptions): Promise<void> {
     agent_manifests: manifests === undefined ? "unreachable" : "queried",
     config: redactConfig(config),
     config_warnings: warnings,
-    commands: ["capability", "generate", "git-context", "config"],
+    commands: ["capability", "generate", "git-context", "watch-next-prompt", "config"],
     generated_at: now(),
   });
 }
@@ -268,6 +314,25 @@ async function readStdin(): Promise<string> {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
   }
   return Buffer.concat(chunks).toString("utf8");
+}
+
+/** Read the --input payload source: FILE, '-' (stdin), or piped stdin. */
+async function readInputText(options: CliOptions): Promise<string> {
+  if (options.inputFile !== undefined && options.inputFile !== "-") {
+    try {
+      return await readFile(options.inputFile, "utf8");
+    } catch (err) {
+      fail(
+        `cannot read --input file: ${err instanceof Error ? err.message : String(err)}`,
+        1,
+        "bad_request",
+      );
+    }
+  }
+  if (options.inputFile === "-" || !process.stdin.isTTY) {
+    return readStdin();
+  }
+  return "";
 }
 
 async function cmdGenerate(options: CliOptions): Promise<void> {
@@ -290,20 +355,7 @@ async function cmdGenerate(options: CliOptions): Promise<void> {
   // Input: --input FILE | --input - | stdin (when piped) | required error.
   // With --git-pane the payload may be empty: the git adapter supplies
   // the task fields and explicit input only overrides them.
-  let inputText = "";
-  if (options.inputFile !== undefined && options.inputFile !== "-") {
-    try {
-      inputText = await readFile(options.inputFile, "utf8");
-    } catch (err) {
-      fail(
-        `cannot read --input file: ${err instanceof Error ? err.message : String(err)}`,
-        1,
-        "bad_request",
-      );
-    }
-  } else if (options.inputFile === "-" || !process.stdin.isTTY) {
-    inputText = await readStdin();
-  }
+  const inputText = await readInputText(options);
   let rawInput: Record<string, unknown> =
     inputText.trim() === "" && gitPane !== null ? {} : parseInputJson(inputText, spec);
   // Validate early so boundary errors surface before any provider call.
@@ -356,6 +408,9 @@ async function cmdGenerate(options: CliOptions): Promise<void> {
         ? { cwd: gitContext.result.repoRoot }
         : {}),
     ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+    ...(options.allowExpensive ? { allowExpensive: true } : {}),
+    session: options.session,
+    socketPath: options.socketPath,
   });
   result.warnings.push(...configWarnings);
   if (gitContext !== null) {
@@ -442,6 +497,115 @@ async function cmdGitContext(options: CliOptions): Promise<void> {
     sources: collected.sources,
     warnings: collected.warnings,
     generated_at: now(),
+  });
+}
+
+// --- watch-next-prompt -----------------------------------------------------------
+
+function emitLine(payload: unknown): void {
+  process.stdout.write(`${JSON.stringify(payload)}\n`);
+}
+
+/**
+ * Long-running next-prompt watcher (Issue #109). Subscribes to
+ * `pane.agent_status_changed` for `--pane` and generates a `next_prompt`
+ * candidate on each observed `working → idle|done` transition — through
+ * the same agent-pane path as `generate`, so every generation is
+ * visible, bounded by timeouts, and cleaned up. The result is recorded
+ * as pane metadata (`textgen_next_prompt`) plus JSONL events on stdout;
+ * composer/notification UI is the caller's (herdr-t3) side.
+ *
+ * stdout is JSONL:
+ *   {"contract","type":"watch.started"|"next_prompt.triggered"|
+ *    "next_prompt.generated"|"next_prompt.skipped"|"next_prompt.error"|
+ *    "next_prompt.warning"|"watch.stopped", ...}
+ * Stops on SIGINT/SIGTERM, stream end, --once, or --max-triggers.
+ */
+async function cmdWatchNextPrompt(options: CliOptions): Promise<void> {
+  const paneId = options.pane;
+  if (paneId === undefined || paneId === "") {
+    usageError("watch-next-prompt requires --pane <pane_id>");
+  }
+  const spec = taskSpec("next_prompt");
+  const { config, warnings: configWarnings } = await loadConfigWithWarnings(options.configDir);
+  for (const w of configWarnings) {
+    emitLine({ contract: CONTRACT, type: "watch.warning", warning: w });
+  }
+
+  // Optional static input overrides the per-trigger pane read. When
+  // absent, each trigger supplies the pane's recent scrollback as
+  // `context` — the conversation the finished turn belongs to.
+  let staticInput: Record<string, unknown> | undefined;
+  const inputText = await readInputText(options);
+  if (inputText.trim() !== "") {
+    staticInput = parseInputJson(inputText, spec);
+  }
+
+  const transport = agentTransport(options);
+  const manifests = await fetchManifests(transport);
+  const call = callOptions(options);
+  const source = subscribeAgentEvents(call);
+
+  let signaled = false;
+  const stop = () => {
+    signaled = true;
+    source.close();
+  };
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
+
+  emitLine({
+    contract: CONTRACT,
+    type: "watch.started",
+    pane_id: paneId,
+    at: now(),
+  });
+
+  const summary = await watchNextPrompt(
+    source,
+    {
+      paneId,
+      config,
+      ...(options.provider !== undefined ? { provider: options.provider } : {}),
+      ...(options.model !== undefined ? { model: options.model } : {}),
+      ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+      ...(manifests !== undefined ? { manifests } : {}),
+      ...(options.allowExpensive ? { allowExpensive: true } : {}),
+      ...(staticInput !== undefined ? { input: staticInput } : {}),
+      ...(options.maxTriggers !== undefined ? { maxTriggers: options.maxTriggers } : {}),
+      ...(options.debounceMs !== undefined ? { debounceMs: options.debounceMs } : {}),
+      ...(options.readLines !== undefined ? { readLines: options.readLines } : {}),
+      ...(options.once ? { once: true } : {}),
+      ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
+      session: options.session,
+      socketPath: options.socketPath,
+    },
+    {
+      transport,
+      generate: (genOptions) =>
+        generate({
+          ...genOptions,
+          agentTransport: transport,
+          ...(manifests !== undefined ? { manifests } : {}),
+          session: options.session,
+          socketPath: options.socketPath,
+        }),
+      reportMetadata: (pane, tokens) =>
+        reportPaneMetadata(pane, tokens, { ...call, source: PLUGIN_ID }),
+      emit: emitLine,
+    },
+  );
+  process.off("SIGINT", stop);
+  process.off("SIGTERM", stop);
+  if (signaled && summary.stopped === "stream_end") {
+    summary.stopped = "signal";
+  }
+
+  emitLine({
+    contract: CONTRACT,
+    type: "watch.stopped",
+    ...summary,
+    at: now(),
   });
 }
 
@@ -578,6 +742,9 @@ async function main(): Promise<void> {
       case "git-context":
         await cmdGitContext(options);
         return;
+      case "watch-next-prompt":
+        await cmdWatchNextPrompt(options);
+        return;
       case "config":
         await configSubcommand(options);
         return;
@@ -588,8 +755,10 @@ async function main(): Promise<void> {
           "rebuildup.textgen — herdr-plugins.textgen/v1\n" +
             "  capability\n" +
             "  generate --task <kind> [--provider <id>] [--model <m>] [--input <file|->] [--raw]\n" +
-            "          [--git-pane <pane>] [--git-root <dir>] [--cwd DIR]\n" +
+            "          [--git-pane <pane>] [--git-root <dir>] [--cwd DIR] [--allow-expensive]\n" +
             "  git-context --task <kind> --git-pane <pane> [--git-root <dir>]\n" +
+            "  watch-next-prompt --pane <pane> [--once] [--max-triggers N] [--debounce-ms MS]\n" +
+            "          [--input <file|->] [--provider <id>] [--model <m>] [--allow-expensive]\n" +
             "  config show | set-default-provider | set-default-model | add-api-generator | remove-api-generator\n" +
             "tasks: " +
             TASKS.map((t) => t.kind).join(", ") +

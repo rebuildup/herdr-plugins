@@ -2,7 +2,8 @@
 
 Text-generation CLI contract for the `rebuildup.textgen` herdr plugin
 (Issue #107, parent #29 T1; git/forge integration #108 T2;
-release-0-6-0). Same conventions as the other
+agent-task guards + next-prompt watch #109 T3; release-0-6-0). Same
+conventions as the other
 plugin contracts: single JSON document on stdout, diagnostics on
 stderr, exit 0 success / 1 handled error / 2 usage.
 
@@ -32,8 +33,15 @@ both are usable (subscription billing vs per-token API billing).
 | `branch_name` | agent, api | — (at least one of `change_summary`/`diff`/`instruction` recommended) | `string` slug (≤100 chars) |
 | `commit_message` | agent, api | `diff` | `string[]` candidates (≤5, `---`-separated or JSON array) |
 | `pr_content` | agent, api | — | `{title, body}` (JSON preferred; first-line-title fallback) |
-| `review_guide` | agent only | `target` | `string` markdown (≤20 000 chars) |
+| `review_guide` | agent only | `target` | `string` markdown (≤20 000 chars) — **requires opt-in** |
 | `next_prompt` | agent only | `context` | `string` (≤2 000 chars) |
+
+`review_guide` is flagged `requires_opt_in`: it runs a multi-step
+read-only investigation inside the agent pane, the largest
+subscription cost of any task. It fails with `task_not_opted_in`
+(`policy`) unless `guards.expensiveTaskOptIn` is `true` in config.json
+or the caller passes `--allow-expensive`. `capability` reports
+`requires_opt_in` per task and a `guards` section.
 
 `pr_content` also accepts the optional input field `pr_context` — a JSON
 string describing an existing forge PR (number/title/state/url/body
@@ -141,6 +149,66 @@ fields before generating.
 (`resolved` with `plugin_root`/`resolved_via`, or `unavailable` with a
 reason) and lists `git-context` in `commands`.
 
+## Pre-execution guards (#109)
+
+Before any agent pane is spawned, `generate` runs cheap read-only
+checks (agent path only, after provider resolution):
+
+1. **Opt-in** — `requires_opt_in` tasks need `guards.expensiveTaskOptIn`
+   or `--allow-expensive` → `task_not_opted_in`.
+2. **Availability** — when `server.agent_manifests` was reachable, the
+   resolved kind must be listed → `provider_unavailable`; when
+   unreachable the call proceeds with an `agent_availability_unverified`
+   warning (`agent.start` stays the authority).
+3. **Quota (opt-in)** — `guards.quota.enabled` probes
+   `rebuildup.usage`'s read-only `quota --provider <kind>` command
+   (`herdr-plugins.usage/v1`, sibling-plugin CLI pattern). A reported
+   window `used_percent` ≥ `guards.quota.maxUsedPercent` (default 95)
+   blocks with `quota_exceeded`; plugin missing, non-zero exit, contract
+   mismatch, or non-`ok` provider status all degrade to a
+   `quota_check_unavailable` warning — the usage plugin is a soft
+   dependency, never required. API-path generation never probes.
+
+Agent-only tasks also default their prompt wait to the per-task
+`defaultTimeoutMs` (`review_guide` 600 s, `next_prompt` 120 s) instead
+of the generic `agent.promptTimeoutMs`; `--timeout` always wins.
+
+### `watch-next-prompt`
+
+```bash
+bun run src/cli.ts watch-next-prompt --pane <pane_id> \
+  [--once] [--max-triggers N] [--debounce-ms MS] [--read-lines N] \
+  [--input <file|->] [--provider <id>] [--model <m>] [--allow-expensive] \
+  [--session NAME] [--socket PATH] [--config-dir DIR]
+```
+
+Long-running watcher: subscribes to `pane.agent_status_changed` and, on
+an observed `working → idle|done` transition of `--pane`, generates one
+`next_prompt` candidate through the same agent-pane path (dedicated
+workspace → prompt → read → markers → cleanup). Context is the pane's
+recent scrollback (`pane.read`, `--read-lines`/`agent.readLines`,
+tail-capped to `limits.maxInputChars`) unless `--input` supplies a
+static `{context, instruction?}` payload.
+
+stdout is JSONL: `watch.started`, `next_prompt.triggered`,
+`next_prompt.generated` (carries `result`, `provider`, `elapsed_ms`),
+`next_prompt.skipped` (`reason:"debounce"`), `next_prompt.error`
+(`stage: "context"|"generate"`, structured `code`/`kind`/`details`),
+`next_prompt.warning`, `watch.stopped` (`stopped: signal|stream_end|
+once|max_triggers` + trigger counters). Generations are sequential, debounced
+(`--debounce-ms`, default 5000), and per-trigger failures never kill
+the watch. On success the prompt is recorded as pane metadata token
+`textgen_next_prompt` (source `rebuildup.textgen`) — presenting it in
+the composer is the caller's/herdr-t3's job. Stops on SIGINT/SIGTERM
+(subscription closed; an in-flight generation finishes within its own
+timeout and its workspace is still cleaned up), stream end, `--once`,
+or `--max-triggers`.
+
+Only *observed* `working → idle|done` transitions trigger — the plugin
+never infers turn boundaries from pane text, and a watcher that missed
+the `working` edge (e.g. attached mid-turn via an unseeded snapshot)
+does not fire.
+
 Success payload:
 
 ```json
@@ -178,6 +246,9 @@ message, ...details}}`):
 | `api_request_failed` / `api_bad_response` | `provider_error` | HTTP/parse failures (status only, never bodies) |
 | `output_empty` / `output_too_long` / `output_control_chars` / `output_unexpected_fence` / `output_invalid_json` / `output_unmarked` | `invalid_output` | output validation failures |
 | `git_unavailable` / `git_cli_failed` / `git_contract_mismatch` / `git_bare_repo` / `git_task_unsupported` | `unavailable`/`git_error`/`bad_request` | git-context adapter failures (#108) |
+| `task_not_opted_in` | `policy` | `requires_opt_in` task without opt-in (#109) |
+| `provider_unavailable` | `unavailable` | agent kind absent from herdr manifests (#109) |
+| `quota_exceeded` | `unavailable` | usage-quota threshold reached (#109) |
 
 ### `config`
 
@@ -210,6 +281,15 @@ endpoints, model names, provider ids, `gitPluginRoot`, and `keyEnv`
   ],
   "agentProviders": { "claude": { "args": ["--model", "…"], "enabled": true } },
   "agent": { "startupTimeoutMs": 60000, "promptTimeoutMs": 300000, "readLines": 400 },
+  "guards": {
+    "expensiveTaskOptIn": false,
+    "quota": {
+      "enabled": false,
+      "usagePluginRoot": "/path/to/plugins/usage",
+      "maxUsedPercent": 95,
+      "timeoutMs": 10000
+    }
+  },
   "limits": { "maxInputChars": 200000 }
 }
 ```
