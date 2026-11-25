@@ -48,6 +48,7 @@ import {
   canTransitionStatus,
   checkTransfer,
   type ExecutionAgent,
+  type ExecutionBundle,
   type ExecutionError,
   type ExecutionObservation,
   type ExecutionTarget,
@@ -55,7 +56,10 @@ import {
   type HandoffRecord,
   type HandoffStrategy,
   type PayloadRef,
+  type RemoteExecutionInfo,
 } from "./model";
+import type { RemoteProbe } from "./remote";
+import { buildPortableBundle, bundleFilePath, remoteInfoOf, writeBundle } from "./remote";
 import { buildResumeArgs, resumeInfo } from "./resume";
 import { loadState, updateState } from "./state";
 
@@ -266,7 +270,11 @@ function describeRef(ref: PayloadRef): string {
  * owning plugins' public CLIs — the payload itself stays references +
  * excerpt, never a transcript copy.
  */
-export function buildHandoffPrompt(record: HandoffRecord, decision: StrategyDecision): string {
+export function buildHandoffPrompt(
+  record: HandoffRecord,
+  decision: StrategyDecision,
+  context?: { remote?: { label: string; target: string; session: string }; bundlePath?: string },
+): string {
   const t = record.transfer;
   const lines: string[] = [
     `[herdr handoff ${record.id}]`,
@@ -304,6 +312,18 @@ export function buildHandoffPrompt(record: HandoffRecord, decision: StrategyDeci
       record.payload.excerpt.text,
     );
   }
+  if (context?.remote !== undefined) {
+    lines.push(
+      "",
+      `Cross-machine transfer: target host is remote machine "${context.remote.label}" (${context.remote.target}, herdr session ${context.remote.session}).`,
+      "Payload refs of kind conversation_session/checkpoint resolve against rebuildup.* plugin state on the SOURCE host; on this host they are external_ref — do not assume the owning plugins or their state exist here.",
+      ...(context.bundlePath !== undefined
+        ? [
+            `Portable bundle written at ${context.bundlePath} (contract herdr-plugins.handoff/bundle/v1).`,
+          ]
+        : []),
+    );
+  }
   const text = `${lines.join("\n")}\n`;
   if (text.length > MAX_PROMPT_CHARS) {
     throw new HandoffExecError(
@@ -330,6 +350,8 @@ export interface ExecuteFlags {
   cleanupOnFailure?: boolean | undefined;
   waitMs?: number | undefined;
   dryRun?: boolean | undefined;
+  /** Saved-machine selector for cross-machine execution (#105). */
+  remote?: string | undefined;
 }
 
 function paneBusy(snapshot: SessionSnapshot, paneId: string): boolean {
@@ -479,10 +501,20 @@ function errorMessage(err: unknown): string {
 // --- Execute --------------------------------------------------------------------
 
 export interface ExecuteDeps {
+  /** LOCAL transport: source-identity snapshot + same-host execution. */
   transport: HandoffTransport;
   /** `sessionKeyFor(options)` — gates staleness to the record's session. */
   sessionKey?: string | undefined;
   now?: (() => Date) | undefined;
+  /**
+   * Cross-machine execution (#105): a probed remote machine plus its
+   * transport. When present, target planning/creation/prompt/observation
+   * run against the REMOTE session snapshot+transport while the source
+   * staleness gate still reads the LOCAL snapshot. The caller (CLI)
+   * resolves and probes the machine BEFORE calling — a failed probe is
+   * a pre-mutation refusal, never a fabricated execution.
+   */
+  remote?: { probe: RemoteProbe; transport: HandoffTransport } | undefined;
 }
 
 export interface ExecuteResult {
@@ -492,6 +524,8 @@ export interface ExecuteResult {
   plan?: TargetPlan;
   decision?: ReturnType<typeof decideStrategy>;
   prompt_text?: string;
+  /** Present for remote execution: probed machine identity. */
+  remote?: RemoteExecutionInfo;
   /** Present for outcome "failed": the persisted execution error. */
   error?: ExecutionError;
 }
@@ -549,13 +583,70 @@ export async function executeHandoff(
     );
   }
 
+  const remote = deps.remote;
+  const remoteInfo = remote !== undefined ? remoteInfoOf(remote.probe) : undefined;
+
   const decision = decideStrategy(record, flags.provider);
-  const promptText = buildHandoffPrompt(record, decision);
-  const plan = resolveTargetPlan(record, snapshot, flags);
+  // The prompt may reference the bundle path before the file exists; the
+  // path is deterministic, and the bundle is written before `ready`.
+  const promptText = buildHandoffPrompt(
+    record,
+    decision,
+    remote !== undefined && remoteInfo !== undefined
+      ? {
+          remote: {
+            label: remoteInfo.label,
+            target: remoteInfo.target,
+            session: remoteInfo.session,
+          },
+          bundlePath: bundleFilePath(id),
+        }
+      : undefined,
+  );
+  // Target planning reads the REMOTE snapshot for cross-machine runs —
+  // pane/workspace ids live in the remote session, not the local one.
+  const plan = resolveTargetPlan(record, remote?.probe.snapshot ?? snapshot, flags);
 
   if (flags.dryRun === true) {
-    return { record, outcome: "dry_run", plan, decision, prompt_text: promptText };
+    return {
+      record,
+      outcome: "dry_run",
+      plan,
+      decision,
+      prompt_text: promptText,
+      ...(remoteInfo !== undefined ? { remote: remoteInfo } : {}),
+    };
   }
+
+  // Portable bundle (#105): written BEFORE the ready transition so a
+  // bundle-write failure leaves the record pending — never a delivered
+  // remote handoff without its portable payload on disk.
+  let bundleInfo: ExecutionBundle | undefined;
+  if (remote !== undefined && remoteInfo !== undefined) {
+    const bundle = buildPortableBundle(record, remoteInfo, now());
+    try {
+      await writeBundle(bundle, id);
+    } catch (err) {
+      throw new HandoffExecError(
+        `portable bundle write failed: ${errorMessage(err)}`,
+        "bundle_write",
+      );
+    }
+    const pluginStateRefs = bundle.payload.refs.filter(
+      (r) => r.portability === "plugin_state",
+    ).length;
+    bundleInfo = {
+      contract: bundle.contract,
+      path: bundleFilePath(id),
+      refs: bundle.payload.refs.length,
+      plugin_state_refs: pluginStateRefs,
+      external_refs: bundle.payload.refs.length - pluginStateRefs,
+    };
+  }
+
+  // Execution surface transport: remote CLI bridge for cross-machine,
+  // the injected local transport otherwise.
+  const execTransport = remote?.transport ?? transport;
 
   // --- pending|ready → ready -------------------------------------------------
   const execution: HandoffExecution = {
@@ -570,6 +661,8 @@ export async function executeHandoff(
     error: null,
     cleaned_up: record.execution?.cleaned_up ?? false,
     observed: record.execution?.observed ?? null,
+    ...(remoteInfo !== undefined ? { remote: remoteInfo } : {}),
+    ...(bundleInfo !== undefined ? { bundle: bundleInfo } : {}),
   };
   await updateState((s) => {
     const r = s.handoffs[id];
@@ -594,7 +687,7 @@ export async function executeHandoff(
     let cleanedUp = false;
     if (flags.cleanupOnFailure === true && execution.target?.created === true) {
       try {
-        await transport.paneClose(execution.target.pane_id);
+        await execTransport.paneClose(execution.target.pane_id);
         cleanedUp = true;
       } catch {
         // Best-effort: the pane may already be gone; record what happened.
@@ -626,7 +719,7 @@ export async function executeHandoff(
           created: false,
         };
       } else if (plan.kind === "tab") {
-        const created = await transport.tabCreate({
+        const created = await execTransport.tabCreate({
           workspace_id: plan.workspace_id,
           cwd: record.transfer.cwd ?? undefined,
           label: `handoff ${id}`,
@@ -640,7 +733,7 @@ export async function executeHandoff(
           created: true,
         };
       } else {
-        const created = await transport.workspaceCreate({
+        const created = await execTransport.workspaceCreate({
           cwd: record.transfer.cwd ?? undefined,
           label: `handoff ${id}`,
           focus: false,
@@ -675,7 +768,7 @@ export async function executeHandoff(
     }
     const agentName = `handoff ${id}`;
     try {
-      await transport.agentStart({
+      await execTransport.agentStart({
         name: agentName,
         kind: decision.provider_kind,
         paneId: surface.pane_id,
@@ -690,7 +783,7 @@ export async function executeHandoff(
     // the done-verdict baseline is meaningful.
     let agentInfo: ExecutionAgent;
     try {
-      const agent = await transport.agentGet(surface.pane_id);
+      const agent = await execTransport.agentGet(surface.pane_id);
       agentInfo = {
         name: agentName,
         kind: decision.provider_kind,
@@ -707,7 +800,7 @@ export async function executeHandoff(
 
     // --- payload injection --------------------------------------------------------
     try {
-      await transport.agentPrompt(surface.pane_id, promptText);
+      await execTransport.agentPrompt(surface.pane_id, promptText);
     } catch (err) {
       return await fail("prompt", err);
     }
@@ -753,7 +846,7 @@ export async function executeHandoff(
   const targetPaneId = execution.target?.pane_id;
   if (flags.waitMs !== undefined && targetPaneId !== undefined) {
     try {
-      await transport.agentWait(
+      await execTransport.agentWait(
         targetPaneId,
         { until: ["idle", "done", "blocked"], timeoutMs: flags.waitMs },
         flags.waitMs + CLIENT_MARGIN_MS,
@@ -768,7 +861,7 @@ export async function executeHandoff(
     }
     const current = (await loadState()).handoffs[id];
     if (current?.status === "delivered") {
-      const obs = await observeOnce(transport, current, now);
+      const obs = await observeOnce(execTransport, current, now);
       await updateState((s) => {
         const r = s.handoffs[id];
         if (r?.execution) {
@@ -875,6 +968,53 @@ export async function reconcileDelivered(
     if (
       check.state === "ok" &&
       isDoneObservation(check.agent_status, check.state_change_seq, baselineSeq(r))
+    ) {
+      r.status = "done";
+    }
+    r.updated_at = nowIso(now);
+    return r;
+  });
+}
+
+/**
+ * Remote variant of `reconcileDelivered` (#105): the target pane lives in
+ * the remote herdr session, so observation goes through the remote
+ * transport's `agent.get` — there is no local snapshot to gate on. The
+ * caller MUST have verified `record.execution.remote.machine_id`
+ * matches the probed machine before calling; this function trusts the
+ * injected transport. Same done verdict, same honest `observed` record.
+ */
+export async function reconcileRemoteDelivered(
+  id: string,
+  input: {
+    transport: HandoffTransport;
+    now?: (() => Date) | undefined;
+  },
+): Promise<HandoffRecord | null> {
+  const now = input.now ?? (() => new Date());
+  const record = (await loadState()).handoffs[id];
+  if (
+    record === undefined ||
+    record.status !== "delivered" ||
+    record.execution?.target == null ||
+    record.execution.remote === undefined
+  ) {
+    return null;
+  }
+  const obs = await observeOnce(input.transport, record, now);
+  return updateState((s) => {
+    const r = s.handoffs[id];
+    if (r === undefined || r.status !== "delivered" || r.execution === undefined) {
+      return null;
+    }
+    r.execution.observed = {
+      agent_status: obs.agent_status,
+      pane_present: obs.pane_present,
+      checked_at: obs.checked_at,
+    };
+    if (
+      obs.pane_present === true &&
+      isDoneObservation(obs.agent_status, obs.state_change_seq, baselineSeq(r))
     ) {
       r.status = "done";
     }

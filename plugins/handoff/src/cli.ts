@@ -1,7 +1,7 @@
 /**
  * rebuildup.handoff CLI — the versioned structured interface for the
  * handoff/delegation plugin (contract `herdr-plugins.handoff/v1`,
- * issues #103/#104 / parent #6 T1+T2).
+ * issues #103/#104/#105 / parent #6 T1–T3).
  *
  * T1 scope (#103): `create` records a handoff (source identity +
  * reference payload + strategy + optional target hint); `list`/`status`
@@ -9,7 +9,10 @@
  * reporting. T2 (#104) adds `execute` (same-host target surface creation
  * via herdr API + `agent.start` + payload prompt injection + status
  * transitions) and `resume-info` (provider native-resume capability).
- * Cross-machine handoff is T3 (#105).
+ * T3 (#105) adds cross-machine execution: `execute --remote` /
+ * `status --remote` over herdr saved machines (`herdr --machine` SSH
+ * bridge) plus the portable bundle, and `remote-probe` for capability
+ * detection.
  *
  * All commands emit a single JSON document on stdout; diagnostics go to
  * stderr. Exit code 0 on success, 1 on handled errors, 2 on usage.
@@ -32,6 +35,7 @@ import {
   herdrTransport,
   MAX_PROMPT_CHARS,
   reconcileDelivered,
+  reconcileRemoteDelivered,
 } from "./execute";
 import {
   boundedExcerpt,
@@ -53,6 +57,15 @@ import {
   type TargetSpec,
 } from "./model";
 import { missingRefCount, type RefDeps, resolvePayloadRefs } from "./refs";
+import {
+  type HerdrRunner,
+  listMachines,
+  probeRemote,
+  RemoteError,
+  type RemoteProbe,
+  remoteCliTransport,
+  type SavedMachine,
+} from "./remote";
 import { listResumeProviders, resumeInfo } from "./resume";
 import { loadState, PLUGIN_ID, sessionKeyFor, stateFilePath, updateState } from "./state";
 
@@ -135,6 +148,7 @@ const VALUE_FLAGS = new Set([
   "--wait-ms",
   "--status",
   "--limit",
+  "--remote",
 ]);
 
 function positional(args: string[]): string[] {
@@ -353,7 +367,21 @@ async function cmdList(options: CliOptions): Promise<void> {
 
 // --- status -------------------------------------------------------------------
 
-async function cmdStatus(options: CliOptions, deps: RefDeps = {}): Promise<void> {
+interface RemoteDeps {
+  probe?: ((selector: string) => Promise<RemoteProbe>) | undefined;
+  transportFor?: ((probe: RemoteProbe) => HandoffTransport) | undefined;
+  machines?: (() => Promise<SavedMachine[]>) | undefined;
+}
+
+function remoteErrorExit(err: unknown): never {
+  if (err instanceof RemoteError) {
+    const usageKinds = new Set(["machine_not_found", "machine_ambiguous"]);
+    fail(err.message, usageKinds.has(err.kind) ? 2 : 1, err.kind, err.extra);
+  }
+  throw err;
+}
+
+async function cmdStatus(options: CliOptions, deps: RefDeps & RemoteDeps = {}): Promise<void> {
   const pos = positional(options.args);
   if (pos.length !== 1) fail("status requires exactly one <handoff-id>", 2);
   const id = pos[0] as string;
@@ -364,25 +392,113 @@ async function cmdStatus(options: CliOptions, deps: RefDeps = {}): Promise<void>
     fail(`handoff not found: ${id}`, 1);
   }
 
+  const remoteSelector = flagValue(options.args, "--remote");
+  const isRemoteRecord = record.execution?.remote !== undefined;
+
+  // Remote status (#105): probe the saved machine, verify it matches the
+  // recorded execution target, reconcile via the remote transport, and
+  // evaluate target_check against the REMOTE snapshot. Without --remote
+  // a remote record reports target_check unchecked — never a local
+  // pane-id coincidence.
+  let remoteProbe: RemoteProbe | null = null;
+  let remoteTransport: HandoffTransport | null = null;
+  if (remoteSelector !== undefined) {
+    try {
+      remoteProbe = await (deps.probe ?? probeRemote)(remoteSelector);
+      remoteTransport = (deps.transportFor ?? ((p) => remoteCliTransport(p.machine)))(remoteProbe);
+    } catch (err) {
+      remoteErrorExit(err);
+    }
+  }
+
   const resolveRefs = !hasFlag(options.args, "--no-resolve-refs");
   const snapshot = await snapshotOrNull(options);
   const currentKey = snapshot !== null ? sessionKeyFor(options) : null;
 
-  // Lazy delivered→done reconciliation: the target pane's raw
-  // agent_status inside THIS session's snapshot is the only evidence;
-  // observed state is persisted, never assumed.
+  // Lazy delivered→done reconciliation. Local records reconcile against
+  // the local snapshot; remote records need --remote and reconcile via
+  // the remote transport's agent.get.
   if (record.status === "delivered" && !hasFlag(options.args, "--no-reconcile")) {
-    const updated = await reconcileDelivered(id, {
-      snapshot,
-      sessionKey: currentKey ?? undefined,
-    });
-    if (updated !== null) record = updated;
+    if (isRemoteRecord) {
+      if (remoteProbe !== null && remoteTransport !== null) {
+        if (record.execution?.remote?.machine_id === remoteProbe.machine.id) {
+          const updated = await reconcileRemoteDelivered(id, { transport: remoteTransport });
+          if (updated !== null) record = updated;
+        }
+      }
+    } else {
+      const updated = await reconcileDelivered(id, {
+        snapshot,
+        sessionKey: currentKey ?? undefined,
+      });
+      if (updated !== null) record = updated;
+    }
     state = await loadState();
     record = state.handoffs[id] ?? record;
   }
 
   const transferCheck = checkTransfer(record, snapshot, currentKey ?? undefined);
-  const targetCheck = checkTarget(record, snapshot, currentKey ?? undefined);
+  let targetCheck: ReturnType<typeof checkTarget>;
+  let remoteCheck: Record<string, unknown> | null = null;
+  if (remoteProbe !== null) {
+    const expected = record.execution?.remote?.machine_id ?? null;
+    if (expected !== null && expected !== remoteProbe.machine.id) {
+      remoteCheck = {
+        state: "unchecked",
+        reason: "remote_mismatch",
+        expected_machine_id: expected,
+        actual_machine_id: remoteProbe.machine.id,
+      };
+      targetCheck = {
+        state: "unchecked",
+        reason: "remote_mismatch",
+        agent_status: null,
+        pane_present: null,
+        agent_session: null,
+        state_change_seq: null,
+      };
+    } else if (isRemoteRecord) {
+      remoteCheck = {
+        state: "ok",
+        machine_id: remoteProbe.machine.id,
+        label: remoteProbe.machine.label,
+        target: remoteProbe.machine.target,
+        session: remoteProbe.machine.session,
+        server_version: remoteProbe.server_version,
+        protocol: remoteProbe.protocol,
+      };
+      // The remote snapshot IS the target session; machine identity was
+      // verified above, so the session_key gate is satisfied by
+      // construction (currentSessionKey omitted).
+      targetCheck = checkTarget(record, remoteProbe.snapshot, undefined);
+    } else {
+      // --remote on a same-host record: probe result is informational;
+      // the target still lives in the local session.
+      remoteCheck = {
+        state: "ok",
+        machine_id: remoteProbe.machine.id,
+        label: remoteProbe.machine.label,
+        target: remoteProbe.machine.target,
+        session: remoteProbe.machine.session,
+        server_version: remoteProbe.server_version,
+        protocol: remoteProbe.protocol,
+        note: "record has no remote execution; target_check evaluated locally",
+      };
+      targetCheck = checkTarget(record, snapshot, currentKey ?? undefined);
+    }
+  } else if (isRemoteRecord) {
+    targetCheck = {
+      state: "unchecked",
+      reason: "remote_target_requires_flag",
+      agent_status: null,
+      pane_present: null,
+      agent_session: null,
+      state_change_seq: null,
+    };
+    remoteCheck = { state: "unchecked", reason: "remote_flag_missing" };
+  } else {
+    targetCheck = checkTarget(record, snapshot, currentKey ?? undefined);
+  }
   const resolved = resolveRefs ? await resolvePayloadRefs(record.payload, deps) : null;
 
   emit({
@@ -391,6 +507,7 @@ async function cmdStatus(options: CliOptions, deps: RefDeps = {}): Promise<void>
     handoff: record,
     transfer_check: transferCheck,
     target_check: targetCheck,
+    remote_check: remoteCheck,
     payload_resolution: resolved,
     missing_refs: resolved === null ? null : missingRefCount(resolved),
     state_file: stateFilePath(),
@@ -411,7 +528,7 @@ function parseNonNegativeMs(raw: string | undefined, flag: string): number | und
 
 async function cmdExecute(
   options: CliOptions,
-  deps: { transport?: HandoffTransport } = {},
+  deps: { transport?: HandoffTransport } & RemoteDeps = {},
 ): Promise<void> {
   const pos = positional(options.args);
   if (pos.length !== 1) fail("execute requires exactly one <handoff-id>", 2);
@@ -426,14 +543,36 @@ async function cmdExecute(
     cleanupOnFailure: hasFlag(options.args, "--cleanup-on-failure"),
     waitMs: parseNonNegativeMs(flagValue(options.args, "--wait-ms"), "--wait-ms"),
     dryRun: hasFlag(options.args, "--dry-run"),
+    remote: flagValue(options.args, "--remote"),
   };
 
   const transport = deps.transport ?? herdrTransport(options);
   const sessionKey = sessionKeyFor(options);
 
+  // Cross-machine execution (#105): resolve + probe the saved machine
+  // BEFORE any mutation. A failed probe is a structured pre-mutation
+  // refusal — the record stays pending, success is never fabricated.
+  let remote: { probe: RemoteProbe; transport: HandoffTransport } | undefined;
+  if (flags.remote !== undefined) {
+    let probe: RemoteProbe;
+    try {
+      probe = await (deps.probe ?? probeRemote)(flags.remote);
+    } catch (err) {
+      remoteErrorExit(err);
+    }
+    remote = {
+      probe,
+      transport: (deps.transportFor ?? ((p) => remoteCliTransport(p.machine)))(probe),
+    };
+  }
+
   let result: ExecuteResult;
   try {
-    result = await executeHandoff(id, flags, { transport, sessionKey });
+    result = await executeHandoff(id, flags, {
+      transport,
+      sessionKey,
+      ...(remote !== undefined ? { remote } : {}),
+    });
   } catch (err) {
     if (err instanceof HandoffExecError) {
       fail(err.message, err.kind === "usage" ? 2 : 1, err.kind, err.extra);
@@ -467,7 +606,105 @@ async function cmdExecute(
     command: "execute",
     outcome: result.outcome,
     handoff: result.record,
+    ...(result.remote !== undefined ? { remote: result.remote } : {}),
     state_file: stateFilePath(),
+    generated_at: new Date().toISOString(),
+  });
+}
+
+// --- remote-probe (#105) ---------------------------------------------------------
+
+/**
+ * Remote capability probe. No selector → list saved machines. `--all` →
+ * probe every enabled machine. `<selector>` → full probe (machine
+ * resolution + remote `session.snapshot` through the SSH bridge).
+ * Unreachable/disabled/unsupported machines are reported structurally —
+ * never as reachable.
+ */
+async function cmdRemoteProbe(
+  options: CliOptions,
+  deps: {
+    runner?: HerdrRunner;
+    machines?: () => Promise<SavedMachine[]>;
+    probe?: (s: string) => Promise<RemoteProbe>;
+  } = {},
+): Promise<void> {
+  const pos = positional(options.args);
+  if (pos.length > 1) fail("remote-probe accepts at most one [selector]", 2);
+  const selector = pos[0];
+  const probeAll = hasFlag(options.args, "--all");
+  if (selector !== undefined && probeAll) {
+    fail("remote-probe accepts either a selector or --all, not both", 2);
+  }
+
+  const machines = await (deps.machines ?? (() => listMachines(deps.runner ?? undefined)))();
+  if (selector === undefined && !probeAll) {
+    emit({
+      contract: CONTRACT,
+      command: "remote-probe",
+      mode: "list",
+      machines: machines.map((m) => ({
+        id: m.id,
+        label: m.label,
+        target: m.target,
+        session: m.session,
+        enabled: m.enabled,
+      })),
+      hint: "pass a label-or-id (or --all) to probe remote herdr capability",
+      generated_at: new Date().toISOString(),
+    });
+    return;
+  }
+
+  const targets: string[] = probeAll
+    ? machines.filter((m) => m.enabled).map((m) => m.id)
+    : [selector as string];
+  const doProbe =
+    deps.probe ??
+    ((s: string) => probeRemote(s, deps.runner !== undefined ? { runner: deps.runner } : {}));
+
+  const results = [];
+  for (const target of targets) {
+    try {
+      const probe = await doProbe(target);
+      const panes = probe.snapshot.panes?.length ?? 0;
+      const agents = Object.keys(probe.snapshot.agents ?? {}).length;
+      results.push({
+        selector: target,
+        state: "reachable",
+        machine_id: probe.machine.id,
+        label: probe.machine.label,
+        target_host: probe.machine.target,
+        session: probe.machine.session,
+        server_version: probe.server_version,
+        protocol: probe.protocol,
+        panes,
+        agents,
+      });
+    } catch (err) {
+      if (err instanceof RemoteError) {
+        results.push({
+          selector: target,
+          state: "error",
+          kind: err.kind,
+          message: err.message,
+        });
+      } else {
+        results.push({
+          selector: target,
+          state: "error",
+          kind: "error",
+          message: String(err),
+        });
+      }
+    }
+  }
+
+  emit({
+    contract: CONTRACT,
+    command: "remote-probe",
+    mode: probeAll ? "probe_all" : "probe",
+    results,
     generated_at: new Date().toISOString(),
   });
 }
@@ -494,19 +731,40 @@ async function cmdCapability(options: CliOptions): Promise<void> {
   emit({
     contract: CONTRACT,
     plugin: PLUGIN_ID,
-    version: "0.2.0",
-    commands: ["create", "list", "status", "execute", "resume-info", "capability"],
+    version: "0.3.0",
+    commands: ["create", "list", "status", "execute", "resume-info", "remote-probe", "capability"],
     actions: [],
     events: [],
     startup: [],
     state_file: stateFilePath(),
     config_dir: pluginDirs(PLUGIN_ID).configDir,
     socket: options.socketPath ?? null,
-    execution: "same_host",
+    execution: "same_host_and_remote_saved_machines",
+    remote: {
+      mechanism:
+        "herdr saved machines + `herdr --machine <label-or-id>` CLI bridge (SSH → remote-api-bridge)",
+      machine_source: "`herdr machine list --json` profiles (id/label/target/session)",
+      probe: "remote-probe [selector|--all]; execute --remote <label-or-id>",
+      portable_bundle: "herdr-plugins.handoff/bundle/v1 written to <state>/bundles/<id>.json",
+      unsupported:
+        "herdr --remote (TUI-only) and server.ssh_agent.register (agent forwarding) are NOT remote control surfaces",
+    },
     execution_surface: {
       strategies: ["native_resume", "portable_context"],
-      target_selection: ["--target-pane", "--target-workspace", "--new-workspace"],
-      agent_api: ["workspace.create", "tab.create", "agent.start", "agent.prompt", "agent.wait"],
+      target_selection: [
+        "--target-pane",
+        "--target-workspace",
+        "--new-workspace",
+        "--remote <machine>",
+      ],
+      agent_api: [
+        "workspace.create",
+        "tab.create",
+        "agent.start",
+        "agent.prompt",
+        "agent.wait",
+        "remote: same surface via `herdr --machine` CLI",
+      ],
       failure_cleanup_flag: "--cleanup-on-failure",
       observation_flag: "--wait-ms",
       provider_hint: "opaque label; first '.'-segment is used as the agent.start kind only",
@@ -530,22 +788,27 @@ Usage:
                  [--target-workspace ID] [--dry-run]
                  [--session NAME] [--socket PATH]
   handoff list [--status STATUS] [--limit N] [--session NAME]
-  handoff status <handoff-id> [--no-resolve-refs] [--no-reconcile]
-                 [--session NAME]
   handoff execute <handoff-id> [--target-pane ID | --target-workspace ID
                  | --new-workspace] [--provider HINT] [--model M]
                  [--wait-ms MS] [--cleanup-on-failure] [--dry-run]
-                 [--session NAME] [--socket PATH]
+                 [--remote MACHINE] [--session NAME] [--socket PATH]
+  handoff status <handoff-id> [--no-resolve-refs] [--no-reconcile]
+                 [--remote MACHINE] [--session NAME]
   handoff resume-info [--provider KIND]
+  handoff remote-probe [MACHINE | --all]
   handoff capability [--session NAME]
 
 Strategies: ${HANDOFF_STRATEGIES.join(" | ")}
 Statuses:   ${HANDOFF_STATUSES.join(" | ")}
 
-execute runs the same-host handoff: target surface via herdr API only,
-agent.start, payload prompt injection, then pending→ready→delivered→
-done/failed tracking. native_resume falls back to portable_context when
-the provider cannot resume; failures persist status=failed honestly.
+execute runs the handoff: target surface via herdr API only, agent.start,
+payload prompt injection, then pending→ready→delivered→done/failed
+tracking. --remote MACHINE executes on a saved SSH machine (herdr
+--machine bridge): a portable bundle (bundle/v1) is written under the
+state dir, plugin-state payload refs are marked non-resolvable remotely,
+and unreachable/disabled/unsupported machines fail structurally before
+any mutation. native_resume falls back to portable_context when the
+provider cannot resume; failures persist status=failed honestly.
 `;
 
 export async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
@@ -561,6 +824,8 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       return cmdExecute(options);
     case "resume-info":
       return cmdResumeInfo(options);
+    case "remote-probe":
+      return cmdRemoteProbe(options);
     case "capability":
       return cmdCapability(options);
     case "help":

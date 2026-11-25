@@ -152,9 +152,44 @@ source agent's lifecycle is never touched.
 seed of the capability surface `rebuildup.controls` T2 (#100) is
 expected to own; unlisted providers report `unknown` and fall back.
 
-## Out of scope (v1 / T2)
+## Cross-machine execution (T3, #105)
 
-- Cross-machine/remote handoff, portable bundles (#105).
+`execute --remote <machine>` runs the same pipeline against a herdr
+**saved SSH machine**. Upstream verdict (measured, herdr 0.9.5 /
+protocol 22): remote agent control IS available — `herdr --machine
+<label-or-id> <cli>` bridges over SSH to the remote host's
+`remote-api-bridge` and exposes the full CLI/API surface
+(`api snapshot`, `workspace/tab create`, `agent start|get|prompt|wait`,
+`pane close`) with the same `{id,result|error}` JSON envelopes.
+`herdr --remote` is TUI-attach only and `server.ssh_agent.register` is
+ssh-agent forwarding — neither is a control surface; the plugin uses
+neither.
+
+- `remote-probe [selector|--all]` lists machines or probes capability:
+  machine resolution (`herdr machine list --json`, id or case-insensitive
+  label), `enabled` gate, remote `session.snapshot` fetch. Errors are
+  structured (`machine_not_found`, `machine_ambiguous`,
+  `machine_disabled`, `remote_unreachable`, `unsupported_remote`,
+  `remote_timeout`, `remote_command_failed`, `remote_malformed`,
+  `remote_<server-code>`).
+- The source staleness gate still reads the LOCAL snapshot; the remote
+  probe is a pre-mutation gate — unreachable machines leave the record
+  `pending`. Target planning/creation/prompt/observation run against the
+  REMOTE snapshot+transport; `execution.remote` records
+  `{machine_id,label,target,session,probed_at,server_version,protocol}`.
+- **Portable bundle** `herdr-plugins.handoff/bundle/v1` is written to
+  `<state>/bundles/<id>.json` before `ready`: refs stay references,
+  `plugin_state` refs are marked `resolvable_on_remote:false`
+  (external_ref on the remote host), excerpt+requirements travel inline,
+  and the prompt states the portability rule. Recorded as
+  `execution.bundle{contract,path,refs,plugin_state_refs,external_refs}`.
+- `status --remote` verifies `execution.remote.machine_id`, reconciles
+  `delivered→done` via remote `agent.get`, and evaluates `target_check`
+  on the remote snapshot; without `--remote` a remote record reports
+  `remote_target_requires_flag` — never a local pane-id coincidence.
+
+## Out of scope (v1 / T2+T3)
+
 - Delegation, parent/child lineage, worktree handoff, `#30`/`#32`
   boundaries (#106).
 - `checkpoint_ref`/`manual` execution (recorded intent only).

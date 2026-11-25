@@ -10,8 +10,10 @@ T1 scope (issue #103): `create` / `list` / `status` / `capability`.
 T2 scope (issue #104): `execute` (same-host target creation + `agent.start`
 + payload injection + status transitions) and `resume-info`, plus `status`
 extensions (`target_check`, lazy `delivered → done` reconciliation).
-Cross-machine execution is T3 (#105) and will extend this contract
-additively within v1 where possible.
+T3 scope (issue #105): cross-machine execution — `execute --remote`
+(saved-machine SSH bridge), `status --remote`, `remote-probe`, and the
+portable bundle (`herdr-plugins.handoff/bundle/v1`). Remote fields are
+additive optional members of v1.
 
 ## Invocation and discovery
 
@@ -31,18 +33,18 @@ An external client resolves the CLI as follows:
 {
   "contract": "herdr-plugins.handoff/v1",
   "plugin": "rebuildup.handoff",
-  "version": "0.2.0",
-  "commands": ["create", "list", "status", "execute", "resume-info", "capability"],
+  "version": "0.3.0",
+  "commands": ["create", "list", "status", "execute", "resume-info", "remote-probe", "capability"],
   "actions": [],
   "events": [],
   "startup": [],
   "state_file": "…",
   "config_dir": "…",
   "socket": null,
-  "execution": "same_host",
+  "execution": "same_host_and_remote_saved_machines",
   "execution_surface": {
     "strategies": ["native_resume", "portable_context"],
-    "target_selection": ["--target-pane", "--target-workspace", "--new-workspace"],
+    "target_selection": ["--target-pane", "--target-workspace", "--new-workspace", "--remote <machine>"],
     "agent_api": ["workspace.create", "tab.create", "agent.start", "agent.prompt", "agent.wait"],
     "failure_cleanup_flag": "--cleanup-on-failure",
     "observation_flag": "--wait-ms",
@@ -57,12 +59,14 @@ An external client resolves the CLI as follows:
 }
 ```
 
-`execution: "same_host"` means `execute` performs same-host handoffs only:
-target surfaces are created exclusively through herdr's socket API
-(`workspace.create` / `tab.create` + `agent.start` / `agent.prompt` /
-`agent.wait`); the plugin never owns a PTY and never invokes the Agent
-Router launcher. `execution: "not_implemented"` (T1) meant records were
-intent-only.
+`execution: "same_host_and_remote_saved_machines"` means `execute`
+performs same-host handoffs AND cross-machine handoffs onto herdr saved
+SSH machines. In both cases target surfaces are created exclusively
+through herdr's own API surface — the local socket API for same-host,
+the `herdr --machine <label-or-id>` CLI bridge (SSH → remote
+`remote-api-bridge`) for remote; the plugin never owns a PTY and never
+invokes the Agent Router launcher. `execution: "not_implemented"` (T1)
+meant records were intent-only.
 
 ## Target selection (Host / Session)
 
@@ -275,10 +279,11 @@ handoff execute <handoff-id>
   [--target-pane ID | --target-workspace ID | --new-workspace]
   [--provider HINT] [--model M]
   [--wait-ms MS] [--cleanup-on-failure] [--dry-run]
+  [--remote MACHINE]
   [--session NAME] [--socket PATH] [--timeout MS]
 ```
 
-Runs the same-host handoff end-to-end:
+Runs the handoff end-to-end (same-host by default; `--remote` selects a saved machine — see "Remote execution"):
 
 1. **Gate** — record must be `pending`/`ready`; a live
    `session.snapshot` is mandatory; `checkTransfer` must be `ok`
@@ -351,6 +356,69 @@ guessing. The table is the handoff-side seed of the provider capability
 surface `rebuildup.controls` T2 (#100) is expected to own; until then
 unlisted providers report `unknown`.
 
+## Remote execution (T3, #105)
+
+```
+handoff execute <handoff-id> ... --remote <machine-label-or-id>
+handoff status  <handoff-id> [--remote <machine-label-or-id>]
+handoff remote-probe [<machine-label-or-id> | --all]
+```
+
+Remote transport is herdr's **saved machines** path: `herdr machine
+list --json` profiles (`id`/`label`/`target`/`session`), and
+`herdr --machine <id> <cli>` which bridges over SSH to the remote
+host's `remote-api-bridge` and exposes the same API surface the local
+socket provides. The plugin shells out per call — each invocation
+re-establishes the bridge; correct but not free. `herdr --remote`
+(interactive TUI attach) and `server.ssh_agent.register` (ssh-agent
+forwarding into a remote session) are **not** remote control surfaces
+and are never used.
+
+- **Probe** — `remote-probe` with no argument lists saved machines;
+  with a selector (or `--all`) it resolves the machine, requires
+  `enabled`, and fetches the remote `session.snapshot` via
+  `herdr --machine <id> api snapshot`. Results report
+  `{state:"reachable", machine_id, label, target_host, session,
+  server_version, protocol, panes, agents}` or
+  `{state:"error", kind, message}` with `kind` ∈
+  `machine_not_found | machine_ambiguous | machine_disabled |
+  remote_unreachable | unsupported_remote | remote_timeout |
+  remote_command_failed | remote_malformed | remote_<server-code>`.
+- **`execute --remote`** — the source staleness gate still reads the
+  LOCAL snapshot (the source pane is local). The remote probe runs
+  BEFORE any mutation: unreachable/disabled/unknown machines are
+  pre-mutation refusals and the record stays `pending`. On success the
+  remote snapshot drives target planning (`--target-pane`,
+  `--target-workspace`, default new remote workspace — pane/workspace
+  ids live in the remote session bound to the machine profile).
+  Surface creation, `agent.start`, prompt injection, `agent.wait`, and
+  failure cleanup all go through the remote CLI transport. A
+  **portable bundle** (`herdr-plugins.handoff/bundle/v1`) is written
+  to `<state dir>/bundles/<handoff-id>.json` before the `ready`
+  transition; its path and ref portability counts are recorded in
+  `execution.bundle`.
+- **Portable bundle** — payload refs keep their reference form;
+  `conversation_session`/`checkpoint` refs are marked
+  `portability:"plugin_state", resolvable_on_remote:false` (they name
+  objects in rebuildup.* state on the SOURCE host — external_ref on the
+  remote host), `external` refs keep their inline value. The bounded
+  excerpt and requirements travel inline; the injected prompt states
+  the portability rule explicitly. No transcript copies, no fabricated
+  remote resolution.
+- **`status --remote`** — probes the machine, verifies
+  `execution.remote.machine_id` matches (mismatch →
+  `remote_check.state:"unchecked", reason:"remote_mismatch"`),
+  reconciles `delivered → done` via the remote transport's `agent.get`,
+  and evaluates `target_check` against the REMOTE snapshot. A remote
+  record checked WITHOUT `--remote` reports
+  `target_check.reason:"remote_target_requires_flag"` — local pane-id
+  coincidences are never reported as the remote target.
+- **Remote identity** — `execution.remote` records `{machine_id,
+  label, target, session, enabled, probed_at, server_version, protocol}`
+  from the saved-machine profile + probe; `agent_session` /
+  `state_change_seq` generation signals come from the REMOTE snapshot,
+  so local state can never be mistaken for the remote generation.
+
 ## Execution record (`execution` field)
 
 ```json
@@ -369,9 +437,18 @@ unlisted providers report `unknown`.
   "error": null,
   "cleaned_up": false,
   "observed": { "agent_status": "done", "pane_present": true,
-                "checked_at": "…" }
+                "checked_at": "…" },
+  "remote": { "machine_id": "m1", "label": "Lab Box",
+              "target": "lab.example.com", "session": "agents",
+              "enabled": true, "probed_at": "…",
+              "server_version": "0.9.5", "protocol": 22 },
+  "bundle": { "contract": "herdr-plugins.handoff/bundle/v1",
+              "path": "…/bundles/ho-….json", "refs": 3,
+              "plugin_state_refs": 2, "external_refs": 1 }
 }
 ```
+
+`remote`/`bundle` are present only for `execute --remote` runs.
 
 `agent.state_change_seq` is the **pre-prompt baseline** used by the done
 verdict; `observed.agent_status` is always the raw herdr value.
