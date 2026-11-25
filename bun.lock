@@ -34,6 +34,10 @@
       "name": "@herdr-plugins/git",
       "version": "0.2.0",
     },
+    "plugins/handoff": {
+      "name": "@herdr-plugins/handoff",
+      "version": "0.1.0",
+    },
     "plugins/inbox": {
       "name": "@herdr-plugins/inbox",
       "version": "0.1.0",
@@ -77,6 +81,8 @@
     "@herdr-plugins/git": ["@herdr-plugins/git@workspace:plugins/git"],
 
     "@herdr-plugins/git-core": ["@herdr-plugins/git-core@workspace:packages/git-core"],
+
+    "@herdr-plugins/handoff": ["@herdr-plugins/handoff@workspace:plugins/handoff"],
 
     "@herdr-plugins/inbox": ["@herdr-plugins/inbox@workspace:plugins/inbox"],
 
