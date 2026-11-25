@@ -41,7 +41,7 @@ Environment notes (not plugin defects):
 
 | # | Area | Method | Result |
 | --- | --- | --- | --- |
-| 1 | Quality gates | `bun run validate:fast` at `3164035` (`validate:integration` is the same entry) | PASS — tsc clean, biome clean (pre-existing FIXABLE warnings only), **170 tests / 0 fail** (one unrelated `t3json` test hit the 5s timeout once under full-suite load; passes standalone — flaky, not a regression) |
+| 1 | Quality gates | `bun run validate:fast` at `3164035` (`validate:integration` is the same entry) | PASS — tsc clean, biome clean (pre-existing FIXABLE warnings only), **171 tests / 0 fail** (one unrelated `t3json` test hit the 5s timeout once under full-suite load; passes standalone — flaky, not a regression) |
 | 2 | Plugin install | `herdr plugin install rebuildup/herdr-plugins/plugins/checkpoints --ref 94` → resolved exactly `3164035`; version **0.4.0**, 1 action, 2 events | PASS |
 | 3 | Capability | `capability` → contract `herdr-plugins.checkpoints/v1`, 12 commands, `read_only:false`, `mutation_commands` enumerated (7) | PASS |
 | 4 | `create` | `--repo PATH` with label → hidden ref `refs/herdr-plugins/checkpoints/<key>/<id>`, synthetic commit parented to HEAD, `files_summary` (`M file.txt`, `A new.txt`), real index/worktree untouched; pane-targeted `create w1:p1` resolved via session snapshot and projected `checkpoint_latest`/`checkpoint_count` metadata tokens | PASS |
