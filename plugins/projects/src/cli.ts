@@ -52,7 +52,7 @@ import {
 import { loadT3ProjectFile, T3JsonError, type T3ProjectFileScript } from "./t3json";
 
 const CONTRACT = "herdr-plugins.projects/v1";
-const PLUGIN_VERSION = "0.1.0";
+const PLUGIN_VERSION = "0.3.0";
 const DEFAULT_TIMEOUT_MS = 10_000;
 
 interface PluginConfig {

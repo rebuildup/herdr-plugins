@@ -150,26 +150,34 @@ export async function resolveRepo(
 /**
  * Repository identity for cross-checkout grouping: the normalized
  * `origin` remote URL when present, else the repo root path. Normalizes
- * scp-like (`git@host:org/repo.git`) and https forms plus host casing
- * and a trailing `.git`/`/` so clones of the same repository compare
- * equal. Returns null for bare/missing remotes handled by callers.
+ * scp-like (`git@host:org/repo.git`) and https forms plus host casing,
+ * a non-default port, and a trailing `.git`/`/` so clones of the same
+ * repository compare equal. Path case is preserved verbatim: forges
+ * with case-sensitive repository paths exist, and a false merge is
+ * worse than a missed grouping (consumers compare the identity
+ * exactly). Returns null for bare/missing remotes handled by callers.
  */
 export function normalizeRemoteUrl(url: string): string {
   const trimmed = url.trim();
+  try {
+    const parsed = new URL(trimmed);
+    // `host` keeps a non-default port (`host:8443`); `hostname` would
+    // collapse two self-hosted instances on one machine into one identity.
+    const host = parsed.host.toLowerCase();
+    const pathPart = parsed.pathname.replace(/\.git$/i, "").replace(/\/+$/, "");
+    return `${host}${pathPart}`;
+  } catch {
+    // Not a scheme URL — try the scp-like `user@host:path` form. Scheme'd
+    // URLs must never reach this branch: `ssh://git@host:2222/org/repo`
+    // would otherwise misparse as host `host` + path `2222/org/repo`.
+  }
   const scp = /^([^@\s]+)@([^:\s]+):(.+)$/.exec(trimmed);
   if (scp) {
     const host = (scp[2] as string).toLowerCase();
     const pathPart = (scp[3] as string).replace(/\.git$/i, "").replace(/\/+$/, "");
     return `${host}/${pathPart}`;
   }
-  try {
-    const parsed = new URL(trimmed);
-    const host = parsed.hostname.toLowerCase();
-    const pathPart = parsed.pathname.replace(/\.git$/i, "").replace(/\/+$/, "");
-    return `${host}${pathPart}`;
-  } catch {
-    return trimmed.replace(/\.git$/i, "").replace(/\/+$/, "");
-  }
+  return trimmed.replace(/\.git$/i, "").replace(/\/+$/, "");
 }
 
 /** Fetch URL of `origin` (falling back to the first remote), normalized. */

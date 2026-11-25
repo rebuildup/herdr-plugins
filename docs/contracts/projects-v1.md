@@ -72,8 +72,11 @@ under a stable id:
 - `repos[].root` — absolute worktree root (`git rev-parse
   --show-toplevel`); linked worktrees resolve to their own root.
 - `repos[].remote` — normalized remote identity (`host/path`, `.git`
-  suffix and casing removed, scp/https unified); `null` when the repo
-  has no remote. This is the cross-checkout grouping key.
+  suffix and trailing slashes removed, scp/https/`ssh://` unified, host
+  lowercased with non-default port kept, **path case preserved
+  verbatim** — case-sensitive forges exist and consumers compare the
+  identity exactly); `null` when the repo has no remote. This is the
+  cross-checkout grouping key.
 - Registry state lives only under the plugin state dir
   (`HERDR_PLUGIN_STATE_DIR`), host-global (not per-session), single
   writer lock + atomic rename. The plugin never mutates herdr state.
@@ -185,8 +188,11 @@ cheap live git inspection:
   remote — the identity then falls back to the root path).
 - `branch` (`git rev-parse --abbrev-ref HEAD`), `dirty`
   (`git status --porcelain` non-empty), and `has_submodules`
-  (`git submodule status` non-empty; non-zero exit or empty output =
-  false) are fetched live per repo under the command timeout.
+  (`git submodule status` non-empty output → `true`, empty output →
+  `false`, **non-zero exit or probe failure → `null` = unknown**) are
+  fetched live per repo under the command timeout. The submodule probe
+  is best-effort: its failure never hides the branch/dirty fields and
+  never guesses `false`.
 - A repo that is unreachable or no longer a work tree keeps its stored
   fields with `branch`/`dirty`/`has_submodules` = `null` and is also
   reported in `skipped` with a git-contract `reason` — never fabricated.
@@ -239,7 +245,10 @@ Keys are allow-listed (`SETTINGS_ALLOW_LIST` in `state.ts`): currently
 project-scoped keys relevant to scripts and display. Any other key fails
 `settings_key_not_allowed`. The list extends additively; it never
 accepts arbitrary keys. A corrupt settings file reads as empty
-(overrides are non-authoritative).
+(overrides are non-authoritative); the next `settings set`/`unset`
+rewrites the file wholesale from that empty base — corrupt bytes are
+never partially merged and no `settings_corrupt` error is raised,
+matching the `runs.json` policy.
 
 ## `scripts list <project|repo>`
 
@@ -377,7 +386,9 @@ injects input into panes it did not create.
   (a POSIX pane on a Windows host is out of scope). Trade-off of the
   two-line design: a command that reads stdin may consume the queued
   marker line — the run then times out `running` rather than reporting
-  a wrong result.
+  a wrong result; a command containing a bare `exit` kills the pane's
+  interactive shell before the marker prints, reconciling to
+  `unknown` (use a subshell/`sh -c` for exit-code probes).
 - **Completion:** `pane.wait_for_output` (`source:"recent_unwrapped"`,
   regex `__HERDR_DONE_<run-id>__=(-?\d+)`) blocks up to `runTimeoutMs`
   (plugin config `config.json`, default 600000 ms = 10 min). The echoed

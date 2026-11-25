@@ -21,8 +21,12 @@ Foundation delivered by #49 (CRUD/overrides), #50 (t3.json/scripts),
   `packages/git-core` spawn path: argv only, `GIT_TERMINAL_PROMPT=0`,
   hard timeout).
 - Cross-checkout identity = normalized remote URL
-  (`host/path`, scp/https/case/`.git` unified); repos without remotes
-  key by root path only.
+  (`host/path`; host lowercased with non-default port kept, path case
+  preserved verbatim, scp/https/`ssh://`/`.git`/trailing-slash unified
+  via `normalizeRemoteUrl`). Path case is intentionally NOT folded:
+  case-sensitive forges exist and a false merge is worse than a missed
+  grouping — consumers compare the identity exactly. Repos without
+  remotes key by root path only.
 
 ## Commands (contract `herdr-plugins.projects/v1`)
 
@@ -60,13 +64,18 @@ CLI invocations — no manifest actions.
   entries unless `--all`.
 - Settings keys are allow-listed (`SETTINGS_ALLOW_LIST`): upstream
   project-scoped keys relevant to scripts/display. Values are verbatim
-  strings; #50 owns typed resolution.
+  strings; #50 owns typed resolution. A corrupt settings file reads as
+  empty (overrides are non-authoritative); the next `settings
+  set`/`unset` rewrites it wholesale — corrupt bytes are never
+  partially merged, and no `settings_corrupt` error is raised (same
+  policy as `runs.json`).
 
 ## Repo membership and grouping (#51)
 
 - `repos[].remote` is the `repositoryIdentity` equivalent: normalized
-  `origin` URL (`host/path`, scp/https/case/`.git` unified via
-  `normalizeRemoteUrl`), `null` → identity falls back to root path.
+  `origin` URL (`host/path`, host lowercased + non-default port kept,
+  path case preserved, scp/https/`ssh://`/`.git`/trailing-slash unified
+  via `normalizeRemoteUrl`), `null` → identity falls back to root path.
   Distinct checkouts/clones of the same remote share the identity and
   can be grouped under one project via `repos add`.
 - `repos add`/`repos remove` are thin aliases over the same locked
@@ -77,9 +86,12 @@ CLI invocations — no manifest actions.
 - `repos list` enriches each member live via `inspectRepo`
   (`model.ts`): `rev-parse --abbrev-ref HEAD`, `status --porcelain`,
   `submodule status` — one timeout-bounded call set per repo.
-  `has_submodules` feeds the upstream `worktreeSubmodules` connection
-  point. Unreachable members keep stored fields with null live values
-  plus a `skipped` entry; nothing is fabricated.
+  `has_submodules` is tri-state: `true`/`false` from `submodule status`
+  output, `null` when the probe exits non-zero or fails (unknown —
+  never a guessed `false`; branch/dirty still report). It feeds the
+  upstream `worktreeSubmodules` connection point. Unreachable members
+  keep stored fields with null live values plus a `skipped` entry;
+  nothing is fabricated.
 - #26 acceptance: same-name repos (distinct roots → distinct
   identities), non-git roots (`not_a_repo`), and external folders are
   never absorbed into a project — covered by contract tests.
@@ -135,7 +147,10 @@ CLI invocations — no manifest actions.
   as audit trail. Caveats: `.ps1` obeys the pane execution policy;
   script paths use host-native separators; a stdin-reading command can
   consume the queued marker line (bounded wait → stays `running`,
-  never a wrong result).
+  never a wrong result); a command containing a bare `exit` terminates
+  the pane's interactive shell itself, so the marker never prints and
+  the run reconciles to `unknown` — wrap exit-code probes in a
+  subshell (`( exit 3 )`) or `sh -c`.
 - Completion: `pane.wait_for_output` (`recent_unwrapped`, regex
   `__HERDR_DONE_<run-id>__=(-?\d+)`, `timeout_ms = runTimeoutMs`,
   config default 600000). The echoed input line cannot match (rc
