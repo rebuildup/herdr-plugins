@@ -23,6 +23,10 @@ const ENV_KEYS = [
   "GH_STUB_REPO",
   "GH_STUB_LIST_JSON",
   "GH_STUB_VIEW_JSON",
+  "GH_STUB_CREATE_URL",
+  "GH_STUB_CREATE_FAIL",
+  "GH_STUB_CREATE_PARTIAL",
+  "GH_STUB_STDIN_FILE",
 ];
 
 function tempDir(): string {
@@ -63,7 +67,18 @@ case "\${1:-}" in
     case "\${2:-}" in
       list) cat "\${GH_STUB_LIST_JSON:-/dev/null}" 2>/dev/null || echo '[]';;
       view) cat "\${GH_STUB_VIEW_JSON:-/dev/null}";;
-      create) echo "https://github.com/octo/widgets/pull/42";;
+      create)
+        if [ -n "\${GH_STUB_STDIN_FILE:-}" ]; then cat > "$GH_STUB_STDIN_FILE"; fi
+        if [ "\${GH_STUB_CREATE_FAIL:-0}" = "1" ]; then
+          echo "gh pr create failed" >&2
+          # Partial success: a URL on stdout does not make the call succeed.
+          if [ "\${GH_STUB_CREATE_PARTIAL:-0}" = "1" ]; then
+            echo "\${GH_STUB_CREATE_URL:-https://github.com/octo/widgets/pull/42}"
+          fi
+          exit 1
+        fi
+        echo "\${GH_STUB_CREATE_URL:-https://github.com/octo/widgets/pull/42}"
+        ;;
       *) exit 1;;
     esac
     exit 0;;
@@ -251,6 +266,91 @@ describe("pr create", () => {
     });
     const call = stubCalls(logFile).find((c) => c.startsWith("pr create"));
     expect(call).toContain("--body short body");
+  });
+
+  test("assembles repo/title/head/base/draft argv", async () => {
+    const { logFile } = installGhStub();
+    await collectPrCreate(tempDir(), {
+      repo: "octo/widgets",
+      title: "add thing",
+      head: "feature/x",
+      base: "release",
+      draft: true,
+    });
+    const call = stubCalls(logFile).find((c) => c.startsWith("pr create"));
+    expect(call).toContain("--repo octo/widgets");
+    expect(call).toContain("--title add thing");
+    expect(call).toContain("--head feature/x");
+    expect(call).toContain("--base release");
+    expect(call).toContain("--draft");
+    // No body flag given: gh must not be left to prompt interactively.
+    expect(call).toContain("--body ");
+  });
+
+  test("bodyFile path travels via --body-file argv, not stdin", async () => {
+    const { logFile } = installGhStub();
+    const bodyPath = path.join(tempDir(), "body.md");
+    writeFileSync(bodyPath, "file body\n");
+    await collectPrCreate(tempDir(), {
+      repo: "octo/widgets",
+      title: "t",
+      bodyFile: bodyPath,
+    });
+    const call = stubCalls(logFile).find((c) => c.startsWith("pr create"));
+    expect(call).toContain(`--body-file ${bodyPath}`);
+  });
+
+  test("stdin body reaches gh verbatim via --body-file -", async () => {
+    const { work } = installGhStub();
+    const stdinFile = path.join(work, "stdin.txt");
+    setEnv("GH_STUB_STDIN_FILE", stdinFile);
+    const bodyText = "line one\nline two\n";
+    await collectPrCreate(
+      tempDir(),
+      { repo: "octo/widgets", title: "t", bodyFile: "-" },
+      { bodyText },
+    );
+    expect(readFileSync(stdinFile, "utf8")).toBe(bodyText);
+  });
+
+  test("parses the PR number from a custom success URL", async () => {
+    installGhStub();
+    setEnv("GH_STUB_CREATE_URL", "https://github.com/octo/widgets/pull/7");
+    const result = await collectPrCreate(tempDir(), {
+      repo: "octo/widgets",
+      title: "t",
+    });
+    expect(result).toEqual({
+      url: "https://github.com/octo/widgets/pull/7",
+      number: 7,
+    });
+  });
+
+  test("non-PR success output yields number null", async () => {
+    installGhStub();
+    setEnv("GH_STUB_CREATE_URL", "https://github.com/octo/widgets/pull/");
+    const result = await collectPrCreate(tempDir(), {
+      repo: "octo/widgets",
+      title: "t",
+    });
+    expect(result.number).toBeNull();
+  });
+
+  test("gh failure is a structured gh_error, not a fabricated success", async () => {
+    installGhStub();
+    setEnv("GH_STUB_CREATE_FAIL", "1");
+    await expect(
+      collectPrCreate(tempDir(), { repo: "octo/widgets", title: "t" }),
+    ).rejects.toMatchObject({ kind: "gh_error" });
+  });
+
+  test("partial success (URL on stdout, non-zero exit) is still an error", async () => {
+    installGhStub();
+    setEnv("GH_STUB_CREATE_FAIL", "1");
+    setEnv("GH_STUB_CREATE_PARTIAL", "1");
+    await expect(
+      collectPrCreate(tempDir(), { repo: "octo/widgets", title: "t" }),
+    ).rejects.toMatchObject({ kind: "gh_error" });
   });
 
   test("invalid --repo values are rejected before any gh call", async () => {
