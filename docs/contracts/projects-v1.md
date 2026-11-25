@@ -386,7 +386,9 @@ injects input into panes it did not create.
   (a POSIX pane on a Windows host is out of scope). Trade-off of the
   two-line design: a command that reads stdin may consume the queued
   marker line — the run then times out `running` rather than reporting
-  a wrong result.
+  a wrong result; a command containing a bare `exit` kills the pane's
+  interactive shell before the marker prints, reconciling to
+  `unknown` (use a subshell/`sh -c` for exit-code probes).
 - **Completion:** `pane.wait_for_output` (`source:"recent_unwrapped"`,
   regex `__HERDR_DONE_<run-id>__=(-?\d+)`) blocks up to `runTimeoutMs`
   (plugin config `config.json`, default 600000 ms = 10 min). The echoed

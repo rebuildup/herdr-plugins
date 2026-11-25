@@ -147,7 +147,10 @@ CLI invocations — no manifest actions.
   as audit trail. Caveats: `.ps1` obeys the pane execution policy;
   script paths use host-native separators; a stdin-reading command can
   consume the queued marker line (bounded wait → stays `running`,
-  never a wrong result).
+  never a wrong result); a command containing a bare `exit` terminates
+  the pane's interactive shell itself, so the marker never prints and
+  the run reconciles to `unknown` — wrap exit-code probes in a
+  subshell (`( exit 3 )`) or `sh -c`.
 - Completion: `pane.wait_for_output` (`recent_unwrapped`, regex
   `__HERDR_DONE_<run-id>__=(-?\d+)`, `timeout_ms = runTimeoutMs`,
   config default 600000). The echoed input line cannot match (rc
