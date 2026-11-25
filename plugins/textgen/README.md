@@ -1,7 +1,9 @@
 # rebuildup.textgen
 
-Text generation for herdr (`herdr-plugins.textgen/v1`) — Issue #107,
-parent #29 T1.
+Text generation for herdr (`herdr-plugins.textgen/v1`, stable at
+plugin v0.6.0) — Issues #107–#110, parent #29 (T1 core, T2 git/forge
+adapter, T3 agent-task guards + watch, T4 contract finalization +
+real-provider verification).
 
 ## Install
 
