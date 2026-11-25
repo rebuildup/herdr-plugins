@@ -1,0 +1,20 @@
+id = "rebuildup.checkpoints"
+name = "Checkpoints"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Worktree checkpoints as hidden git refs: capture, list, show, diff, and delete without touching the user's index or staging area."
+platforms = ["linux", "macos", "windows"]
+
+# No build step: the plugin is dependency-free TypeScript executed by Bun
+# (runtime prerequisite, see plugins/checkpoints/README.md).
+#
+# One pane-context action: `create` resolves the focused pane's repo via
+# HERDR_PLUGIN_CONTEXT_JSON. list/show/diff/delete take checkpoint ids and
+# stay CLI/agent-invoked only.
+
+[[actions]]
+id = "create"
+title = "Checkpoints: capture pane state"
+description = "Capture the focused pane repository's worktree state as a hidden-ref checkpoint."
+contexts = ["pane"]
+command = ["bun", "run", "src/cli.ts", "create"]

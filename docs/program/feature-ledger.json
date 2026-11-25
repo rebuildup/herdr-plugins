@@ -219,10 +219,10 @@
         "apps/server/src/checkpointing/"
       ],
       "classification": "plugin",
-      "issues": [4],
+      "issues": [4, 72, 73, 74, 75],
       "depends_on": ["#23", "#24", "#26", "#5"],
       "acceptance": "未コミット変更・untracked を含む安全な状態保存/復元。hidden Git refs、ターン完了と checkpoint 確定の分離、turn 固有差分と branch 全体差分の区別、複数 repo 保存・復元、保持/GC を契約化。会話巻き戻しは別能力。",
-      "verification": "未着手。実ターン境界が取得できない場合は手動・作業単位 checkpoint として区別。失敗時退避と複合 revert 拒否を契約テストで保証。"
+      "verification": "T1 (#72, release-0-4-0) で基盤実装: rebuildup.checkpoints v0.1.0 が temp GIT_INDEX_FILE capture (read-tree HEAD → add -A → write-tree → commit-tree -p HEAD → update-ref) で hidden ref refs/herdr-plugins/checkpoints/<repo-key>/<id> に保存し、create/list/show/diff/delete を提供。user index/staging 非接触・unborn HEAD/sparse/bare の構造化エラーを契約テストで保証。restore (#73)・自動 capture (#74)・複数 repo/GC (#75) は後続。shared object store 直書きは v1 の意図的簡略化 (ADR-0011)。"
     },
     {
       "id": "conversations",
