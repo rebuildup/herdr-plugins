@@ -30,6 +30,7 @@ import {
   pluginPathComponent,
 } from "../../../packages/herdr-client/src/index";
 import type { HandoffPayload, PayloadRef } from "./model";
+import { loadState } from "./state";
 
 export type RefResolutionState = "resolved" | "missing_ref" | "unchecked" | "error" | "external";
 
@@ -215,12 +216,17 @@ async function runOwnerCli(root: string, pluginId: string, args: string[]): Prom
 
 // --- resolution ---------------------------------------------------------------
 
-/** Injectable seams for tests; defaults hit the real owner CLIs. */
+/** Injectable seams for tests; defaults hit the real owner CLIs/state. */
 export interface RefDeps {
   /** Addressable conversation session keys; null = index unavailable. */
   conversationKeys?: () => Promise<Set<string> | null>;
   /** Checkpoint ids + listing completeness; null = unavailable. */
   checkpointIds?: () => Promise<{ ids: Set<string>; complete: boolean } | null>;
+  /**
+   * Handoff record ids in this plugin's own state (#106
+   * `handoff_record` refs); null = state unreadable.
+   */
+  handoffIds?: () => Promise<Set<string> | null>;
 }
 
 async function ownerIdSet(
@@ -267,6 +273,14 @@ function defaultRefDeps(): Required<RefDeps> {
       if (result === null || "error" in result) return null;
       return result;
     },
+    handoffIds: async () => {
+      try {
+        const state = await loadState();
+        return new Set(Object.keys(state.handoffs));
+      } catch {
+        return null;
+      }
+    },
   };
 }
 
@@ -279,6 +293,7 @@ export async function resolvePayloadRefs(
   const d: Required<RefDeps> = {
     conversationKeys: deps.conversationKeys ?? defaults.conversationKeys,
     checkpointIds: deps.checkpointIds ?? defaults.checkpointIds,
+    handoffIds: deps.handoffIds ?? defaults.handoffIds,
   };
   const out: ResolvedRef[] = [];
   for (const ref of payload.refs) {
@@ -311,6 +326,25 @@ export async function resolvePayloadRefs(
           ref,
           state: "missing_ref",
           detail: `session ${ref.session_key} absent from conversations index`,
+        });
+      }
+      continue;
+    }
+    if (ref.kind === "handoff_record") {
+      // Self-owned ref (#106): resolved against this plugin's state.json —
+      // no external CLI involved.
+      const ids = await d.handoffIds();
+      if (ids === null) {
+        out.push({ ref, state: "error", detail: "handoff state unreadable" });
+        continue;
+      }
+      if (ids.has(ref.id)) {
+        out.push({ ref, state: "resolved", detail: `handoff record ${ref.id} present` });
+      } else {
+        out.push({
+          ref,
+          state: "missing_ref",
+          detail: `handoff record ${ref.id} absent from handoff state`,
         });
       }
       continue;

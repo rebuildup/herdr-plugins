@@ -55,6 +55,46 @@ export const HANDOFF_STRATEGIES = [
 export type HandoffStrategy = (typeof HANDOFF_STRATEGIES)[number];
 
 /**
+ * Lineage relationship kinds — the T3 Code thread-relationship set
+ * (`fork` / `provider_handoff` / `merge_back` / `subagent_spawn` /
+ * `subagent_result`, thread-lineage-and-context-transfer.md @ 9cc4018c)
+ * mapped onto handoff records. The record itself is the lineage node;
+ * `parent_id` links it to the record it derives from or reports to:
+ *
+ * - `fork` — a new line of work branched from `parent_id`'s context.
+ * - `provider_handoff` — same work continuing under a different provider.
+ * - `merge_back` — child/fork results folded back into the parent line.
+ * - `subagent_spawn` — `parent_id` delegated a bounded task; this record
+ *   is the child's execution.
+ * - `subagent_result` — this record reports the child's outcome back to
+ *   the delegating agent (delivered via `agent.prompt` to the parent's
+ *   existing pane, never a second `agent.start`).
+ */
+export const LINEAGE_KINDS = [
+  "fork",
+  "provider_handoff",
+  "merge_back",
+  "subagent_spawn",
+  "subagent_result",
+] as const;
+export type LineageKind = (typeof LINEAGE_KINDS)[number];
+
+/**
+ * Parent/child lineage link (#106). `parent_id` is the id of the record
+ * this one is linked to — for `subagent_spawn` the delegator's record,
+ * for `subagent_result` the spawned child's record, for `fork`/
+ * `provider_handoff`/`merge_back` the source-side record. Children are
+ * never stored on the parent; they are derived by scanning records for
+ * `relationship.parent_id === <id>`.
+ */
+export interface HandoffRelationship {
+  kind: LineageKind;
+  parent_id: string;
+  /** Optional bounded free-text note about the link. */
+  note?: string;
+}
+
+/**
  * Allowed status transitions (#104). `pending → ready` happens when the
  * payload is built and the execution plan validated; `ready → delivered`
  * when `agent.start` + the first prompt are accepted by herdr;
@@ -145,6 +185,17 @@ export type PayloadRef =
       kind: "checkpoint";
       plugin: "rebuildup.checkpoints";
       /** Checkpoint entry id from `checkpoints list`. */
+      id: string;
+    }
+  | {
+      /**
+       * Another handoff record in this plugin's own state (#106). Used by
+       * lineage payloads (e.g. a `subagent_result` referencing the child
+       * record it reports on). Resolved against `state.json`, never via
+       * an external CLI.
+       */
+      kind: "handoff_record";
+      plugin: "rebuildup.handoff";
       id: string;
     }
   | {
@@ -246,6 +297,16 @@ export interface ExecutionBundle {
   external_refs: number;
 }
 
+/** Worktree-backed target created via herdr `worktree.create` (#106). */
+export interface ExecutionWorktree {
+  /** Checkout path reported by herdr (`WorktreeInfo.path`). */
+  path: string;
+  branch: string | null;
+  is_linked_worktree: boolean;
+  /** Workspace herdr opened/created for the worktree. */
+  workspace_id: string | null;
+}
+
 export interface HandoffExecution {
   /** When the strategy decision + payload build completed (`ready`). */
   decided_at: string;
@@ -278,6 +339,8 @@ export interface HandoffExecution {
   remote?: RemoteExecutionInfo;
   /** Portable bundle written for cross-machine execution. */
   bundle?: ExecutionBundle;
+  /** Present when the target surface is a herdr-managed git worktree. */
+  worktree?: ExecutionWorktree;
 }
 
 export interface HandoffRecord {
@@ -293,6 +356,11 @@ export interface HandoffRecord {
   payload: HandoffPayload;
   /** Present once `execute` has run (ready or later). */
   execution?: HandoffExecution;
+  /**
+   * Lineage link (#106): this record's place in a parent/child chain.
+   * Absent for root records. Children are derived, never stored.
+   */
+  relationship?: HandoffRelationship;
 }
 
 // --- construction -----------------------------------------------------------
@@ -357,6 +425,7 @@ export function createRecord(input: {
   strategy: HandoffStrategy;
   target?: TargetSpec | undefined;
   payload: HandoffPayload;
+  relationship?: HandoffRelationship | undefined;
   now?: Date;
 }): HandoffRecord {
   const now = (input.now ?? new Date()).toISOString();
@@ -370,6 +439,7 @@ export function createRecord(input: {
     transfer: input.transfer,
     target: input.target ?? null,
     payload: input.payload,
+    ...(input.relationship !== undefined ? { relationship: input.relationship } : {}),
   };
   return record;
 }
@@ -480,6 +550,10 @@ function parsePayloadRef(v: unknown): PayloadRef {
       if (v.plugin !== "rebuildup.checkpoints") throw new Error("invalid ref plugin");
       return { kind: "checkpoint", plugin: "rebuildup.checkpoints", id: reqString(v.id, "id") };
     }
+    case "handoff_record": {
+      if (v.plugin !== "rebuildup.handoff") throw new Error("invalid ref plugin");
+      return { kind: "handoff_record", plugin: "rebuildup.handoff", id: reqString(v.id, "id") };
+    }
     case "external": {
       const target = v.target;
       if (target !== "uri" && target !== "path" && target !== "issue") {
@@ -546,6 +620,31 @@ function parseTarget(v: unknown): TargetSpec | null {
   if (providerHint !== undefined) target.provider_hint = providerHint;
   if (note !== undefined) target.note = note;
   return target;
+}
+
+function parseRelationship(v: unknown): HandoffRelationship {
+  if (!isObj(v)) throw new Error("invalid relationship");
+  const kind = v.kind;
+  if (typeof kind !== "string" || !(LINEAGE_KINDS as readonly string[]).includes(kind)) {
+    throw new Error(`invalid relationship.kind: ${String(kind)}`);
+  }
+  const rel: HandoffRelationship = {
+    kind: kind as LineageKind,
+    parent_id: reqString(v.parent_id, "relationship.parent_id"),
+  };
+  const note = optString(v.note);
+  if (note !== undefined) rel.note = note;
+  return rel;
+}
+
+function parseExecutionWorktree(v: unknown): ExecutionWorktree {
+  if (!isObj(v)) throw new Error("invalid execution.worktree");
+  return {
+    path: reqString(v.path, "execution.worktree.path"),
+    branch: optNullableString(v.branch),
+    is_linked_worktree: v.is_linked_worktree === true,
+    workspace_id: optNullableString(v.workspace_id),
+  };
 }
 
 function parseExecution(v: unknown): HandoffExecution {
@@ -631,6 +730,9 @@ function parseExecution(v: unknown): HandoffExecution {
       external_refs: typeof v.bundle.external_refs === "number" ? v.bundle.external_refs : 0,
     };
   }
+  if (isObj(v.worktree)) {
+    exec.worktree = parseExecutionWorktree(v.worktree);
+  }
   return exec;
 }
 
@@ -662,6 +764,9 @@ export function parseHandoffRecord(raw: unknown): HandoffRecord {
     payload: parsePayload(raw.payload),
     ...(raw.execution !== undefined && raw.execution !== null
       ? { execution: parseExecution(raw.execution) }
+      : {}),
+    ...(raw.relationship !== undefined && raw.relationship !== null
+      ? { relationship: parseRelationship(raw.relationship) }
       : {}),
   };
 }

@@ -14,6 +14,13 @@ T3 scope (issue #105): cross-machine execution — `execute --remote`
 (saved-machine SSH bridge), `status --remote`, `remote-probe`, and the
 portable bundle (`herdr-plugins.handoff/bundle/v1`). Remote fields are
 additive optional members of v1.
+T4 scope (issue #106): delegation lineage — `delegate` (subagent_spawn
+child + execute), `merge-back` (subagent_result / merge_back result
+records delivered via `agent.prompt` to the parent's existing pane),
+`create --parent/--relationship`, the `handoff_record` payload ref
+kind, `execute --worktree` (herdr `worktree.create` targets), and the
+`status`/`list` lineage views. All T4 fields are additive optional
+members of v1; **v1 is stable** at plugin v0.6.0 (see Versioning).
 
 ## Invocation and discovery
 
@@ -33,8 +40,8 @@ An external client resolves the CLI as follows:
 {
   "contract": "herdr-plugins.handoff/v1",
   "plugin": "rebuildup.handoff",
-  "version": "0.3.0",
-  "commands": ["create", "list", "status", "execute", "resume-info", "remote-probe", "capability"],
+  "version": "0.6.0",
+  "commands": ["create", "list", "status", "execute", "resume-info", "remote-probe", "delegate", "merge-back", "capability"],
   "actions": [],
   "events": [],
   "startup": [],
@@ -42,10 +49,15 @@ An external client resolves the CLI as follows:
   "config_dir": "…",
   "socket": null,
   "execution": "same_host_and_remote_saved_machines",
+  "lineage": {
+    "kinds": ["fork", "provider_handoff", "merge_back", "subagent_spawn", "subagent_result"],
+    "model": "record.relationship{kind,parent_id}; children derived by scan",
+    "scope": "same-session only in v1; remote lineage refused (unsupported_lineage)"
+  },
   "execution_surface": {
     "strategies": ["native_resume", "portable_context"],
-    "target_selection": ["--target-pane", "--target-workspace", "--new-workspace", "--remote <machine>"],
-    "agent_api": ["workspace.create", "tab.create", "agent.start", "agent.prompt", "agent.wait"],
+    "target_selection": ["--target-pane", "--target-workspace", "--new-workspace", "--worktree [--worktree-branch B] [--worktree-base R]", "--remote <machine>"],
+    "agent_api": ["workspace.create", "tab.create", "worktree.create", "agent.start", "agent.prompt", "agent.wait"],
     "failure_cleanup_flag": "--cleanup-on-failure",
     "observation_flag": "--wait-ms",
     "provider_hint": "opaque label; first '.'-segment is used as the agent.start kind only"
@@ -94,6 +106,8 @@ machine handoff is T3 (#105) and will extend `transfer.host` semantics.
 | `list` | `--status S --limit N` | Enumerate records, newest first. |
 | `status` | `handoff_id` | Full record + staleness + target check + per-ref resolution. |
 | `execute` | `handoff_id` + flags | Run the same-host handoff (see below). |
+| `delegate` | `parent_id` + flags | subagent_spawn: child record + execute (see "Delegation lineage"). |
+| `merge-back` | `child_id` + flags | subagent_result/merge_back: result record + `agent.prompt` delivery. |
 | `resume-info` | `--provider KIND` | Provider native-resume capability table. |
 | `capability` | — | Discovery document (above). |
 
@@ -120,6 +134,12 @@ Global flags (after the command): `--session NAME`, `--socket PATH`,
   `path`).
 - `--target-pane <id>` / `--target-workspace <id>` — desired destination
   recorded as intent; nothing is created.
+- `--handoff <id>` (repeatable) — `handoff_record` payload ref to
+  another record in this plugin's state (lineage evidence).
+- `--parent <id>` + `--relationship <kind>` — lineage link; `kind` ∈
+  `fork | provider_handoff | merge_back | subagent_spawn |
+  subagent_result`. Both flags are required together; the parent must
+  exist in state. `--link-note <text>` annotates the link.
 - `--dry-run` — emit the would-be record; write nothing.
 
 ## Handoff record schema
@@ -145,11 +165,13 @@ Global flags (after the command): `--session NAME`, `--socket PATH`,
     "state_change_seq": 7
   },
   "target": { "provider_hint": "claude.openrouter" },
+  "relationship": { "kind": "subagent_spawn", "parent_id": "ho-…", "note": "…" },
   "payload": {
     "refs": [
       { "kind": "conversation_session", "plugin": "rebuildup.conversations",
         "session_key": "claude:<uuid>", "event_refs": ["u-1"] },
       { "kind": "checkpoint", "plugin": "rebuildup.checkpoints", "id": "m2x-…" },
+      { "kind": "handoff_record", "plugin": "rebuildup.handoff", "id": "ho-…" },
       { "kind": "external", "target": "uri", "value": "https://…" }
     ],
     "excerpt": { "text": "…", "truncated": false, "source": "note" },
@@ -174,6 +196,10 @@ Field semantics:
     record only — event-level checks are consumer-side via
     `conversations show`).
   - `checkpoint` → `rebuildup.checkpoints` entry id.
+  - `handoff_record` → another record in this plugin's own state
+    (`rebuildup.handoff`); resolved against `state.json` — `resolved` /
+    `missing_ref` only, never `error` for a missing file (unreadable
+    state → `error`).
   - `external` → `uri | path | issue` pointer, never fetched.
 - `payload.excerpt` — bounded inline context (`source: "note"` in v1).
 - `status` — `pending | ready | delivered | done | failed | superseded`.
@@ -185,6 +211,12 @@ Field semantics:
 - `execution` — optional `HandoffExecution` object present once
   `execute` has run (see "Execution record" below). Absent on records
   created before T2.
+- `relationship` — optional `HandoffRelationship{kind, parent_id,
+  note?}` lineage link (#106). `kind` ∈ `fork | provider_handoff |
+  merge_back | subagent_spawn | subagent_result`; `parent_id` is the
+  record this one derives from (spawn/fork/provider_handoff) or reports
+  on (subagent_result/merge_back). Children are derived by scanning —
+  never stored on the parent.
 
 ## `list` output
 
@@ -272,11 +304,33 @@ reported, NOT auto-failed: a user may have closed it after completion),
 or `unchecked` with `reason` ∈ `not_executed | snapshot_unavailable |
 other_session`.
 
+`status` also returns a `lineage` block (#106):
+
+```json
+"lineage": {
+  "relationship": { "kind": "subagent_spawn", "parent_id": "ho-…", "note": "…" },
+  "parent": { "id": "ho-…", "status": "delivered", "missing": false },
+  "parent_missing": false,
+  "children": [
+    { "id": "ho-…", "status": "done", "kind": "subagent_result",
+      "created_at": "…" }
+  ]
+}
+```
+
+`parent`/`parent_missing` report the record named by
+`relationship.parent_id` (`null`/`false` for root records;
+`parent_missing: true` when the linked record was evicted);
+`children` lists records whose `relationship.parent_id` is this id,
+ordered by `created_at`. `list` items carry `relationship` (or `null`)
+and `child_count` for the same derived view.
+
 ## `execute`
 
 ```
 handoff execute <handoff-id>
-  [--target-pane ID | --target-workspace ID | --new-workspace]
+  [--target-pane ID | --target-workspace ID | --new-workspace | --worktree
+   [--worktree-branch B] [--worktree-base R]]
   [--provider HINT] [--model M]
   [--wait-ms MS] [--cleanup-on-failure] [--dry-run]
   [--remote MACHINE]
@@ -296,9 +350,14 @@ Runs the handoff end-to-end (same-host by default; `--remote` selects a saved ma
    `strategy_used`, `provider_kind`, `decision`, `resume_args`.
 4. **Surface** — target pane reuse (`--target-pane`, must be agent-free),
    `tab.create` (`--target-workspace` / `record.target.workspace_id`),
-   or `workspace.create` (default / `--new-workspace`, cwd inherited
-   from `transfer.cwd`). Only plugin-*created* surfaces set
-   `execution.target.created: true`.
+   `worktree.create` (`--worktree [--worktree-branch B]
+   [--worktree-base R]`, cwd inherited from `transfer.cwd`; works
+   locally and via `--remote`), or `workspace.create` (default /
+   `--new-workspace`, cwd inherited from `transfer.cwd`). Only
+   plugin-*created* surfaces set `execution.target.created: true`.
+   The four target selectors are mutually exclusive; a transport
+   without `worktree.create` refuses pre-mutation
+   (`worktree_unsupported`).
 5. **`agent.start`** — `kind` = first `.`-segment of the provider hint
    (opaque label → kind only; Agent Router is never invoked);
    `args` = resume argv (`native_resume`) + optional `--model` mapping.
@@ -355,6 +414,50 @@ session_id_source, resume_args_template, model_flag, notes}`.
 guessing. The table is the handoff-side seed of the provider capability
 surface `rebuildup.controls` T2 (#100) is expected to own; until then
 unlisted providers report `unknown`.
+
+## Delegation lineage (T4, #106)
+
+```
+handoff delegate <parent-handoff-id>
+  [--task TEXT] [--strategy STRATEGY] [--provider HINT] [--model M]
+  [--worktree [--worktree-branch B] [--worktree-base R]]
+  [--target-pane ID | --target-workspace ID | --new-workspace]
+  [--wait-ms MS] [--cleanup-on-failure] [--link-note TEXT]
+  [payload flags as create] [--no-execute] [--dry-run]
+
+handoff merge-back <child-handoff-id>
+  [--task TEXT] [--wait-ms MS] [--link-note TEXT]
+  [payload flags as create] [--no-execute] [--dry-run]
+```
+
+- **`delegate`** creates a child record with
+  `relationship{kind:"subagent_spawn", parent_id:<parent>}` whose
+  transfer identity is the delegating agent's pane (the parent record's
+  executed target, else its source pane — resolved live, never from
+  stale ids), then runs the normal `execute` pipeline: a NEW agent via
+  `agent.start` in a fresh surface. `--no-execute` records intent only;
+  `--dry-run` previews the child record without persisting.
+- **`merge-back`** creates a result record with
+  `relationship{kind:"subagent_result"|"merge_back", parent_id:<child>}`
+  (`merge_back` when the child is a `fork`, else `subagent_result`)
+  whose transfer identity is the child's pane, and delivers it via
+  `agent.prompt` to the DELEGATING agent's existing pane — resolved
+  through the child's own `parent_id`. `agent.start` is never called on
+  a pane that already runs an agent; a parent pane without a live agent
+  is refused (`parent_agent_missing`). The payload always includes a
+  `handoff_record` ref to the child record.
+- Both are **same-session only in v1**: cross-session parents and
+  remote-executed parents/children are refused
+  (`other_session` / `unsupported_lineage`). `delegate --remote` is a
+  usage error.
+- A result record must not be run through `execute` — its delivery
+  pane already runs the parent agent and `requireUsablePane` refuses
+  busy panes honestly.
+- Boundary (ADR-0021): #30 MCP may expose these commands as tools —
+  that is #30's decision; this contract is the surface it consumes.
+  #32 automations may *invoke* `delegate`/`merge-back`/`execute`, but
+  scheduled or failure-triggered handoff is automation scope, not this
+  plugin's.
 
 ## Remote execution (T3, #105)
 
@@ -444,11 +547,16 @@ and are never used.
               "server_version": "0.9.5", "protocol": 22 },
   "bundle": { "contract": "herdr-plugins.handoff/bundle/v1",
               "path": "…/bundles/ho-….json", "refs": 3,
-              "plugin_state_refs": 2, "external_refs": 1 }
+              "plugin_state_refs": 2, "external_refs": 1 },
+  "worktree": { "path": "/repo-wt", "branch": "handoff/x",
+              "is_linked_worktree": true, "workspace_id": "w9" }
 }
 ```
 
-`remote`/`bundle` are present only for `execute --remote` runs.
+`remote`/`bundle` are present only for `execute --remote` runs;
+`worktree` is present only for `execute --worktree` runs and records
+what herdr `worktree.create` reported (`path`, `branch`,
+`is_linked_worktree`, `workspace_id`).
 
 `agent.state_change_seq` is the **pre-prompt baseline** used by the done
 verdict; `observed.agent_status` is always the raw herdr value.
@@ -511,3 +619,11 @@ calls described above, and only after the gate passes.
 `contract` is `herdr-plugins.handoff/vN`. Additive optional fields may
 appear within v1; breaking changes bump the version. `capability` exposes
 `commands`/`execution`/`limits` for feature detection.
+
+**v1 is stable** as of plugin v0.6.0 (release-0-6-0 train, issue #106):
+the record schema, status lifecycle, payload ref kinds (including
+`handoff_record`), lineage (`relationship`), worktree targets, and all
+commands above are the frozen v1 surface. Within v1 only additive
+optional fields may appear; any semantic change to existing fields,
+status transitions, ref resolution verdicts, or command behavior
+requires `herdr-plugins.handoff/v2`.

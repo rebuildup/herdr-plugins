@@ -12,7 +12,11 @@
  * T3 (#105) adds cross-machine execution: `execute --remote` /
  * `status --remote` over herdr saved machines (`herdr --machine` SSH
  * bridge) plus the portable bundle, and `remote-probe` for capability
- * detection.
+ * detection. T4 (#106) adds delegation lineage — `delegate`
+ * (subagent_spawn child + execute), `merge-back` (subagent_result /
+ * merge_back delivered via `agent.prompt` to the parent's existing
+ * pane), `create --parent/--relationship`, `--handoff` payload refs,
+ * and `execute --worktree` (herdr `worktree.create` targets).
  *
  * All commands emit a single JSON document on stdout; diagnostics go to
  * stderr. Exit code 0 on success, 1 on handled errors, 2 on usage.
@@ -38,6 +42,12 @@ import {
   reconcileRemoteDelivered,
 } from "./execute";
 import {
+  type DelegateResult,
+  delegateHandoff,
+  type MergeBackResult,
+  mergeBackHandoff,
+} from "./lineage";
+import {
   boundedExcerpt,
   buildTransferIdentity,
   CONTRACT,
@@ -48,6 +58,8 @@ import {
   HANDOFF_STRATEGIES,
   type HandoffPayload,
   type HandoffStrategy,
+  LINEAGE_KINDS,
+  type LineageKind,
   MAX_EXCERPT_CHARS,
   MAX_EXTERNAL_VALUE_CHARS,
   MAX_PAYLOAD_REFS,
@@ -142,6 +154,7 @@ const VALUE_FLAGS = new Set([
   "--conversation",
   "--checkpoint",
   "--external",
+  "--handoff",
   "--requirement",
   "--target-pane",
   "--target-workspace",
@@ -149,6 +162,12 @@ const VALUE_FLAGS = new Set([
   "--status",
   "--limit",
   "--remote",
+  "--parent",
+  "--relationship",
+  "--link-note",
+  "--task",
+  "--worktree-branch",
+  "--worktree-base",
 ]);
 
 function positional(args: string[]): string[] {
@@ -186,6 +205,9 @@ function buildPayload(args: string[]): HandoffPayload {
   }
   for (const id of flagValues(args, "--checkpoint")) {
     refs.push({ kind: "checkpoint", plugin: "rebuildup.checkpoints", id });
+  }
+  for (const id of flagValues(args, "--handoff")) {
+    refs.push({ kind: "handoff_record", plugin: "rebuildup.handoff", id });
   }
   for (const value of flagValues(args, "--external")) {
     if (value.length > MAX_EXTERNAL_VALUE_CHARS) {
@@ -263,7 +285,38 @@ async function cmdCreate(options: CliOptions): Promise<void> {
 
   const payload = buildPayload(options.args);
   const target = buildTarget(options.args);
-  const record = createRecord({ transfer, strategy, target: target ?? undefined, payload });
+
+  // Lineage link (#106): --parent + --relationship create a linked
+  // record; the parent must exist in state (checked inside the write
+  // lock below).
+  const parentId = flagValue(options.args, "--parent");
+  const relationshipKind = flagValue(options.args, "--relationship");
+  const linkNote = flagValue(options.args, "--link-note");
+  if (relationshipKind !== undefined && parentId === undefined) {
+    fail("--relationship requires --parent <handoff-id>", 2);
+  }
+  if (parentId !== undefined && relationshipKind === undefined) {
+    fail(`--parent requires --relationship (${LINEAGE_KINDS.join("|")})`, 2);
+  }
+  let relationship: { kind: LineageKind; parent_id: string; note?: string } | undefined;
+  if (parentId !== undefined && relationshipKind !== undefined) {
+    if (!(LINEAGE_KINDS as readonly string[]).includes(relationshipKind)) {
+      fail(`invalid --relationship: ${relationshipKind} (one of ${LINEAGE_KINDS.join(", ")})`, 2);
+    }
+    relationship = {
+      kind: relationshipKind as LineageKind,
+      parent_id: parentId,
+      ...(linkNote !== undefined ? { note: linkNote } : {}),
+    };
+  }
+
+  const record = createRecord({
+    transfer,
+    strategy,
+    target: target ?? undefined,
+    payload,
+    relationship,
+  });
 
   if (hasFlag(options.args, "--dry-run")) {
     emit({
@@ -276,11 +329,23 @@ async function cmdCreate(options: CliOptions): Promise<void> {
     return;
   }
 
-  const pruned = await updateState((state) => {
-    state.handoffs[record.id] = record;
-    return Object.keys(state.handoffs).length;
-  });
-  void pruned;
+  try {
+    await updateState((state) => {
+      if (relationship !== undefined && state.handoffs[relationship.parent_id] === undefined) {
+        throw new HandoffExecError(
+          `parent handoff not found: ${relationship.parent_id}`,
+          "handoff_not_found",
+        );
+      }
+      state.handoffs[record.id] = record;
+      return Object.keys(state.handoffs).length;
+    });
+  } catch (err) {
+    if (err instanceof HandoffExecError) {
+      fail(err.message, err.kind === "usage" ? 2 : 1, err.kind);
+    }
+    throw err;
+  }
 
   emit({
     contract: CONTRACT,
@@ -327,12 +392,22 @@ async function cmdList(options: CliOptions): Promise<void> {
   }
   const page = records.slice(0, limit);
 
+  const childCounts = new Map<string, number>();
+  for (const r of Object.values(state.handoffs)) {
+    const parentId = r.relationship?.parent_id;
+    if (parentId !== undefined) {
+      childCounts.set(parentId, (childCounts.get(parentId) ?? 0) + 1);
+    }
+  }
+
   const items = page.map((record) => ({
     id: record.id,
     status: record.status,
     strategy: record.strategy,
     created_at: record.created_at,
     updated_at: record.updated_at,
+    relationship: record.relationship ?? null,
+    child_count: childCounts.get(record.id) ?? 0,
     transfer: {
       host: record.transfer.host,
       herdr_session: record.transfer.herdr_session,
@@ -501,10 +576,32 @@ async function cmdStatus(options: CliOptions, deps: RefDeps & RemoteDeps = {}): 
   }
   const resolved = resolveRefs ? await resolvePayloadRefs(record.payload, deps) : null;
 
+  // Lineage view (#106): the record's own link plus derived children.
+  const parentId = record.relationship?.parent_id ?? null;
+  const parentRecord = parentId !== null ? (state.handoffs[parentId] ?? null) : null;
+  const children = Object.values(state.handoffs)
+    .filter((r) => r.relationship?.parent_id === record.id)
+    .map((r) => ({
+      id: r.id,
+      status: r.status,
+      kind: r.relationship?.kind ?? null,
+      created_at: r.created_at,
+    }))
+    .sort((a, b) => a.created_at.localeCompare(b.created_at));
+
   emit({
     contract: CONTRACT,
     command: "status",
     handoff: record,
+    lineage: {
+      relationship: record.relationship ?? null,
+      parent:
+        parentRecord === null
+          ? null
+          : { id: parentRecord.id, status: parentRecord.status, missing: false },
+      parent_missing: parentId !== null && parentRecord === null,
+      children,
+    },
     transfer_check: transferCheck,
     target_check: targetCheck,
     remote_check: remoteCheck,
@@ -526,6 +623,23 @@ function parseNonNegativeMs(raw: string | undefined, flag: string): number | und
   return value;
 }
 
+function parseExecuteFlags(args: string[]): ExecuteFlags {
+  return {
+    targetPane: flagValue(args, "--target-pane"),
+    targetWorkspace: flagValue(args, "--target-workspace"),
+    newWorkspace: hasFlag(args, "--new-workspace"),
+    worktree: hasFlag(args, "--worktree"),
+    worktreeBranch: flagValue(args, "--worktree-branch"),
+    worktreeBase: flagValue(args, "--worktree-base"),
+    provider: flagValue(args, "--provider"),
+    model: flagValue(args, "--model"),
+    cleanupOnFailure: hasFlag(args, "--cleanup-on-failure"),
+    waitMs: parseNonNegativeMs(flagValue(args, "--wait-ms"), "--wait-ms"),
+    dryRun: hasFlag(args, "--dry-run"),
+    remote: flagValue(args, "--remote"),
+  };
+}
+
 async function cmdExecute(
   options: CliOptions,
   deps: { transport?: HandoffTransport } & RemoteDeps = {},
@@ -534,17 +648,7 @@ async function cmdExecute(
   if (pos.length !== 1) fail("execute requires exactly one <handoff-id>", 2);
   const id = pos[0] as string;
 
-  const flags: ExecuteFlags = {
-    targetPane: flagValue(options.args, "--target-pane"),
-    targetWorkspace: flagValue(options.args, "--target-workspace"),
-    newWorkspace: hasFlag(options.args, "--new-workspace"),
-    provider: flagValue(options.args, "--provider"),
-    model: flagValue(options.args, "--model"),
-    cleanupOnFailure: hasFlag(options.args, "--cleanup-on-failure"),
-    waitMs: parseNonNegativeMs(flagValue(options.args, "--wait-ms"), "--wait-ms"),
-    dryRun: hasFlag(options.args, "--dry-run"),
-    remote: flagValue(options.args, "--remote"),
-  };
+  const flags = parseExecuteFlags(options.args);
 
   const transport = deps.transport ?? herdrTransport(options);
   const sessionKey = sessionKeyFor(options);
@@ -607,6 +711,201 @@ async function cmdExecute(
     outcome: result.outcome,
     handoff: result.record,
     ...(result.remote !== undefined ? { remote: result.remote } : {}),
+    state_file: stateFilePath(),
+    generated_at: new Date().toISOString(),
+  });
+}
+
+// --- delegate / merge-back (T4, #106) ----------------------------------------------
+
+/**
+ * `delegate <parent-handoff-id>` — subagent_spawn: create a child record
+ * bound to the delegating agent's pane, then execute it (fresh child
+ * agent via the normal pipeline; `--worktree` for an isolated
+ * worktree). `--no-execute` records intent only; `--dry-run` previews
+ * the child record without persisting.
+ */
+async function cmdDelegate(
+  options: CliOptions,
+  deps: { transport?: HandoffTransport } = {},
+): Promise<void> {
+  const pos = positional(options.args);
+  if (pos.length !== 1) fail("delegate requires exactly one <parent-handoff-id>", 2);
+  const parentId = pos[0] as string;
+
+  const strategyRaw = flagValue(options.args, "--strategy");
+  if (
+    strategyRaw !== undefined &&
+    !(HANDOFF_STRATEGIES as readonly string[]).includes(strategyRaw)
+  ) {
+    fail(`invalid --strategy: ${strategyRaw} (one of ${HANDOFF_STRATEGIES.join(", ")})`, 2);
+  }
+
+  const payload = buildPayload(options.args);
+  const task = flagValue(options.args, "--task");
+  if (task !== undefined) {
+    if (payload.excerpt === undefined) {
+      payload.excerpt = boundedExcerpt(task, "note");
+    } else {
+      payload.requirements = [`task: ${task}`, ...(payload.requirements ?? [])].slice(
+        0,
+        MAX_REQUIREMENTS,
+      );
+    }
+  }
+
+  const execFlags = parseExecuteFlags(options.args);
+  if (execFlags.remote !== undefined) {
+    fail("delegate is same-session only in v1; --remote is not supported", 2);
+  }
+  const noExecute = hasFlag(options.args, "--no-execute");
+  const transport = deps.transport ?? herdrTransport(options);
+  const sessionKey = sessionKeyFor(options);
+
+  let result: DelegateResult;
+  try {
+    result = await delegateHandoff(
+      {
+        parentId,
+        payload,
+        ...(strategyRaw !== undefined ? { strategy: strategyRaw as HandoffStrategy } : {}),
+        relationshipNote: flagValue(options.args, "--link-note"),
+        execute: !noExecute,
+        dryRun: execFlags.dryRun === true,
+        executeFlags: execFlags,
+      },
+      { transport, sessionKey },
+    );
+  } catch (err) {
+    if (err instanceof HandoffExecError) {
+      fail(err.message, err.kind === "usage" ? 2 : 1, err.kind, err.extra);
+    }
+    throw err;
+  }
+
+  if (result.dry_run === true) {
+    emit({
+      contract: CONTRACT,
+      command: "delegate",
+      dry_run: true,
+      handoff: result.record,
+      parent: result.parent.id,
+      generated_at: new Date().toISOString(),
+    });
+    return;
+  }
+  if (noExecute) {
+    emit({
+      contract: CONTRACT,
+      command: "delegate",
+      outcome: "recorded",
+      handoff: result.record,
+      parent: result.parent.id,
+      state_file: stateFilePath(),
+      generated_at: new Date().toISOString(),
+    });
+    return;
+  }
+  const exec = result.execution;
+  if (exec?.outcome === "failed") {
+    fail(
+      `delegation execution failed at step "${exec.error?.step ?? "?"}": ${exec.error?.message ?? "unknown"}`,
+      1,
+      "execution_failed",
+      { handoff: result.record, step: exec.error?.step ?? null },
+    );
+  }
+  emit({
+    contract: CONTRACT,
+    command: "delegate",
+    outcome: exec?.outcome ?? "recorded",
+    handoff: result.record,
+    parent: result.parent.id,
+    state_file: stateFilePath(),
+    generated_at: new Date().toISOString(),
+  });
+}
+
+/**
+ * `merge-back <child-handoff-id>` — subagent_result/merge_back: create a
+ * result record reporting the child's outcome and deliver it via
+ * `agent.prompt` to the delegating agent's EXISTING pane (never a second
+ * `agent.start`). `--no-execute` records intent only; `--dry-run`
+ * previews record + prompt without persisting.
+ */
+async function cmdMergeBack(
+  options: CliOptions,
+  deps: { transport?: HandoffTransport } = {},
+): Promise<void> {
+  const pos = positional(options.args);
+  if (pos.length !== 1) fail("merge-back requires exactly one <child-handoff-id>", 2);
+  const childId = pos[0] as string;
+
+  const payload = buildPayload(options.args);
+  const task = flagValue(options.args, "--task");
+  if (task !== undefined) {
+    if (payload.excerpt === undefined) {
+      payload.excerpt = boundedExcerpt(task, "note");
+    } else {
+      payload.requirements = [`task: ${task}`, ...(payload.requirements ?? [])].slice(
+        0,
+        MAX_REQUIREMENTS,
+      );
+    }
+  }
+
+  const transport = deps.transport ?? herdrTransport(options);
+  const sessionKey = sessionKeyFor(options);
+  const noExecute = hasFlag(options.args, "--no-execute");
+
+  let result: MergeBackResult;
+  try {
+    result = await mergeBackHandoff(
+      {
+        childId,
+        payload,
+        relationshipNote: flagValue(options.args, "--link-note"),
+        waitMs: parseNonNegativeMs(flagValue(options.args, "--wait-ms"), "--wait-ms"),
+        execute: !noExecute,
+        dryRun: hasFlag(options.args, "--dry-run"),
+      },
+      { transport, sessionKey },
+    );
+  } catch (err) {
+    if (err instanceof HandoffExecError) {
+      fail(err.message, err.kind === "usage" ? 2 : 1, err.kind, err.extra);
+    }
+    throw err;
+  }
+
+  if (result.outcome === "dry_run") {
+    emit({
+      contract: CONTRACT,
+      command: "merge-back",
+      dry_run: true,
+      handoff: result.record,
+      child: result.child.id,
+      parent: result.parent.id,
+      prompt_text: result.prompt_text,
+      generated_at: new Date().toISOString(),
+    });
+    return;
+  }
+  if (result.outcome === "failed") {
+    fail(
+      `merge-back delivery failed at step "${result.error?.step ?? "?"}": ${result.error?.message ?? "unknown"}`,
+      1,
+      "execution_failed",
+      { handoff: result.record, step: result.error?.step ?? null },
+    );
+  }
+  emit({
+    contract: CONTRACT,
+    command: "merge-back",
+    outcome: result.outcome,
+    handoff: result.record,
+    child: result.child.id,
+    parent: result.parent.id,
     state_file: stateFilePath(),
     generated_at: new Date().toISOString(),
   });
@@ -731,8 +1030,18 @@ async function cmdCapability(options: CliOptions): Promise<void> {
   emit({
     contract: CONTRACT,
     plugin: PLUGIN_ID,
-    version: "0.3.0",
-    commands: ["create", "list", "status", "execute", "resume-info", "remote-probe", "capability"],
+    version: "0.6.0",
+    commands: [
+      "create",
+      "list",
+      "status",
+      "execute",
+      "resume-info",
+      "remote-probe",
+      "delegate",
+      "merge-back",
+      "capability",
+    ],
     actions: [],
     events: [],
     startup: [],
@@ -740,6 +1049,14 @@ async function cmdCapability(options: CliOptions): Promise<void> {
     config_dir: pluginDirs(PLUGIN_ID).configDir,
     socket: options.socketPath ?? null,
     execution: "same_host_and_remote_saved_machines",
+    lineage: {
+      kinds: [...LINEAGE_KINDS],
+      model: "record.relationship{kind,parent_id}; children derived by scan",
+      delegate: "subagent_spawn child record + normal execute pipeline",
+      merge_back:
+        "subagent_result/merge_back record delivered via agent.prompt to the parent's existing pane (never agent.start)",
+      scope: "same-session only in v1; remote lineage refused (unsupported_lineage)",
+    },
     remote: {
       mechanism:
         "herdr saved machines + `herdr --machine <label-or-id>` CLI bridge (SSH → remote-api-bridge)",
@@ -755,11 +1072,13 @@ async function cmdCapability(options: CliOptions): Promise<void> {
         "--target-pane",
         "--target-workspace",
         "--new-workspace",
+        "--worktree [--worktree-branch B] [--worktree-base R]",
         "--remote <machine>",
       ],
       agent_api: [
         "workspace.create",
         "tab.create",
+        "worktree.create",
         "agent.start",
         "agent.prompt",
         "agent.wait",
@@ -784,22 +1103,34 @@ Usage:
   handoff create <pane_id> [--strategy STRATEGY] [--provider HINT]
                  [--note TEXT] [--requirement TEXT]...
                  [--conversation KEY]... [--checkpoint ID]...
-                 [--external VALUE]... [--target-pane ID]
-                 [--target-workspace ID] [--dry-run]
-                 [--session NAME] [--socket PATH]
+                 [--external VALUE]... [--handoff ID]...
+                 [--target-pane ID] [--target-workspace ID]
+                 [--parent ID --relationship KIND [--link-note TEXT]]
+                 [--dry-run] [--session NAME] [--socket PATH]
   handoff list [--status STATUS] [--limit N] [--session NAME]
   handoff execute <handoff-id> [--target-pane ID | --target-workspace ID
-                 | --new-workspace] [--provider HINT] [--model M]
+                 | --new-workspace | --worktree [--worktree-branch B]
+                 [--worktree-base R]] [--provider HINT] [--model M]
                  [--wait-ms MS] [--cleanup-on-failure] [--dry-run]
                  [--remote MACHINE] [--session NAME] [--socket PATH]
   handoff status <handoff-id> [--no-resolve-refs] [--no-reconcile]
                  [--remote MACHINE] [--session NAME]
+  handoff delegate <parent-handoff-id> [--task TEXT] [--strategy STRATEGY]
+                 [--provider HINT] [--model M] [--worktree]
+                 [--target-pane ID | --target-workspace ID | --new-workspace]
+                 [--wait-ms MS] [--cleanup-on-failure]
+                 [--no-execute] [--dry-run] [payload flags as create]
+                 [--session NAME] [--socket PATH]
+  handoff merge-back <child-handoff-id> [--task TEXT] [--wait-ms MS]
+                 [--no-execute] [--dry-run] [payload flags as create]
+                 [--session NAME] [--socket PATH]
   handoff resume-info [--provider KIND]
   handoff remote-probe [MACHINE | --all]
   handoff capability [--session NAME]
 
 Strategies: ${HANDOFF_STRATEGIES.join(" | ")}
 Statuses:   ${HANDOFF_STATUSES.join(" | ")}
+Lineage:    ${LINEAGE_KINDS.join(" | ")}
 
 execute runs the handoff: target surface via herdr API only, agent.start,
 payload prompt injection, then pending→ready→delivered→done/failed
@@ -809,6 +1140,14 @@ state dir, plugin-state payload refs are marked non-resolvable remotely,
 and unreachable/disabled/unsupported machines fail structurally before
 any mutation. native_resume falls back to portable_context when the
 provider cannot resume; failures persist status=failed honestly.
+
+--worktree creates the target as a herdr-managed git worktree
+(worktree.create) for isolated parallel work; merging the checkout
+back stays a git/forge concern. delegate spawns a subagent_spawn child
+record bound to the delegating pane and executes it; merge-back
+reports a child's outcome back to the delegating agent via
+agent.prompt on its existing pane (never a second agent.start).
+Delegation/merge-back are same-session only in v1.
 `;
 
 export async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
@@ -822,6 +1161,10 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
       return cmdStatus(options);
     case "execute":
       return cmdExecute(options);
+    case "delegate":
+      return cmdDelegate(options);
+    case "merge-back":
+      return cmdMergeBack(options);
     case "resume-info":
       return cmdResumeInfo(options);
     case "remote-probe":

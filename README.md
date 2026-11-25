@@ -22,7 +22,7 @@ clients through one versioned contract.
 | [conversations](plugins/conversations/) | `rebuildup.conversations` | Provider transcript indexer: normalizes claude/codex/opencode session transcripts into structured conversation events (turn/user/assistant/tool/usage) — never PTY scraping. |
 | [usage](plugins/usage/) | `rebuildup.usage` | Token usage aggregation over the conversations index: per provider/model/host/project/session/pane totals with honest missing-data reporting. |
 | [controls](plugins/controls/) | `rebuildup.controls` | Agent operation core over the herdr `agent.*` API: send / command / wait / interrupt / read / rename / start with identity echo, stale-generation guards, and per-provider launch tables (`herdr-plugins.controls/v1`). |
-| [handoff](plugins/handoff/) | `rebuildup.handoff` | Handoff/delegation records + same-host execution: source pane/agent identity + reference payload + `native_resume`/`portable_context` strategies with honest status lifecycle (`herdr-plugins.handoff/v1`, #6 T1+T2). |
+| [handoff](plugins/handoff/) | `rebuildup.handoff` | Handoff/delegation records + execution: source pane/agent identity + reference payload + `native_resume`/`portable_context` strategies, cross-machine `--remote`, delegation lineage (`delegate`/`merge-back`, worktree targets) with honest status lifecycle (`herdr-plugins.handoff/v1` stable, #6 T1–T4). |
 | [textgen](plugins/textgen/) | `rebuildup.textgen` | Text generation (`herdr-plugins.textgen/v1`): six tasks over dedicated agent panes or opt-in API generators, with strict input/output boundaries. Generation only — execution stays with the caller. |
 
 ## Development
