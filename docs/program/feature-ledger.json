@@ -194,7 +194,7 @@
         "apps/server/src/project/"
       ],
       "classification": "plugin",
-      "issues": [26],
+      "issues": [26, 48, 49, 50, 51],
       "depends_on": ["git-readonly"],
       "acceptance": "project 登録/検索/ピン/アーカイブ、clone/init/publish、環境・defaults/override、複数 repo 発見・明示追加/除外・submodule、repo 別 worktree/差分との関連付け。herdr/Worktrunk lifecycle を再利用。",
       "verification": "未着手。Issue 内 upstream 参照 docs/user/multi-repo-projects.md は pinned revision 9cc4018c に存在しない (project-settings.md が実体)。"
@@ -204,7 +204,7 @@
       "title_ja": "Project Scripts: プロジェクト定義コマンドの実行・停止・結果管理",
       "upstream_refs": ["docs/user/project-settings.md", "docs/user/source-control.md"],
       "classification": "plugin",
-      "issues": [3, 26],
+      "issues": [3, 26, 50, 52, 53],
       "depends_on": ["projects-multi-repo"],
       "acceptance": "セットアップ (worktree 作成後含む)・定義済みコマンドの一覧・起動・停止・再実行・exit code/ログ・状態・開発サーバー実行先を扱う。PTY テキストから実行成功を捏造しない。#32 automation と責務分離。",
       "verification": "未着手。pane.output_matched subscription の実用性検証が前提。"
