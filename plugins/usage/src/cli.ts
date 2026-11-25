@@ -14,7 +14,8 @@
 import path from "node:path";
 import { pluginDirs } from "../../../packages/herdr-client/src/index";
 import { aggregateUsage } from "./aggregate";
-import { CONTRACT, CONVERSATIONS_CONTRACT, type SourceOptions } from "./model";
+import { CONTRACT, CONVERSATIONS_CONTRACT, type QuotaEndpoints, type SourceOptions } from "./model";
+import { collectQuota, QUOTA_CACHE_TTL_SECONDS } from "./quota";
 import {
   type CliCallOptions,
   exportUsageEvents,
@@ -41,6 +42,7 @@ interface CliOptions {
   conversationsRoot: string | undefined;
   conversationsStateDir: string | undefined;
   conversationsConfigDir: string | undefined;
+  refresh: boolean | undefined;
 }
 
 function parseArgs(argv: string[]): CliOptions {
@@ -61,6 +63,7 @@ function parseArgs(argv: string[]): CliOptions {
     conversationsRoot: undefined,
     conversationsStateDir: undefined,
     conversationsConfigDir: undefined,
+    refresh: undefined,
   };
   const rest: string[] = [];
   for (let i = 0; i < args.length; i += 1) {
@@ -80,6 +83,7 @@ function parseArgs(argv: string[]): CliOptions {
     else if (arg === "--conversations-root") options.conversationsRoot = next();
     else if (arg === "--conversations-state-dir") options.conversationsStateDir = next();
     else if (arg === "--conversations-config-dir") options.conversationsConfigDir = next();
+    else if (arg === "--refresh") options.refresh = true;
     else rest.push(arg);
   }
   options.args = rest;
@@ -112,6 +116,8 @@ interface PluginConfig {
   conversationsRoot?: string;
   conversationsStateDir?: string;
   conversationsConfigDir?: string;
+  quotaCacheTtlSeconds?: number;
+  quotaEndpoints?: QuotaEndpoints;
 }
 
 async function loadConfig(): Promise<PluginConfig> {
@@ -192,16 +198,23 @@ async function cmdCapability(): Promise<void> {
     version: PLUGIN_VERSION,
     read_only: true,
     mutation_commands: [],
-    commands: ["capability", "usage"],
+    commands: ["capability", "usage", "quota"],
     sources: [
       sourceEntry,
       {
         id: "subscription-quota-api",
         kind: "provider-quota",
-        status: "unsupported",
-        planned_in: "#91",
+        status: "available",
+        credential_boundary: "docs/adr/0014-usage-quota-credential-boundary.md",
+        providers: {
+          claude: "implemented (oauth usage endpoint, ~/.claude credentials / macOS Keychain)",
+          codex: "implemented (wham usage endpoint, ChatGPT auth.json only)",
+          opencode: "unsupported (per-provider API keys; no subscription quota artifact)",
+        },
+        freshness:
+          "short-term cache (default 300s) under the plugin state dir; stale readings are flagged, never silently refreshed",
         detail:
-          "Provider subscription quota/reset endpoints require credential access; boundary ADR lands in T2 (#91).",
+          "Quota probes never emit credential material; see ADR-0014 for the read/logging boundary.",
       },
       {
         id: "provider-cli-billing",
@@ -342,6 +355,51 @@ async function cmdUsage(options: CliOptions): Promise<void> {
   });
 }
 
+// --- quota ----------------------------------------------------------------------
+
+/**
+ * Subscription quota/reset report. Per-provider outcomes are data, not
+ * errors: the command exits 0 whenever it can produce the envelope, and
+ * each provider carries an explicit status (`ok` / `unsupported` /
+ * `no_credential` / `credential_expired` / `request_failed`). Credential
+ * material never appears in output (ADR-0014).
+ */
+async function cmdQuota(options: CliOptions): Promise<void> {
+  const config = await loadConfig();
+  const call = callOptions(options, config);
+  const providers =
+    options.provider !== undefined && options.provider !== "" ? [options.provider] : undefined;
+  // Endpoint overrides: env wins over config.json (both are test/proxy
+  // hooks; see contract). Env is folded in here so collectQuota's own
+  // env resolution sees one consistent override set.
+  const envEndpoints: QuotaEndpoints = {
+    claude: process.env.HERDR_USAGE_QUOTA_CLAUDE_URL ?? config.quotaEndpoints?.claude,
+    codexUsage: process.env.HERDR_USAGE_QUOTA_CODEX_USAGE_URL ?? config.quotaEndpoints?.codexUsage,
+    codexCredits:
+      process.env.HERDR_USAGE_QUOTA_CODEX_CREDITS_URL ?? config.quotaEndpoints?.codexCredits,
+  };
+  const ttl =
+    typeof config.quotaCacheTtlSeconds === "number" && config.quotaCacheTtlSeconds > 0
+      ? Math.floor(config.quotaCacheTtlSeconds)
+      : QUOTA_CACHE_TTL_SECONDS;
+
+  const results = await collectQuota({
+    providers,
+    refresh: options.refresh === true,
+    timeoutMs: call.timeoutMs ?? 10_000,
+    endpoints: envEndpoints,
+    cacheTtlSeconds: ttl,
+  });
+
+  emit({
+    contract: CONTRACT,
+    command: "quota",
+    cache: { ttl_seconds: ttl },
+    providers: results,
+    generated_at: now(),
+  });
+}
+
 // --- main ---------------------------------------------------------------------
 
 async function main(): Promise<void> {
@@ -351,6 +409,8 @@ async function main(): Promise<void> {
       return cmdCapability();
     case "usage":
       return cmdUsage(options);
+    case "quota":
+      return cmdQuota(options);
     case "help":
     case "--help":
     case "-h":
@@ -359,7 +419,7 @@ async function main(): Promise<void> {
         plugin: PLUGIN_ID,
         version: PLUGIN_VERSION,
         usage:
-          "bun run src/cli.ts <capability|usage> [--pane PANE] [--session-id ID] [--provider ID] [--from ISO] [--to ISO] [--session NAME] [--socket PATH] [--timeout MS] [--offline] [--conversations-root DIR] [--conversations-state-dir DIR]",
+          "bun run src/cli.ts <capability|usage|quota> [--pane PANE] [--session-id ID] [--provider ID] [--from ISO] [--to ISO] [--refresh] [--session NAME] [--socket PATH] [--timeout MS] [--offline] [--conversations-root DIR] [--conversations-state-dir DIR]",
       });
       return;
     default:

@@ -11,10 +11,10 @@ herdr plugin install rebuildup/herdr-plugins/plugins/usage
 
 Prerequisites: herdr ≥ 0.9.0, Bun on `PATH`, and the
 [`rebuildup.conversations`](../conversations/) plugin installed and
-indexed (`conversations index`/`refresh`) — usage aggregates its
+indexed (`conversations index`/`refresh`) — `usage` aggregates its
 normalized event index through the public read-only contract, never
-its state files (ADR-0013). `capability` and `usage` work without a
-reachable herdr session (`--offline` or automatic degrade).
+its state files (ADR-0013). `capability`, `usage`, and `quota` work
+without a reachable herdr session.
 
 ## What it does
 
@@ -34,8 +34,14 @@ reachable herdr session (`--offline` or automatic degrade).
   `provider_reported_cost_usd` is labeled as provider-reported, not a
   billing amount.
 
-No credential handling, quota endpoints, or cost estimation in this
-version — those land in #91/#92/#93 behind the `sources[]` matrix.
+No cost estimation in this version — that lands in #93. Subscription
+quota/reset surfacing (`quota`) shipped in #91 behind the ADR-0014
+credential boundary: provider credential artifacts are read in memory
+only to authenticate the providers' own read-only quota endpoints —
+tokens are never logged, persisted, cached, or emitted. Claude
+(`~/.claude` OAuth credentials / macOS Keychain) and Codex
+(`$CODEX_HOME/auth.json`, ChatGPT auth) are implemented; opencode and
+unknown providers report `unsupported` with a reason.
 
 ## Usage
 
@@ -45,14 +51,23 @@ bun run src/cli.ts capability
 bun run src/cli.ts usage [--pane PANE] [--session-id ID] [--provider ID] \
   [--from ISO] [--to ISO] [--session NAME] [--socket PATH] [--timeout MS] \
   [--offline] [--conversations-root DIR] [--conversations-state-dir DIR]
+bun run src/cli.ts quota [--provider ID] [--refresh] [--timeout MS]
 ```
 
 - `capability` → contract banner, `sources[]` data-source matrix
-  (`conversations-index` available/unavailable + declared-unsupported
-  quota/billing slots), aggregation dimensions.
+  (`conversations-index` available/unavailable, `subscription-quota-api`
+  per-provider coverage, declared-unsupported billing slot),
+  aggregation dimensions.
 - `usage` → `{totals, breakdowns, coverage, sessions, source,
   warnings}`. Selectors forward to `conversations usage`; the whole
   export is paged (500 events/page) and aggregated in one call.
+- `quota` → `{providers[], cache}` with per-provider `status`
+  (`ok`/`unsupported`/`no_credential`/`credential_expired`/
+  `request_failed`), usage `windows[]` with `used_percent` +
+  `resets_at`, plan label, and freshness (`checked_at`, cache hit/age,
+  `stale` flag). Successful readings cache for 300s under the plugin
+  state dir; `--refresh` bypasses. Endpoint overrides for tests/proxies:
+  `HERDR_USAGE_QUOTA_*` env or `quotaEndpoints` in config.json.
 
 The conversations plugin is located via `--conversations-root` /
 `HERDR_USAGE_CONVERSATIONS_ROOT` / `conversationsRoot` config → sibling
@@ -62,4 +77,5 @@ to the standard plugin state location and can be overridden with
 `conversationsStateDir`.
 
 Full contract: `docs/contracts/usage-v1.md`.
-Spec: `docs/specs/usage.md`. Design: ADR-0013.
+Spec: `docs/specs/usage.md`. Design: ADR-0013 (index reuse),
+ADR-0014 (quota credential boundary).

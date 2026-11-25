@@ -165,3 +165,72 @@ export interface UsageAggregate {
   /** Sessions contributing usage events, with their registry status. */
   sessions: SessionCoverageEntry[];
 }
+
+// --- subscription quota (T2 / #91, ADR-0014) ---------------------------------
+
+/**
+ * Per-provider quota probe outcome. `ok` means fresh or cached provider
+ * data; every other status is an honest non-answer — never a fabricated
+ * zero. `unsupported` = no quota artifact exists for the provider;
+ * `no_credential` = the provider's credential store has no usable
+ * login; `credential_expired` = a token exists but is past expiry
+ * (refresh is out of scope, ADR-0014); `request_failed` = the quota
+ * endpoint could not be read (HTTP/transport/parse).
+ */
+export type QuotaStatus =
+  | "ok"
+  | "unsupported"
+  | "no_credential"
+  | "credential_expired"
+  | "request_failed";
+
+export type QuotaWindowKind = "session" | "weekly" | "monthly" | "other";
+
+/** One provider-reported quota/reset window. */
+export interface QuotaWindow {
+  id: string;
+  label: string;
+  kind: QuotaWindowKind;
+  /** 0-100 utilization as reported by the provider. */
+  used_percent: number;
+  /** ISO-8601 reset instant, or null when the provider did not report one. */
+  resets_at: string | null;
+  /** Provider-reported or derived window length in minutes; null when unknown. */
+  window_duration_mins: number | null;
+}
+
+export interface QuotaCacheInfo {
+  /** True when the payload came from the on-disk short-term cache. */
+  hit: boolean;
+  /** Age of the cached reading in seconds; null on a fresh fetch. */
+  age_seconds: number | null;
+  ttl_seconds: number;
+}
+
+/** One provider's quota report inside a `quota` command result. */
+export interface QuotaProviderResult {
+  provider: string;
+  status: QuotaStatus;
+  /** Human-readable reason for non-ok statuses; null when ok. */
+  detail: string | null;
+  /** Provider plan label (e.g. subscription type); null when unreported. */
+  plan: string | null;
+  windows: QuotaWindow[];
+  /** When the provider endpoint last answered successfully; null otherwise. */
+  checked_at: string | null;
+  /** When this report entry was produced. */
+  fetched_at: string;
+  /** True when serving a cached reading older than the fresh TTL. */
+  stale: boolean;
+  stale_reason: string | null;
+  /** Banked reset credits count when the provider reports them; else null. */
+  reset_credits_available: number | null;
+  cache: QuotaCacheInfo;
+}
+
+/** Endpoint overrides (test hooks / future proxies); full URLs. */
+export interface QuotaEndpoints {
+  claude?: string | undefined;
+  codexUsage?: string | undefined;
+  codexCredits?: string | undefined;
+}
