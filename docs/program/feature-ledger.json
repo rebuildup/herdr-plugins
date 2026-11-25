@@ -197,7 +197,7 @@
       "issues": [26, 48, 49, 50, 51],
       "depends_on": ["git-readonly"],
       "acceptance": "project 登録/検索/ピン/アーカイブ、clone/init/publish、環境・defaults/override、複数 repo 発見・明示追加/除外・submodule、repo 別 worktree/差分との関連付け。herdr/Worktrunk lifecycle を再利用。",
-      "verification": "未着手。Issue 内 upstream 参照 docs/user/multi-repo-projects.md は pinned revision 9cc4018c に存在しない (project-settings.md が実体)。"
+      "verification": "release-0-3-0 で #48 registry 骨格・#49 CRUD/pin/archive/settings override・#50 t3.json/scripts 解決・#51 repo membership (repos list/add/remove, repositoryIdentity=remote 正規化, branch/dirty/has_submodules) を実装済み。残: clone/init/publish、repo 別 worktree/差分との関連付け (herdr/Worktrunk lifecycle 側の接続点として repos list の has_submodules を提供)。Issue 内 upstream 参照 docs/user/multi-repo-projects.md は pinned revision 9cc4018c に存在しない (project-settings.md が実体)。"
     },
     {
       "id": "project-scripts",
