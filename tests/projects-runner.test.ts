@@ -1398,6 +1398,8 @@ describe("cli scripts run/stop/results/logs", () => {
         session_key: null,
         stop_requested_at: null,
         log_path: null,
+        shell_family: null,
+        shell_source: null,
         error: null,
       };
     });
