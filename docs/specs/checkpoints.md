@@ -2,7 +2,8 @@
 
 Scope: T1 foundation (#72) — hidden-ref capture/list/show/diff/delete;
 T2 (#73) — safe restore (`plan` + `restore`); T3 (#74) — work-unit
-auto-capture via the agent-status event hook + lazy drain. Contract:
+auto-capture via the agent-status event hook + lazy drain; T4 (#75) —
+multi-repo save/restore groups + retention GC. Contract:
 `herdr-plugins.checkpoints/v1`
 (`docs/contracts/checkpoints-v1.md`). Design: ADR-0011. Upstream
 semantics reference: T3 Code `GitVcsDriver.captureCheckpoint` /
@@ -18,7 +19,8 @@ without committing, without touching the user's index/staging (on
 capture), and without a daemon. `restore` is the one command that
 mutates the worktree — it does so only behind a mandatory pre-restore
 checkpoint and shared-worktree isolation checks. #74 adds work-unit
-auto-capture (below); #75 adds multi-repo/GC.
+auto-capture (below); #75 adds multi-repo save/restore groups and
+retention GC/prune.
 
 ## Capture procedure
 
@@ -106,6 +108,8 @@ See contract doc. Highlights:
   Plans against the live ref target, or the recorded `commit` with a
   warning when the ref is gone.
 - `restore <id> [--repo PATH] [--force]` — safe restore, below.
+- `save` / `restore-group` / `gc` / `prune` — multi-repo groups and
+  retention, below (#75).
 
 ## Restore procedure (#73)
 
@@ -225,16 +229,90 @@ state entries for that repo root. Tokens merge per source; other
 plugins' tokens are untouched. Projection failures never fail the
 capture.
 
+## Multi-repo groups and retention (#75)
+
+A **checkpoint group** is the set of entries captured by one `save`
+call across a project's repos — the multi-repo counterpart of a single
+`create`. `group_id` (`grp-<base36>-<hex>`) is stamped on every member
+entry; `create`, auto-capture, and pre-#75 entries carry none.
+
+### `save`
+
+Repo-set resolution, in priority order:
+
+1. repeated `--repo PATH` — explicit enumeration; each path resolves
+   independently and a resolution/capture failure becomes a per-repo
+   `ok:false` result, never aborts the others;
+2. a pane id (`--pane`, positional, `HERDR_PANE_ID`, plugin context)
+   — that pane's repo only, identical resolution to `create` (and
+   identical fail-hard errors);
+3. neither — **live discovery**: the session snapshot's pane cwds are
+   resolved to repos, deduped by canonical root. Non-repo cwds and
+   cwd-less panes land in `skipped_panes` with a reason. Discovery
+   needs a reachable session (`session_unreachable` otherwise) and
+   deliberately avoids the projects registry — no cross-plugin state
+   dependency.
+
+Every member is captured with the same `group_id` and persisted in
+one locked state write. `ok`/exit code are honest: any repo failure
+prints the full per-repo report on stdout, a `partial_save` error on
+stderr, exit 1.
+
+### `restore-group <group-id>`
+
+Finds all state entries with the matching `group_id` (unknown →
+`unknown_group`) and runs each through the *same* pipeline as
+`restore`: recorded `repo_root` only (`--repo` rejected — group
+members always restore into their own repo), ref liveness,
+per-repo shared-worktree isolation (each repo counts its own sharing
+panes; `--force` bypasses all), mandatory `pre_restore` capture per
+repo, worktree restore + post-verify. Repos are attempted
+independently — one failure never aborts the rest, and each member's
+result carries the full single-restore field set or a structured
+`error`. Partial success is reported as `ok:false` + exit 1
+(`partial_restore` on stderr); it is never dressed up as success.
+
+### `gc` — bounded retention
+
+Per canonical repo root (entries are per-worktree; linked worktrees of
+one repository are evaluated independently since their `repo_key`s
+and entry sets differ):
+
+- evict entries beyond `--max-count` newest-first
+  (default 50 / config `gcMaxCount`);
+- evict entries older than `--max-age-days`
+  (default 30 / config `gcMaxAgeDays`);
+- **exempt** `kind:"pre_restore"` entries younger than
+  `--protect-days` (default 7 / config `preRestoreProtectDays`) — the
+  safety anchor for a recent restore;
+- eviction = `update-ref -d` + state removal together; a ref that
+  fails to delete keeps its state entry (reported, retried next run);
+- unreachable repos are listed under `unreachable` and skipped —
+  their state is never touched;
+- `--dry-run` reports `would_delete` with zero mutations.
+
+### `prune` — orphan refs (deleteStaleRefs equivalent)
+
+Upstream T3 Code's `CheckpointService.deleteStaleRefs` removes refs
+whose checkpoints left the store; here the equivalent is explicit:
+`prune` lists `refs/herdr-plugins/checkpoints/` in each scanned repo
+(`--repo PATH`, else every repo root known to state — linked
+worktrees sharing a git common dir are scanned once) and deletes any
+ref **not named by a state entry**. Protection is by full ref name
+globally, so a state-referenced ref can never be pruned from any
+repo. Deletion uses `update-ref --no-deref -d` like upstream;
+`--dry-run` lists orphans only.
+
 ## Error taxonomy
 
 `not_a_repo`, `bare_repo`, `empty_repo` (unborn HEAD),
-`sparse_checkout`, `unknown_checkpoint`, `cross_repo`,
-`pane_not_found`, `no_pane_cwd`, `repo_mismatch`,
+`sparse_checkout`, `unknown_checkpoint`, `unknown_group`,
+`cross_repo`, `pane_not_found`, `no_pane_cwd`, `repo_mismatch`,
 `checkpoint_ref_missing`, `shared_worktree`, `session_unreachable`,
 `restore_failed`, `clean_failed`, `clean_incomplete`,
-`restore_verify_failed`, plus shared `git_missing` / `timeout` /
-`git_error`. Unsupported conditions are structured errors, never
-success-shaped output.
+`restore_verify_failed`, `partial_save`, `partial_restore`, plus
+shared `git_missing` / `timeout` / `git_error`. Unsupported
+conditions are structured errors, never success-shaped output.
 
 ## v1 limits (explicit)
 
@@ -254,7 +332,9 @@ success-shaped output.
 - Session-unreachable restore requires `--force` (safe default);
   panes lacking a cwd are not counted toward the shared-worktree
   threshold.
-- No multi-repo session grouping or GC (#75).
+- `save` discovery covers repos reachable from *pane cwds* in the
+  current session only — repos no pane touches are not discovered
+  (explicit `--repo` covers that case).
 - Auto-capture granularity is `agent_status` transitions — a
   **work-unit** checkpoint, coarser than upstream's per-turn boundary.
   `blocked`/`unknown` never pend; `done` and `idle` both do. Multiple
@@ -262,8 +342,10 @@ success-shaped output.
 - Auto-capture is best-effort: marks are dropped on capture failure
   (recorded in `auto_captures.skipped`), and an explicit `create`
   supersedes a pending mark for the same pane.
-- Checkpoint commits/objects are unreachable from branches; `git gc`
-  may eventually prune them — GC policy is #75's problem.
+- Checkpoint commits/objects are unreachable from branches; refs are
+  the reachability anchor — `gc` enforces count/age retention and
+  `prune` removes state-unreferenced refs, but neither runs `git gc`
+  itself (object reclamation stays git's job).
 
 ## Upstream gaps (recorded, not worked around)
 

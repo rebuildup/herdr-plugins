@@ -222,7 +222,7 @@
       "issues": [4, 72, 73, 74, 75],
       "depends_on": ["#23", "#24", "#26", "#5"],
       "acceptance": "未コミット変更・untracked を含む安全な状態保存/復元。hidden Git refs、ターン完了と checkpoint 確定の分離、turn 固有差分と branch 全体差分の区別、複数 repo 保存・復元、保持/GC を契約化。会話巻き戻しは別能力。",
-      "verification": "T1 (#72, release-0-4-0) で基盤実装: rebuildup.checkpoints v0.1.0 が temp GIT_INDEX_FILE capture (read-tree HEAD → add -A → write-tree → commit-tree -p HEAD → update-ref) で hidden ref refs/herdr-plugins/checkpoints/<repo-key>/<id> に保存し、create/list/show/diff/delete を提供。user index/staging 非接触・unborn HEAD/sparse/bare の構造化エラーを契約テストで保証。restore (#73)・自動 capture (#74)・複数 repo/GC (#75) は後続。shared object store 直書きは v1 の意図的簡略化 (ADR-0011)。"
+      "verification": "T1 (#72) 基盤: temp GIT_INDEX_FILE capture で hidden ref refs/herdr-plugins/checkpoints/<repo-key>/<id> に保存、create/list/show/diff/delete。T2 (#73): plan/restore (pre_restore 必須退避・共有 worktree/session 分離・post-verify、--repo は同一 common dir の別 worktree のみ)。T3 (#74): agent_status working→idle/done で work-unit auto-capture (hook は state mark のみ、CLI が lazy drain)。T4 (#75): save/restore-group で複数 repo を group_id 単位に保存・復元 (repo 集合は --repo 列挙/pane id/session pane cwd の live discovery、部分成功は per-repo status で正直に報告)、gc で repo 別 max-count/max-age retention + pre_restore 保護窓 + dry-run、prune で state 非参照 ref の deleteStaleRefs 相当削除。契約は docs/contracts/checkpoints-v1.md、設計は ADR-0011 (T4 amendment)。shared object store 直書きは v1 の意図的簡略化。"
     },
     {
       "id": "conversations",

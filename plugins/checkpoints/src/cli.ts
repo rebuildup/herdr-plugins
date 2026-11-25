@@ -19,7 +19,12 @@
 
 import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
-import { type BoundedResult, GitError, resolveRepo } from "../../../packages/git-core/src/index";
+import {
+  type BoundedResult,
+  GitError,
+  gitOk,
+  resolveRepo,
+} from "../../../packages/git-core/src/index";
 import {
   type CallOptions,
   type PaneInfo,
@@ -36,6 +41,8 @@ import {
   captureCheckpoint,
   deleteRef,
   diffRevs,
+  listCheckpointRefs,
+  newGroupId,
   type ResolvedRepo,
   resolveCheckpointRepo,
   showCommit,
@@ -51,11 +58,18 @@ const DEFAULT_DIFF_MAX_BYTES = 256 * 1024;
 const DEFAULT_SHOW_MAX_BYTES = 64 * 1024;
 const DEFAULT_LIST_LIMIT = 100;
 const MAX_LIST_LIMIT = 1000;
+const DEFAULT_GC_MAX_COUNT = 50;
+const DEFAULT_GC_MAX_AGE_DAYS = 30;
+const DEFAULT_PRE_RESTORE_PROTECT_DAYS = 7;
+const DAY_MS = 86_400_000;
 
 interface PluginConfig {
   timeoutMs?: number | undefined;
   diffMaxBytes?: number | undefined;
   showMaxBytes?: number | undefined;
+  gcMaxCount?: number | undefined;
+  gcMaxAgeDays?: number | undefined;
+  preRestoreProtectDays?: number | undefined;
 }
 
 interface CliOptions extends CallOptions {
@@ -140,6 +154,19 @@ function flagValue(args: string[], name: string): string | undefined {
   return args[index + 1];
 }
 
+/** All values of a repeatable flag (`--repo` may appear several times). */
+function flagValues(args: string[], name: string): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i += 1) {
+    if (args[i] !== name) continue;
+    const value = args[i + 1];
+    if (value === undefined) continue;
+    out.push(value);
+    i += 1;
+  }
+  return out;
+}
+
 /** Positional args, skipping flag values. */
 function positionals(args: string[], valueFlags: string[]): string[] {
   const out: string[] = [];
@@ -183,6 +210,18 @@ async function loadConfig(): Promise<PluginConfig> {
       showMaxBytes:
         typeof parsed.showMaxBytes === "number" && parsed.showMaxBytes > 0
           ? parsed.showMaxBytes
+          : undefined,
+      gcMaxCount:
+        typeof parsed.gcMaxCount === "number" && parsed.gcMaxCount > 0
+          ? parsed.gcMaxCount
+          : undefined,
+      gcMaxAgeDays:
+        typeof parsed.gcMaxAgeDays === "number" && parsed.gcMaxAgeDays > 0
+          ? parsed.gcMaxAgeDays
+          : undefined,
+      preRestoreProtectDays:
+        typeof parsed.preRestoreProtectDays === "number" && parsed.preRestoreProtectDays > 0
+          ? parsed.preRestoreProtectDays
           : undefined,
     };
   } catch {
@@ -354,7 +393,7 @@ function sortEntries(entries: CheckpointEntry[]): CheckpointEntry[] {
 async function cmdList(options: CliOptions): Promise<void> {
   const config = await loadConfig();
   await drainAuto(options, config);
-  const valueFlags = ["--repo", "--limit"];
+  const valueFlags = ["--repo", "--limit", "--group"];
   const pos = positionals(options.args, valueFlags);
   if (pos.length > 0) fail("list takes no positional arguments", 2);
 
@@ -386,12 +425,18 @@ async function cmdList(options: CliOptions): Promise<void> {
   if (repoRoot !== null) {
     entries = entries.filter((e) => e.repo_root === repoRoot);
   }
+  const groupFlag = flagValue(options.args, "--group");
+  if (groupFlag !== undefined) {
+    if (groupFlag.startsWith("-")) fail("invalid --group value", 2);
+    entries = entries.filter((e) => e.group_id === groupFlag);
+  }
   const sorted = sortEntries(entries);
   const page = sorted.slice(0, limit);
   emit({
     contract: CONTRACT,
     command: "list",
     repo_root: repoRoot,
+    group: groupFlag ?? null,
     count: page.length,
     total: sorted.length,
     truncated: sorted.length > page.length,
@@ -607,38 +652,27 @@ async function resolveTargetRepo(
   options: CliOptions,
   entry: CheckpointEntry,
   config: PluginConfig,
+  repoFlag: string | undefined,
 ): Promise<ResolvedRepo> {
   const timeoutMs = effectiveTimeoutMs(options, config);
-  const repoFlag = flagValue(options.args, "--repo");
   if (repoFlag === undefined) {
-    try {
-      return await resolveCheckpointRepo(entry.repo_root, { timeoutMs });
-    } catch (err) {
-      gitFail(err);
-    }
+    return resolveCheckpointRepo(entry.repo_root, { timeoutMs });
   }
   if (repoFlag.startsWith("-")) fail("invalid --repo value", 2);
-  let resolved: ResolvedRepo;
-  try {
-    resolved = await resolveCheckpointRepo(repoFlag, { timeoutMs });
-    const entryRepo = await resolveRepo(entry.repo_root, { timeoutMs });
-    const [targetCommon, entryCommon] = await Promise.all([
-      realpath(resolved.info.gitCommonDir),
-      realpath(entryRepo.gitCommonDir),
-    ]);
-    if (targetCommon !== entryCommon) {
-      fail(
-        `--repo ${repoFlag} belongs to a different repository than checkpoint ${entry.id} ` +
-          `(git common dir ${targetCommon} != ${entryCommon})`,
-        1,
-        "repo_mismatch",
-      );
-    }
-    return resolved;
-  } catch (err) {
-    if (err instanceof GitError || err instanceof CheckpointError) gitFail(err);
-    throw err;
+  const resolved = await resolveCheckpointRepo(repoFlag, { timeoutMs });
+  const entryRepo = await resolveRepo(entry.repo_root, { timeoutMs });
+  const [targetCommon, entryCommon] = await Promise.all([
+    realpath(resolved.info.gitCommonDir),
+    realpath(entryRepo.gitCommonDir),
+  ]);
+  if (targetCommon !== entryCommon) {
+    throw new CheckpointError(
+      "repo_mismatch",
+      `--repo ${repoFlag} belongs to a different repository than checkpoint ${entry.id} ` +
+        `(git common dir ${targetCommon} != ${entryCommon})`,
+    );
   }
+  return resolved;
 }
 
 function checkpointIdArg(options: CliOptions, command: string): string {
@@ -654,7 +688,12 @@ async function cmdPlan(options: CliOptions): Promise<void> {
   await drainAuto(options, config);
   const id = checkpointIdArg(options, "plan");
   const entry = await lookupEntry(id).catch(gitFail);
-  const resolved = await resolveTargetRepo(options, entry, config);
+  const resolved = await resolveTargetRepo(
+    options,
+    entry,
+    config,
+    flagValue(options.args, "--repo"),
+  ).catch(gitFail);
   const timeoutMs = effectiveTimeoutMs(options, config);
 
   // Plan against the live ref when it exists, else the recorded commit —
@@ -707,24 +746,179 @@ async function assertRestoreIsolation(
     snapshot = await sessionSnapshot(callOptions);
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    fail(
+    throw new CheckpointError(
+      "session_unreachable",
       `cannot verify worktree isolation: herdr session unreachable (${detail}). ` +
         `Pass --force to restore anyway.`,
-      1,
-      "session_unreachable",
     );
   }
   const sharing = await panesSharingRepo(snapshot.panes ?? [], repoRoot);
   if (sharing.length >= 2) {
-    fail(
+    throw new CheckpointError(
+      "shared_worktree",
       `refusing to restore: ${sharing.length} live panes share worktree ${repoRoot} ` +
         `(${sharing.join(", ")}). Restore would race their edits; pass --force to override.`,
-      1,
-      "shared_worktree",
       { panes: sharing },
     );
   }
   return { mode: sharing.length === 1 ? "single_pane" : "no_panes", sharing };
+}
+
+interface PreRestoreRef {
+  id: string;
+  ref: string;
+  commit: string;
+  label: string | null;
+}
+
+function preRestoreRef(entry: CheckpointEntry): PreRestoreRef {
+  return {
+    id: entry.id,
+    ref: entry.ref,
+    commit: entry.commit,
+    label: entry.label ?? null,
+  };
+}
+
+interface RestoreAttemptOk {
+  ok: true;
+  id: string;
+  repo_root: string;
+  entry: CheckpointEntry;
+  restored_commit: string;
+  pre_restore: PreRestoreRef;
+  isolation: "isolated" | "forced" | "single_pane" | "no_panes";
+  sharing_panes: string[];
+  clean_passes: number;
+  warnings: string[];
+}
+
+interface RestoreAttemptFail {
+  ok: false;
+  id: string;
+  repo_root: string;
+  kind: string;
+  message: string;
+  extra: Record<string, unknown> | undefined;
+  pre_restore: PreRestoreRef | null;
+}
+
+type RestoreAttempt = RestoreAttemptOk | RestoreAttemptFail;
+
+function attemptFail(
+  entry: CheckpointEntry,
+  repoRoot: string,
+  err: GitError | CheckpointError,
+  preEntry: CheckpointEntry | null,
+): RestoreAttemptFail {
+  const extra = err instanceof CheckpointError ? err.extra : undefined;
+  let message = err.message;
+  if (preEntry !== null) {
+    message =
+      `${err.message} — the worktree may be partially restored; ` +
+      `pre-restore checkpoint ${preEntry.id} preserves the previous state ` +
+      `(restore it with: checkpoints restore ${preEntry.id})`;
+  }
+  return {
+    ok: false,
+    id: entry.id,
+    repo_root: repoRoot,
+    kind: err.kind,
+    message,
+    extra,
+    pre_restore: preEntry === null ? null : preRestoreRef(preEntry),
+  };
+}
+
+/**
+ * Run the full restore pipeline for one checkpoint entry. Never exits
+ * the process: every handled failure is returned as
+ * {@link RestoreAttemptFail} so `restore-group` can continue with the
+ * remaining repos and report per-repo status honestly.
+ * `repoFlag` is the explicit `--repo` override (`undefined` for group
+ * members, which always restore into their recorded repo).
+ */
+async function attemptRestore(
+  options: CliOptions,
+  entry: CheckpointEntry,
+  config: PluginConfig,
+  force: boolean,
+  repoFlag: string | undefined,
+): Promise<RestoreAttempt> {
+  const timeoutMs = effectiveTimeoutMs(options, config);
+  let resolved: ResolvedRepo;
+  try {
+    resolved = await resolveTargetRepo(options, entry, config, repoFlag);
+  } catch (err) {
+    if (err instanceof GitError || err instanceof CheckpointError) {
+      return attemptFail(entry, entry.repo_root, err, null);
+    }
+    throw err;
+  }
+
+  let preEntry: CheckpointEntry | null = null;
+  try {
+    const refOid = await verifyRef(resolved.root, entry.ref, { timeoutMs });
+    if (refOid === null) {
+      throw new CheckpointError(
+        "checkpoint_ref_missing",
+        `checkpoint ref no longer exists: ${entry.ref} (state entry is stale; ` +
+          `the objects may have been gc'd). Nothing was restored.`,
+      );
+    }
+    const warnings: string[] = [];
+    if (refOid !== entry.commit) {
+      warnings.push(
+        `checkpoint ref moved since capture (recorded ${entry.commit.slice(0, 12)}, ` +
+          `now ${refOid.slice(0, 12)}); restoring the ref's current target`,
+      );
+    }
+
+    const isolation = await assertRestoreIsolation(options, resolved.root, force);
+    if (isolation.mode === "forced") {
+      warnings.push("restore forced: shared-worktree isolation check bypassed via --force");
+    }
+
+    // Mandatory pre-restore checkpoint: persisted BEFORE any mutation so
+    // a mid-restore failure always leaves a recoverable ref. If capture
+    // fails the restore is refused — nothing has been touched yet.
+    const capturedPre = await captureCheckpoint(resolved, {
+      timeoutMs,
+      label: `pre-restore:${entry.id}`,
+      kind: "pre_restore",
+    });
+    preEntry = capturedPre;
+    await updateState((state) => {
+      state.checkpoints[capturedPre.id] = capturedPre;
+    });
+
+    const result = await restoreWorktree(resolved.root, refOid, { timeoutMs });
+
+    if (entry.submodules && entry.submodules.length > 0) {
+      warnings.push(
+        `checkpoint recorded ${entry.submodules.length} submodule gitlink(s); ` +
+          `v1 restores the root repo only — submodule worktrees were not restored`,
+      );
+    }
+
+    return {
+      ok: true,
+      id: entry.id,
+      repo_root: resolved.root,
+      entry,
+      restored_commit: refOid,
+      pre_restore: preRestoreRef(preEntry),
+      isolation: isolation.mode,
+      sharing_panes: isolation.sharing,
+      clean_passes: result.clean_passes,
+      warnings,
+    };
+  } catch (err) {
+    if (err instanceof GitError || err instanceof CheckpointError) {
+      return attemptFail(entry, resolved.root, err, preEntry);
+    }
+    throw err;
+  }
 }
 
 async function cmdRestore(options: CliOptions): Promise<void> {
@@ -733,93 +927,620 @@ async function cmdRestore(options: CliOptions): Promise<void> {
   const force = options.args.includes("--force");
   const id = checkpointIdArg(options, "restore");
   const entry = await lookupEntry(id).catch(gitFail);
-  const resolved = await resolveTargetRepo(options, entry, config);
-  const timeoutMs = effectiveTimeoutMs(options, config);
 
-  const refOid = await verifyRef(resolved.root, entry.ref, { timeoutMs });
-  if (refOid === null) {
-    fail(
-      `checkpoint ref no longer exists: ${entry.ref} (state entry is stale; ` +
-        `the objects may have been gc'd). Nothing was restored.`,
-      1,
-      "checkpoint_ref_missing",
-    );
-  }
-  const warnings: string[] = [];
-  if (refOid !== entry.commit) {
-    warnings.push(
-      `checkpoint ref moved since capture (recorded ${entry.commit.slice(0, 12)}, ` +
-        `now ${refOid.slice(0, 12)}); restoring the ref's current target`,
-    );
-  }
-
-  const isolation = await assertRestoreIsolation(options, resolved.root, force);
-  if (isolation.mode === "forced") {
-    warnings.push("restore forced: shared-worktree isolation check bypassed via --force");
-  }
-
-  // Mandatory pre-restore checkpoint: persisted BEFORE any mutation so a
-  // mid-restore failure always leaves a recoverable ref. If capture
-  // fails the restore is refused — nothing has been touched yet.
-  let preEntry: CheckpointEntry;
-  try {
-    preEntry = await captureCheckpoint(resolved, {
-      timeoutMs,
-      label: `pre-restore:${id}`,
-      kind: "pre_restore",
-    });
-  } catch (err) {
-    gitFail(err);
-  }
-  await updateState((state) => {
-    state.checkpoints[preEntry.id] = preEntry;
-  });
-
-  let result: { clean_passes: number };
-  try {
-    result = await restoreWorktree(resolved.root, refOid, { timeoutMs });
-  } catch (err) {
-    if (err instanceof GitError || err instanceof CheckpointError) {
-      fail(
-        `${err.message} — the worktree may be partially restored; ` +
-          `pre-restore checkpoint ${preEntry.id} preserves the previous state ` +
-          `(restore it with: checkpoints restore ${preEntry.id})`,
-        1,
-        err.kind,
-        {
-          pre_restore_checkpoint_id: preEntry.id,
-          pre_restore_ref: preEntry.ref,
-          pre_restore_commit: preEntry.commit,
-        },
-      );
+  const attempt = await attemptRestore(
+    options,
+    entry,
+    config,
+    force,
+    flagValue(options.args, "--repo"),
+  );
+  if (!attempt.ok) {
+    const extra: Record<string, unknown> = { ...(attempt.extra ?? {}) };
+    if (attempt.pre_restore !== null) {
+      extra.pre_restore_checkpoint_id = attempt.pre_restore.id;
+      extra.pre_restore_ref = attempt.pre_restore.ref;
+      extra.pre_restore_commit = attempt.pre_restore.commit;
     }
-    throw err;
-  }
-
-  if (entry.submodules && entry.submodules.length > 0) {
-    warnings.push(
-      `checkpoint recorded ${entry.submodules.length} submodule gitlink(s); ` +
-        `v1 restores the root repo only — submodule worktrees were not restored`,
-    );
+    fail(attempt.message, 1, attempt.kind, extra);
   }
 
   emit({
     contract: CONTRACT,
     command: "restore",
     ok: true,
-    checkpoint: entry,
-    repo_root: resolved.root,
-    restored_commit: refOid,
-    pre_restore: {
-      id: preEntry.id,
-      ref: preEntry.ref,
-      commit: preEntry.commit,
-      label: preEntry.label ?? null,
+    checkpoint: attempt.entry,
+    repo_root: attempt.repo_root,
+    restored_commit: attempt.restored_commit,
+    pre_restore: attempt.pre_restore,
+    isolation: attempt.isolation,
+    sharing_panes: attempt.sharing_panes,
+    clean_passes: attempt.clean_passes,
+    warnings: attempt.warnings,
+    generated_at: new Date().toISOString(),
+  });
+}
+
+/**
+ * `restore-group <group-id>`: restore every checkpoint captured by one
+ * `save` call, one repo at a time. Per-repo status is always reported
+ * individually; a partial restore is `ok:false` + exit 1 — never
+ * dressed up as a full success. Each member gets its own mandatory
+ * pre-restore checkpoint and isolation check.
+ */
+async function cmdRestoreGroup(options: CliOptions): Promise<void> {
+  const config = await loadConfig();
+  await drainAuto(options, config);
+  if (flagValue(options.args, "--repo") !== undefined) {
+    fail("restore-group does not accept --repo; members restore into their recorded repos", 2);
+  }
+  const pos = positionals(options.args, ["--repo"]);
+  if (pos.length !== 1) fail("restore-group requires exactly one group id", 2);
+  const groupId = pos[0] as string;
+  if (groupId.startsWith("-")) fail(`invalid group id: ${groupId}`, 2);
+
+  const state = await loadState();
+  const members = Object.values(state.checkpoints)
+    .filter((entry) => entry.group_id === groupId)
+    .sort((a, b) =>
+      a.repo_root === b.repo_root
+        ? a.id.localeCompare(b.id)
+        : a.repo_root.localeCompare(b.repo_root),
+    );
+  if (members.length === 0) {
+    gitFail(new CheckpointError("unknown_group", `no checkpoint group with id: ${groupId}`));
+  }
+
+  const force = options.args.includes("--force");
+  const results: Array<Record<string, unknown>> = [];
+  for (const entry of members) {
+    const attempt = await attemptRestore(options, entry, config, force, undefined);
+    if (attempt.ok) {
+      results.push({
+        id: attempt.id,
+        repo_root: attempt.repo_root,
+        ok: true,
+        checkpoint: attempt.entry,
+        restored_commit: attempt.restored_commit,
+        pre_restore: attempt.pre_restore,
+        isolation: attempt.isolation,
+        sharing_panes: attempt.sharing_panes,
+        clean_passes: attempt.clean_passes,
+        warnings: attempt.warnings,
+      });
+    } else {
+      results.push({
+        id: attempt.id,
+        repo_root: attempt.repo_root,
+        ok: false,
+        error: {
+          kind: attempt.kind,
+          message: attempt.message,
+          ...(attempt.extra ?? {}),
+        },
+        ...(attempt.pre_restore !== null ? { pre_restore: attempt.pre_restore } : {}),
+      });
+    }
+  }
+
+  const failures = results.filter((r) => r.ok !== true);
+  emit({
+    contract: CONTRACT,
+    command: "restore-group",
+    ok: failures.length === 0,
+    group: groupId,
+    total: results.length,
+    succeeded: results.length - failures.length,
+    failed: failures.length,
+    results,
+    generated_at: new Date().toISOString(),
+  });
+  if (failures.length > 0) {
+    const failedIds = failures.map((r) => String(r.id)).join(", ");
+    process.stderr.write(
+      `${JSON.stringify({
+        contract: CONTRACT,
+        ok: false,
+        error: {
+          code: "error",
+          message:
+            `restore-group ${groupId}: ${failures.length} of ${results.length} ` +
+            `repos failed (${failedIds}); succeeded repos were still restored`,
+          kind: "partial_restore",
+        },
+      })}\n`,
+    );
+    process.exitCode = 1;
+  }
+}
+
+// --- Multi-repo save -------------------------------------------------------
+
+interface SaveRepoOk {
+  ok: true;
+  repo_root: string;
+  checkpoint: CheckpointEntry;
+}
+
+interface SaveRepoFail {
+  ok: false;
+  repo_root: string;
+  error: { kind: string; message: string };
+}
+
+type SaveRepoResult = SaveRepoOk | SaveRepoFail;
+
+function saveErrorKind(err: unknown): { kind: string; message: string } {
+  if (err instanceof GitError || err instanceof CheckpointError) {
+    return { kind: err.kind, message: err.message };
+  }
+  throw err;
+}
+
+/**
+ * `save` — multi-repo checkpoint group (#75). Captures one checkpoint
+ * per repo under a shared `group_id`; `restore-group <id>` restores
+ * them together. Repo set resolution, in priority order:
+ *
+ * 1. repeated `--repo PATH` flags — explicit enumeration;
+ * 2. a pane id (`--pane`, positional, HERDR_PANE_ID, plugin context)
+ *    — that pane's repo only, same resolution as `create`;
+ * 3. otherwise live discovery: every distinct repo resolved from the
+ *    session snapshot's pane cwds (no cross-plugin state dependency).
+ *
+ * Per-repo capture failures are reported individually; `ok` is true
+ * only when every repo captured.
+ */
+async function cmdSave(options: CliOptions): Promise<void> {
+  const config = await loadConfig();
+  await drainAuto(options, config);
+  const timeoutMs = effectiveTimeoutMs(options, config);
+
+  const valueFlags = ["--repo", "--label", "--pane"];
+  const repoFlags = flagValues(options.args, "--repo");
+  const paneFlag = flagValue(options.args, "--pane");
+  const pos = positionals(options.args, valueFlags);
+  if (pos.length > 1) fail("save takes at most one pane id", 2);
+  const explicitPane =
+    paneFlag ?? pos[0] ?? process.env.HERDR_PANE_ID ?? invocationContext().focused_pane_id;
+  if (repoFlags.length > 0 && explicitPane !== undefined) {
+    fail("--repo and a pane id are mutually exclusive", 2);
+  }
+  for (const value of [...repoFlags, ...(paneFlag === undefined ? [] : [paneFlag])]) {
+    if (value.startsWith("-")) fail("invalid flag value", 2);
+  }
+
+  const labelFlag = flagValue(options.args, "--label");
+  if (labelFlag?.startsWith("-")) fail("invalid --label value", 2);
+
+  // Phase 1: resolve the repo set. Explicit --repo paths and discovered
+  // pane repos are captured best-effort per repo; a pane-targeted save
+  // fails hard on resolution errors (same contract as `create`).
+  const resolvedRepos: ResolvedRepo[] = [];
+  const failedRepos: Array<{ repo_root: string; kind: string; message: string }> = [];
+  const skippedPanes: Array<{ pane_id: string; reason: string }> = [];
+
+  if (repoFlags.length > 0) {
+    for (const repoPath of repoFlags) {
+      try {
+        resolvedRepos.push(await resolveCheckpointRepo(repoPath, { timeoutMs }));
+      } catch (err) {
+        failedRepos.push({ repo_root: repoPath, ...saveErrorKind(err) });
+      }
+    }
+  } else if (explicitPane !== undefined) {
+    const snapshot = await sessionSnapshot(options);
+    const pane = await findPane(snapshot, explicitPane);
+    const cwd = paneCwd(pane);
+    try {
+      resolvedRepos.push(await resolveCheckpointRepo(cwd, { timeoutMs }));
+    } catch (err) {
+      gitFail(err);
+    }
+  } else {
+    let snapshot: SessionSnapshot;
+    try {
+      snapshot = await sessionSnapshot(options);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      fail(
+        `save requires --repo PATH or a reachable herdr session for pane discovery ` +
+          `(session unreachable: ${detail})`,
+        1,
+        "session_unreachable",
+      );
+    }
+    const seenCwds = new Set<string>();
+    const seenRoots = new Set<string>();
+    for (const pane of snapshot.panes ?? []) {
+      const cwd = pane.cwd ?? (pane as { foreground_cwd?: string }).foreground_cwd;
+      if (typeof cwd !== "string" || cwd === "" || seenCwds.has(cwd)) {
+        if (typeof cwd !== "string" || cwd === "") {
+          skippedPanes.push({ pane_id: pane.pane_id, reason: "no_pane_cwd" });
+        }
+        continue;
+      }
+      seenCwds.add(cwd);
+      try {
+        const resolved = await resolveCheckpointRepo(cwd, { timeoutMs });
+        if (seenRoots.has(resolved.root)) continue;
+        seenRoots.add(resolved.root);
+        resolvedRepos.push(resolved);
+      } catch (err) {
+        if (err instanceof GitError || err instanceof CheckpointError) {
+          skippedPanes.push({ pane_id: pane.pane_id, reason: err.kind });
+        } else {
+          throw err;
+        }
+      }
+    }
+  }
+
+  // Phase 2: capture each repo under one shared group id.
+  const groupId = newGroupId();
+  const results: SaveRepoResult[] = failedRepos.map((f) => ({
+    ok: false,
+    repo_root: f.repo_root,
+    error: { kind: f.kind, message: f.message },
+  }));
+  const captured: CheckpointEntry[] = [];
+  for (const resolved of resolvedRepos) {
+    try {
+      const entry = await captureCheckpoint(resolved, {
+        timeoutMs,
+        label: labelFlag,
+        kind: "manual",
+      });
+      entry.group_id = groupId;
+      captured.push(entry);
+      results.push({ ok: true, repo_root: resolved.root, checkpoint: entry });
+    } catch (err) {
+      const { kind, message } = saveErrorKind(err);
+      results.push({ ok: false, repo_root: resolved.root, error: { kind, message } });
+    }
+  }
+
+  if (captured.length > 0) {
+    await updateState((state) => {
+      for (const entry of captured) state.checkpoints[entry.id] = entry;
+    });
+  }
+
+  const failures = results.filter((r) => !r.ok);
+  const payload: Record<string, unknown> = {
+    contract: CONTRACT,
+    command: "save",
+    ok: failures.length === 0,
+    group: groupId,
+    total: results.length,
+    succeeded: results.length - failures.length,
+    failed: failures.length,
+    results,
+    generated_at: new Date().toISOString(),
+  };
+  if (skippedPanes.length > 0) payload.skipped_panes = skippedPanes;
+  emit(payload);
+  if (failures.length > 0) {
+    process.stderr.write(
+      `${JSON.stringify({
+        contract: CONTRACT,
+        ok: false,
+        error: {
+          code: "error",
+          message:
+            `save ${groupId}: ${failures.length} of ${results.length} repos failed; ` +
+            `succeeded repos were still captured`,
+          kind: "partial_save",
+        },
+      })}\n`,
+    );
+    process.exitCode = 1;
+  }
+}
+
+// --- Retention GC ----------------------------------------------------------
+
+interface GcPolicy {
+  maxCount: number;
+  maxAgeDays: number;
+  protectDays: number;
+}
+
+function positiveFlag(args: string[], name: string): number | undefined {
+  const raw = flagValue(args, name);
+  if (raw === undefined) return undefined;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) fail(`invalid ${name}: ${raw}`, 2);
+  return value;
+}
+
+function gcPolicy(options: CliOptions, config: PluginConfig): GcPolicy {
+  return {
+    maxCount:
+      positiveFlag(options.args, "--max-count") ?? config.gcMaxCount ?? DEFAULT_GC_MAX_COUNT,
+    maxAgeDays:
+      positiveFlag(options.args, "--max-age-days") ??
+      config.gcMaxAgeDays ??
+      DEFAULT_GC_MAX_AGE_DAYS,
+    protectDays:
+      positiveFlag(options.args, "--protect-days") ??
+      config.preRestoreProtectDays ??
+      DEFAULT_PRE_RESTORE_PROTECT_DAYS,
+  };
+}
+
+/**
+ * Resolve the set of live repo roots GC/prune operate on, deduped by
+ * canonical root. Callers needing common-dir dedupe (prune's ref
+ * scan) do it themselves via the returned `commonDir`. Repos that no
+ * longer resolve are reported in `unreachable` and skipped — their
+ * state entries are never touched (refs cannot be enumerated or
+ * deleted without the repo).
+ */
+async function resolveGcRepos(
+  repoRoots: string[],
+  repoFlag: string | undefined,
+  timeoutMs: number,
+): Promise<{
+  repos: Array<{ root: string; commonDir: string }>;
+  unreachable: Array<{ repo_root: string; kind: string; message: string }>;
+}> {
+  const wanted = repoFlag === undefined ? repoRoots : [repoFlag];
+  const repos: Array<{ root: string; commonDir: string }> = [];
+  const unreachable: Array<{ repo_root: string; kind: string; message: string }> = [];
+  const seenRoots = new Set<string>();
+  for (const target of wanted) {
+    try {
+      const info = await resolveRepo(target, { timeoutMs });
+      const root = await canonicalRepoRoot(info.root);
+      if (seenRoots.has(root)) continue;
+      seenRoots.add(root);
+      const commonDir = await realpath(info.gitCommonDir);
+      repos.push({ root, commonDir });
+    } catch (err) {
+      if (err instanceof GitError) {
+        unreachable.push({ repo_root: target, kind: err.kind, message: err.message });
+      } else {
+        throw err;
+      }
+    }
+  }
+  return { repos, unreachable };
+}
+
+/**
+ * `gc` — bounded retention for checkpoint entries (#75). Per repo
+ * (canonical root), evicts the oldest entries beyond `--max-count`
+ * and every entry older than `--max-age-days`. `kind:"pre_restore"`
+ * entries younger than `--protect-days` are exempt — they are the
+ * recovery anchor for a recent restore. Deletion removes the hidden
+ * ref AND the state entry together; a ref that fails to delete keeps
+ * its state entry (reported, retried next run). `--dry-run` reports
+ * exactly what would be evicted without mutating anything.
+ */
+async function cmdGc(options: CliOptions): Promise<void> {
+  const config = await loadConfig();
+  await drainAuto(options, config);
+  const valueFlags = ["--repo", "--max-count", "--max-age-days", "--protect-days"];
+  const pos = positionals(options.args, valueFlags);
+  if (pos.length > 0) fail("gc takes no positional arguments", 2);
+  const dryRun = options.args.includes("--dry-run");
+  const repoFlag = flagValue(options.args, "--repo");
+  if (repoFlag?.startsWith("-")) fail("invalid --repo value", 2);
+  const timeoutMs = effectiveTimeoutMs(options, config);
+  const policy = gcPolicy(options, config);
+
+  const state = await loadState();
+  const byRepo = new Map<string, CheckpointEntry[]>();
+  for (const entry of Object.values(state.checkpoints)) {
+    const list = byRepo.get(entry.repo_root) ?? [];
+    list.push(entry);
+    byRepo.set(entry.repo_root, list);
+  }
+
+  const { repos, unreachable } = await resolveGcRepos(
+    byRepo.size === 0 ? [] : [...byRepo.keys()],
+    repoFlag,
+    timeoutMs,
+  );
+
+  const now = Date.now();
+  const repoReports: Array<Record<string, unknown>> = [];
+  const stateRemovals: string[] = [];
+  const totals = { evaluated: 0, deleted: 0, would_delete: 0, protected: 0, kept: 0, errors: 0 };
+
+  for (const repo of repos) {
+    // Entries recorded against this canonical root. repo_root values in
+    // state are already canonical, so an exact match is correct; a repo
+    // that moved fails resolution earlier and lands in `unreachable`.
+    const entries = (byRepo.get(repo.root) ?? [])
+      .slice()
+      .sort((a, b) => b.created_at.localeCompare(a.created_at) || a.id.localeCompare(b.id));
+
+    const evictIds = new Set<string>();
+    const protectedIds: string[] = [];
+    const errors: Array<{ id: string; message: string }> = [];
+    let kept = 0;
+
+    entries.forEach((entry, index) => {
+      totals.evaluated += 1;
+      const ageDays = (now - Date.parse(entry.created_at)) / DAY_MS;
+      const effectiveAge = Number.isNaN(ageDays) ? Number.POSITIVE_INFINITY : ageDays;
+      const isProtectedPreRestore =
+        entry.kind === "pre_restore" && effectiveAge < policy.protectDays;
+      if (isProtectedPreRestore) {
+        protectedIds.push(entry.id);
+        totals.protected += 1;
+        kept += 1;
+        return;
+      }
+      if (index >= policy.maxCount || effectiveAge > policy.maxAgeDays) {
+        evictIds.add(entry.id);
+      } else {
+        kept += 1;
+      }
+    });
+    totals.kept += kept;
+
+    const deleted: string[] = [];
+    const wouldDelete: string[] = [];
+    if (dryRun) {
+      for (const entry of entries) {
+        if (evictIds.has(entry.id)) wouldDelete.push(entry.id);
+      }
+      totals.would_delete += wouldDelete.length;
+    } else {
+      for (const entry of entries) {
+        if (!evictIds.has(entry.id)) continue;
+        try {
+          // deleteRef is idempotent: an already-gone ref still lets the
+          // state entry be removed.
+          await deleteRef(repo.root, entry.ref, { timeoutMs });
+          deleted.push(entry.id);
+          stateRemovals.push(entry.id);
+        } catch (err) {
+          if (err instanceof GitError) {
+            errors.push({ id: entry.id, message: err.message });
+            totals.errors += 1;
+          } else {
+            throw err;
+          }
+        }
+      }
+      totals.deleted += deleted.length;
+    }
+
+    repoReports.push({
+      repo_root: repo.root,
+      evaluated: entries.length,
+      ...(dryRun ? { would_delete: wouldDelete } : { deleted }),
+      protected: protectedIds,
+      kept,
+      ...(errors.length > 0 ? { errors } : {}),
+    });
+  }
+
+  if (!dryRun && stateRemovals.length > 0) {
+    const removals = new Set(stateRemovals);
+    await updateState((state) => {
+      for (const id of removals) delete state.checkpoints[id];
+    });
+  }
+
+  emit({
+    contract: CONTRACT,
+    command: "gc",
+    ok: unreachable.length === 0 || repoReports.length > 0,
+    dry_run: dryRun,
+    policy: {
+      max_count: policy.maxCount,
+      max_age_days: policy.maxAgeDays,
+      pre_restore_protect_days: policy.protectDays,
     },
-    isolation: isolation.mode,
-    sharing_panes: isolation.sharing,
-    clean_passes: result.clean_passes,
-    warnings,
+    repos: repoReports,
+    unreachable,
+    totals: {
+      evaluated: totals.evaluated,
+      ...(dryRun ? { would_delete: totals.would_delete } : { deleted: totals.deleted }),
+      protected: totals.protected,
+      kept: totals.kept,
+      errors: totals.errors,
+    },
+    generated_at: new Date().toISOString(),
+  });
+}
+
+/**
+ * `prune` — deleteStaleRefs equivalent (#75): delete hidden refs under
+ * `refs/herdr-plugins/checkpoints/` that the state index does not
+ * reference. Protection is by full ref name: any ref named by ANY
+ * state entry is kept, in every repo scanned (repo-key namespacing
+ * makes cross-repo collisions impossible in practice, and the rule
+ * stays conservative). Repos scanned: `--repo PATH`, else every repo
+ * root known to state. `--dry-run` lists orphans without deleting.
+ */
+async function cmdPrune(options: CliOptions): Promise<void> {
+  const config = await loadConfig();
+  await drainAuto(options, config);
+  const valueFlags = ["--repo"];
+  const pos = positionals(options.args, valueFlags);
+  if (pos.length > 0) fail("prune takes no positional arguments", 2);
+  const dryRun = options.args.includes("--dry-run");
+  const repoFlag = flagValue(options.args, "--repo");
+  if (repoFlag?.startsWith("-")) fail("invalid --repo value", 2);
+  const timeoutMs = effectiveTimeoutMs(options, config);
+
+  const state = await loadState();
+  const protectedRefs = new Set(Object.values(state.checkpoints).map((e) => e.ref));
+  const stateRepoRoots = [...new Set(Object.values(state.checkpoints).map((e) => e.repo_root))];
+
+  const { repos, unreachable } = await resolveGcRepos(stateRepoRoots, repoFlag, timeoutMs);
+
+  const repoReports: Array<Record<string, unknown>> = [];
+  const totals = { scanned: 0, orphans: 0, deleted: 0, would_delete: 0, errors: 0 };
+  // Linked worktrees share one ref store: scan each common dir once.
+  const seenCommons = new Set<string>();
+
+  for (const repo of repos) {
+    if (seenCommons.has(repo.commonDir)) continue;
+    seenCommons.add(repo.commonDir);
+    let refs: string[];
+    try {
+      refs = await listCheckpointRefs(repo.root, { timeoutMs });
+    } catch (err) {
+      if (err instanceof GitError) {
+        unreachable.push({ repo_root: repo.root, kind: err.kind, message: err.message });
+        continue;
+      }
+      throw err;
+    }
+    const orphans = refs.filter((ref) => !protectedRefs.has(ref));
+    const deleted: string[] = [];
+    const errors: Array<{ ref: string; message: string }> = [];
+    if (dryRun) {
+      totals.would_delete += orphans.length;
+    } else {
+      for (const ref of orphans) {
+        try {
+          // --no-deref mirrors upstream: delete the checkpoint ref
+          // itself, never a symbolic ref's target.
+          await gitOk(repo.root, ["update-ref", "--no-deref", "-d", ref], { timeoutMs });
+          deleted.push(ref);
+        } catch (err) {
+          if (err instanceof GitError) {
+            errors.push({ ref, message: err.message });
+            totals.errors += 1;
+          } else {
+            throw err;
+          }
+        }
+      }
+      totals.deleted += deleted.length;
+    }
+    totals.scanned += refs.length;
+    totals.orphans += orphans.length;
+    repoReports.push({
+      repo_root: repo.root,
+      scanned: refs.length,
+      orphans,
+      ...(dryRun ? {} : { deleted }),
+      ...(errors.length > 0 ? { errors } : {}),
+    });
+  }
+
+  emit({
+    contract: CONTRACT,
+    command: "prune",
+    ok: true,
+    dry_run: dryRun,
+    repos: repoReports,
+    unreachable,
+    totals: {
+      scanned: totals.scanned,
+      orphans: totals.orphans,
+      ...(dryRun ? { would_delete: totals.would_delete } : { deleted: totals.deleted }),
+      errors: totals.errors,
+    },
     generated_at: new Date().toISOString(),
   });
 }
@@ -830,15 +1551,31 @@ async function cmdCapability(): Promise<void> {
     contract: CONTRACT,
     plugin: PLUGIN_ID,
     version: PLUGIN_VERSION,
-    commands: ["capability", "create", "list", "show", "diff", "plan", "restore", "delete"],
+    commands: [
+      "capability",
+      "create",
+      "save",
+      "list",
+      "show",
+      "diff",
+      "plan",
+      "restore",
+      "restore-group",
+      "delete",
+      "gc",
+      "prune",
+    ],
     read_only: false,
-    mutation_commands: ["create", "delete", "restore"],
+    mutation_commands: ["create", "save", "delete", "restore", "restore-group", "gc", "prune"],
     requires: { git: true, bun: true },
     defaults: {
       timeoutMs: config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       diffMaxBytes: config.diffMaxBytes ?? DEFAULT_DIFF_MAX_BYTES,
       showMaxBytes: config.showMaxBytes ?? DEFAULT_SHOW_MAX_BYTES,
       listLimit: DEFAULT_LIST_LIMIT,
+      gcMaxCount: config.gcMaxCount ?? DEFAULT_GC_MAX_COUNT,
+      gcMaxAgeDays: config.gcMaxAgeDays ?? DEFAULT_GC_MAX_AGE_DAYS,
+      preRestoreProtectDays: config.preRestoreProtectDays ?? DEFAULT_PRE_RESTORE_PROTECT_DAYS,
     },
   });
 }
@@ -848,14 +1585,31 @@ const USAGE = `rebuildup.checkpoints — hidden-ref worktree checkpoints (contra
 Usage:
   checkpoints create [--repo PATH | <pane_id>] [--label TEXT] [--auto]
       [--session NAME] [--timeout MS]
-  checkpoints list [--repo PATH] [--limit N]
+  checkpoints save [--repo PATH ...] [--pane ID | <pane_id>] [--label TEXT]
+      [--session NAME] [--socket PATH] [--timeout MS]
+  checkpoints list [--repo PATH] [--group ID] [--limit N]
   checkpoints show <checkpoint-id> [--max-bytes N]
   checkpoints diff <checkpoint-id|HEAD> <checkpoint-id|HEAD> [--max-bytes N]
   checkpoints plan <checkpoint-id> [--repo PATH]
   checkpoints restore <checkpoint-id> [--repo PATH] [--force]
       [--session NAME] [--socket PATH] [--timeout MS]
+  checkpoints restore-group <group-id> [--force]
+      [--session NAME] [--socket PATH] [--timeout MS]
   checkpoints delete <checkpoint-id>
+  checkpoints gc [--repo PATH] [--dry-run]
+      [--max-count N] [--max-age-days N] [--protect-days N]
+  checkpoints prune [--repo PATH] [--dry-run]
   checkpoints capability
+
+save captures one checkpoint per repo under a shared group id (explicit
+--repo list, a pane's repo, or live discovery across all session pane
+repos); restore-group restores every member with per-repo status —
+a partial restore reports ok:false and exits 1.
+
+gc enforces per-repo retention (newest --max-count entries, entries
+younger than --max-age-days; recent pre_restore entries are protected
+for --protect-days). prune deletes hidden refs the state index no
+longer references (deleteStaleRefs equivalent). Both support --dry-run.
 
 restore first captures a mandatory pre-restore checkpoint (recover
 your previous state with 'restore <pre-restore-id>'), refuses when the
@@ -875,6 +1629,8 @@ async function main(): Promise<void> {
   switch (options.command) {
     case "create":
       return cmdCreate(options);
+    case "save":
+      return cmdSave(options);
     case "list":
       return cmdList(options);
     case "show":
@@ -885,8 +1641,14 @@ async function main(): Promise<void> {
       return cmdPlan(options);
     case "restore":
       return cmdRestore(options);
+    case "restore-group":
+      return cmdRestoreGroup(options);
     case "delete":
       return cmdDelete(options);
+    case "gc":
+      return cmdGc(options);
+    case "prune":
+      return cmdPrune(options);
     case "capability":
       return cmdCapability();
     case "help":

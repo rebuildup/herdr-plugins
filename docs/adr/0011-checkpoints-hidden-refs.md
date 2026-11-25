@@ -92,3 +92,24 @@ worktree; upstream chose the same trade-off. Safety instead comes from
 the surrounding contract: a mandatory persisted `pre-restore`
 checkpoint before any mutation, shared-worktree/session isolation
 gates, and structured failure kinds carrying the pre-restore ref.
+
+## Amendment (T4 / Issue #75): multi-repo groups + retention GC
+
+- **Checkpoint groups**: `save` captures one checkpoint per repo under
+  a shared `group_id` (`grp-…`, stamped on each state entry);
+  `restore-group` replays the T2 pipeline per member with per-repo
+  status and honest partial-failure reporting (`ok:false` + exit 1,
+  never a fake success). The repo set comes from explicit `--repo`
+  enumeration, a pane id, or live discovery across session pane cwds —
+  deliberately no dependency on the projects registry's cross-plugin
+  state.
+- **Retention GC**: `gc` enforces per-repo-root bounds (max count,
+  max age) with a protection window for recent `pre_restore` safety
+  refs; eviction is `update-ref -d` + state removal together.
+  `prune` is the upstream `deleteStaleRefs` equivalent: it deletes
+  hidden refs no state entry names (protection by full ref name,
+  `--no-deref`), scanned once per git common dir. Neither runs
+  `git gc` — object reclamation stays git's job; refs remain the
+  reachability anchor.
+- No design change to capture/restore mechanics: groups and GC are
+  state-index + CLI-surface additions on top of the T1–T3 decisions.

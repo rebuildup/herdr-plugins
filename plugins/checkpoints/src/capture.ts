@@ -56,10 +56,13 @@ const LS_FILES_MAX_BYTES = 64 * 1024 * 1024;
 /** Domain errors that are not git failures (structured `kind` on stderr). */
 export class CheckpointError extends Error {
   readonly kind: string;
-  constructor(kind: string, message: string) {
+  /** Optional structured detail merged into the CLI error payload. */
+  readonly extra: Record<string, unknown> | undefined;
+  constructor(kind: string, message: string, extra?: Record<string, unknown>) {
     super(message);
     this.name = "CheckpointError";
     this.kind = kind;
+    this.extra = extra;
   }
 }
 
@@ -80,6 +83,15 @@ export function checkpointRef(repoKey: string, id: string): string {
 /** URL/base36-safe unique id; also the final ref path component. */
 export function newCheckpointId(now: Date = new Date()): string {
   return `${now.getTime().toString(36)}-${randomBytes(4).toString("hex")}`;
+}
+
+/**
+ * Group id shared by every checkpoint captured in one `save` call —
+ * the unit `restore-group` operates on. Same shape as checkpoint ids
+ * with a `grp-` prefix so the namespaces can never collide.
+ */
+export function newGroupId(now: Date = new Date()): string {
+  return `grp-${now.getTime().toString(36)}-${randomBytes(4).toString("hex")}`;
 }
 
 /** Canonicalize a repo root so state keys and ref namespaces are stable. */
@@ -326,6 +338,30 @@ export async function deleteRef(
   if (oid === null) return false;
   await gitOk(repoRoot, ["update-ref", "-d", ref], options);
   return true;
+}
+
+/**
+ * Full ref names under `refs/herdr-plugins/checkpoints/` visible from
+ * `repoRoot` (shared across linked worktrees of one repository).
+ * Used by `prune` to find refs the state index no longer references.
+ */
+export async function listCheckpointRefs(
+  repoRoot: string,
+  options: { timeoutMs?: number } = {},
+): Promise<string[]> {
+  const result = await runGit(
+    repoRoot,
+    ["for-each-ref", "--format=%(refname)", `${CHECKPOINT_REFS_PREFIX}/`],
+    { ...options, maxBuffer: 16 * 1024 * 1024 },
+  );
+  if (result.code !== 0) {
+    const detail = result.stderr.trim() || `exit ${result.code}`;
+    throw new GitError("git_error", `git for-each-ref: ${detail}`);
+  }
+  return result.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith(`${CHECKPOINT_REFS_PREFIX}/`));
 }
 
 /** Bounded `git diff <revA> <revB>` between two resolved revisions. */

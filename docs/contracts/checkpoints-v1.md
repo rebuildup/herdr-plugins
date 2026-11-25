@@ -4,8 +4,9 @@ Structured JSON CLI contract for the `rebuildup.checkpoints` herdr
 plugin — worktree checkpoints stored as hidden git refs
 (`refs/herdr-plugins/checkpoints/<repo-key>/<id>`). Read commands
 (`list`, `show`, `diff`, `plan`) are side-effect free against the
-user's index/worktree; `create`, `delete`, and `restore` write hidden
-refs, plugin state, and — for `restore` only — the worktree/index.
+user's index/worktree; `create`, `save`, `delete`, `restore`,
+`restore-group`, `gc`, and `prune` write hidden refs, plugin state,
+and — for the restore commands only — the worktree/index.
 Every command (except `capability`/`help`) first drains pending
 work-unit auto-captures recorded by the plugin's event hooks — see
 "Auto-capture" below. Follows the same conventions as
@@ -18,8 +19,8 @@ work-unit auto-captures recorded by the plugin's event hooks — see
 2. `cd <plugin_root> && bun run src/cli.ts capability` → verify
    `contract == "herdr-plugins.checkpoints/v1"` and the commands you
    need exist.
-3. Run `create` / `list` / `show` / `diff` / `plan` / `restore` /
-   `delete` as needed.
+3. Run `create` / `save` / `list` / `show` / `diff` / `plan` /
+   `restore` / `restore-group` / `delete` / `gc` / `prune` as needed.
 
 ## Invocation
 
@@ -28,21 +29,37 @@ cd <plugin_root>
 bun run src/cli.ts capability
 bun run src/cli.ts create [--repo PATH | <pane_id>] [--label TEXT]
     [--auto] [--session NAME] [--socket PATH] [--timeout MS]
-bun run src/cli.ts list [--repo PATH] [--limit N]
+bun run src/cli.ts save [--repo PATH ...] [--pane ID | <pane_id>]
+    [--label TEXT] [--session NAME] [--socket PATH] [--timeout MS]
+bun run src/cli.ts list [--repo PATH] [--group ID] [--limit N]
 bun run src/cli.ts show <checkpoint-id> [--max-bytes N]
 bun run src/cli.ts diff <checkpoint-id|HEAD> <checkpoint-id|HEAD>
     [--max-bytes N]
 bun run src/cli.ts plan <checkpoint-id> [--repo PATH]
 bun run src/cli.ts restore <checkpoint-id> [--repo PATH] [--force]
     [--session NAME] [--socket PATH] [--timeout MS]
+bun run src/cli.ts restore-group <group-id> [--force]
+    [--session NAME] [--socket PATH] [--timeout MS]
 bun run src/cli.ts delete <checkpoint-id>
+bun run src/cli.ts gc [--repo PATH] [--dry-run]
+    [--max-count N] [--max-age-days N] [--protect-days N]
+bun run src/cli.ts prune [--repo PATH] [--dry-run]
 ```
 
 - Repo target for `create`: `--repo PATH` (any path inside the work
   tree), or a pane id — positional argument, `HERDR_PANE_ID`, or
   `HERDR_PLUGIN_CONTEXT_JSON.focused_pane_id` — resolved through the
   herdr session snapshot (same path as `rebuildup.git`). `--repo` and a
-  pane id are mutually exclusive. `list --repo` filters by repo.
+  pane id are mutually exclusive. `list --repo` filters by repo;
+  `list --group` filters by save-group id.
+- Repo set for `save`: repeated `--repo PATH` flags (explicit
+  enumeration), a pane id (`--pane`, positional, `HERDR_PANE_ID`, or
+  plugin context — that pane's repo only), or — with neither — **live
+  discovery**: every distinct repo resolved from the session
+  snapshot's pane cwds (non-repo cwds are reported in
+  `skipped_panes`, never silently captured). Discovery requires a
+  reachable session (`session_unreachable` otherwise); it deliberately
+  does not consult the projects registry.
 - `create --auto` records the entry with `kind:"auto"` instead of
   `"manual"` — for agents that detect their own work-unit boundary.
   An explicit `create` for a pane clears that pane's pending
@@ -90,9 +107,10 @@ mutation_commands:["create","delete","restore"], requires:{git,bun}, defaults}`.
 
 `checkpoint` entry fields: `id`, `repo_root`, `repo_key`, `ref`,
 `commit`, `head_sha`, `branch` (null when detached), `created_at`,
-optional `label`, `kind`, `files_summary` (bounded `git diff
---name-status head commit`), `files_summary_truncated`, `submodules`
-(gitlink paths).
+optional `label`, `kind`, `group_id`, `files_summary` (bounded `git
+diff --name-status head commit`), `files_summary_truncated`,
+`submodules` (gitlink paths). `group_id` is present only on entries
+captured by `save` — the shared id `restore-group` operates on.
 
 `kind` records capture provenance: `"manual"` (explicit `create`),
 `"auto"` (lazy work-unit capture drained from the agent-status hook,
@@ -102,9 +120,45 @@ and are treated as `"manual"`.
 
 ### `list`
 
-`{contract, command:"list", repo_root|null, count, total, truncated,
-checkpoints:[entry...], generated_at}` — newest `created_at` first,
-default limit 100 (`--limit`, max 1000).
+`{contract, command:"list", repo_root|null, group:string|null, count,
+total, truncated, checkpoints:[entry...], generated_at}` — newest
+`created_at` first, default limit 100 (`--limit`, max 1000).
+
+### `save`
+
+Multi-repo checkpoint group (#75). One checkpoint per resolved repo,
+all stamped with the same `group_id` (`grp-…`):
+
+`{contract, command:"save", ok, group, total, succeeded, failed,
+results:[{repo_root, ok:true, checkpoint}|{repo_root, ok:false,
+error:{kind,message}}], skipped_panes?:[{pane_id, reason}],
+generated_at}`
+
+Per-repo capture failures never hide: `ok` is true only when every
+repo captured. On any failure the full report is still printed on
+stdout, a `{kind:"partial_save"}` error goes to stderr, and the exit
+code is 1 — partial success is never reported as success. Explicit
+`--repo` resolution failures are per-repo `ok:false` results; a
+pane-targeted save fails hard like `create`.
+
+### `restore-group <group-id>`
+
+Restores every state entry whose `group_id` matches — one repo at a
+time, each through the full `restore` pipeline (ref liveness, per-repo
+shared-worktree isolation unless `--force`, mandatory `pre_restore`
+capture, worktree restore + post-verify). `--repo` is rejected: members
+always restore into their recorded repo.
+
+`{contract, command:"restore-group", ok, group, total, succeeded,
+failed, results:[...], generated_at}` — each result carries the same
+fields as a single `restore` payload (`checkpoint`, `repo_root`,
+`restored_commit`, `pre_restore`, `isolation`, `sharing_panes`,
+`clean_passes`, `warnings`) on success, or `{ok:false, error:{kind,
+message,...}, pre_restore?}` on failure. Repos are attempted
+independently: one failure never aborts the rest. `ok` is true only
+when every member restored; otherwise stdout still carries the full
+per-repo report, stderr gets `{kind:"partial_restore"}`, exit 1.
+Unknown group id → `unknown_group`.
 
 ### `show <id>`
 
@@ -202,6 +256,43 @@ hidden ref when it still exists (`ref_existed:false` when already gone
 or the repo is unreachable — idempotent cleanup, reported via
 `warnings`). Deleting an unknown id is `unknown_checkpoint`.
 
+### `gc`
+
+Bounded retention (#75). Per canonical repo root, evicts entries
+beyond `--max-count` (default 50, config `gcMaxCount`) counting from
+newest `created_at`, and every entry older than `--max-age-days`
+(default 30, config `gcMaxAgeDays`). `kind:"pre_restore"` entries
+younger than `--protect-days` (default 7, config
+`preRestoreProtectDays`) are exempt — they are the recovery anchor
+for a recent restore. Eviction deletes the hidden ref AND the state
+entry together; an entry whose ref deletion fails keeps its state
+entry (reported under the repo's `errors`, retried next run). Repos
+that no longer resolve are listed under `unreachable` and skipped —
+their state is never touched. `--repo PATH` scopes to one repo;
+`--dry-run` reports `would_delete` without mutating.
+
+`{contract, command:"gc", ok, dry_run, policy:{max_count,
+max_age_days, pre_restore_protect_days}, repos:[{repo_root,
+evaluated, deleted|would_delete:[ids], protected:[ids], kept,
+errors?}], unreachable:[...], totals:{evaluated, deleted|
+would_delete, protected, kept, errors}, generated_at}`
+
+### `prune`
+
+`deleteStaleRefs` equivalent (#75): deletes hidden refs under
+`refs/herdr-plugins/checkpoints/` that **no state entry references**
+— protection is by full ref name across the whole state index, so a
+referenced ref is never deleted in any scanned repo. Repos scanned:
+`--repo PATH`, else every repo root known to state (linked worktrees
+sharing one git common dir are scanned once). Orphan deletion uses
+`update-ref --no-deref -d`, mirroring upstream. `--dry-run` lists
+orphans without deleting.
+
+`{contract, command:"prune", ok, dry_run, repos:[{repo_root, scanned,
+orphans:[refs], deleted?, errors?}], unreachable:[...],
+totals:{scanned, orphans, deleted|would_delete, errors},
+generated_at}`
+
 ## Auto-capture (work-unit checkpoints)
 
 The manifest registers two event hooks (`src/hook.ts`):
@@ -261,12 +352,14 @@ command.
 | `shared_worktree` | ≥2 live panes share the target worktree (restore; `error.panes`) |
 | `session_unreachable` | herdr session snapshot failed during restore isolation check |
 | `restore_failed` / `clean_failed` / `clean_incomplete` / `restore_verify_failed` | restore mutation/verify failures; error carries `pre_restore_*` fields |
+| `unknown_group` | `restore-group` id matches no state entries |
+| `partial_save` / `partial_restore` | group command: some repos failed; full per-repo report is on stdout, this kind marks the stderr summary |
 | `git_missing` / `timeout` / `git_error` | shared git-core spawn failures |
 
 ## Explicit non-goals (v1)
 
 No turn-confirmed (per-message) auto-capture — work-unit captures key
-on `agent_status` transitions only — no multi-repo orchestration, no
-checkpoint GC, no private object store/quarantine, no submodule
-worktree capture/restore (record-and-warn only). Those are tickets
-#75+ and upstream herdr requests.
+on `agent_status` transitions only — no private object
+store/quarantine, no submodule worktree capture/restore
+(record-and-warn only). Those are upstream requests / later
+hardening.

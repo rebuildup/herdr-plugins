@@ -25,18 +25,29 @@ a capture-pending mark on `working → idle|done` transitions (no git in
 the hook); the next CLI invocation lazily captures it as a `kind:"auto"`
 work-unit checkpoint — see `docs/specs/checkpoints.md`.
 
+Multi-repo groups (#75): `save` captures one checkpoint per repo under
+a shared `group_id` — explicit `--repo` list, a pane's repo, or live
+discovery across session pane cwds — and `restore-group` restores them
+with honest per-repo status. `gc` enforces per-repo retention
+(count/age, `pre_restore` protection window) and `prune` deletes
+state-unreferenced hidden refs; both support `--dry-run`.
+
 ## Commands
 
 ```bash
 cd "$(herdr plugin list --json | jq -r '.result.plugins[] | select(.plugin_id=="rebuildup.checkpoints") | .plugin_root')"
 bun run src/cli.ts capability
 bun run src/cli.ts create [--repo PATH | <pane_id>] [--label TEXT] [--auto]
-bun run src/cli.ts list [--repo PATH] [--limit N]
+bun run src/cli.ts save [--repo PATH ...] [--pane ID | <pane_id>] [--label TEXT]
+bun run src/cli.ts list [--repo PATH] [--group ID] [--limit N]
 bun run src/cli.ts show <checkpoint-id> [--max-bytes N]
 bun run src/cli.ts diff <checkpoint-id|HEAD> <checkpoint-id|HEAD> [--max-bytes N]
 bun run src/cli.ts plan <checkpoint-id> [--repo PATH]
 bun run src/cli.ts restore <checkpoint-id> [--repo PATH] [--force]
+bun run src/cli.ts restore-group <group-id> [--force]
 bun run src/cli.ts delete <checkpoint-id>
+bun run src/cli.ts gc [--repo PATH] [--dry-run] [--max-count N] [--max-age-days N] [--protect-days N]
+bun run src/cli.ts prune [--repo PATH] [--dry-run]
 ```
 
 `restore` always captures a `pre-restore` checkpoint first, refuses
@@ -66,11 +77,13 @@ dependencies beyond the repo's shared `packages/git-core` and
 - Submodules: gitlinks are recorded; submodule *worktree* contents are
   not captured (record-and-warn).
 - Shared object store: checkpoint objects live in the repo's own object
-  database; `git log --all` shows the hidden refs. GC of deleted
-  checkpoint objects is a later ticket.
+  database; `git log --all` shows the hidden refs. `gc` bounds ref
+  retention and `prune` removes state-unreferenced refs, but neither
+  runs `git gc` — object reclamation stays git's job.
 - Restore covers the root repo only: submodule worktrees recorded as
   gitlinks are not restored (warned).
 - Auto-capture is work-unit granularity (`agent_status` transitions),
   not upstream's per-turn boundary; it is best-effort and drops marks
   on capture failure.
-- Multi-repo orchestration / GC are later tickets (#75).
+- `save` discovery covers only repos reachable from pane cwds in the
+  current session; repos no pane touches need explicit `--repo`.
