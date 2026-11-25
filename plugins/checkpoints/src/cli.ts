@@ -24,9 +24,12 @@ import {
   type CallOptions,
   type PaneInfo,
   pluginDirs,
+  reportPaneMetadata,
   type SessionSnapshot,
   sessionSnapshot,
 } from "../../../packages/herdr-client/src/index";
+import type { AutoCaptureReport } from "./auto";
+import { drainPendingCaptures } from "./auto";
 import {
   CheckpointError,
   canonicalRepoRoot,
@@ -39,7 +42,7 @@ import {
   verifyRef,
 } from "./capture";
 import { panesSharingRepo, planRestore, restoreWorktree } from "./restore";
-import { type CheckpointEntry, loadState, PLUGIN_ID, updateState } from "./state";
+import { type CheckpointEntry, loadState, PLUGIN_ID, sessionKeyFor, updateState } from "./state";
 
 const CONTRACT = "herdr-plugins.checkpoints/v1";
 const PLUGIN_VERSION = "0.1.0";
@@ -83,8 +86,32 @@ function parseArgs(argv: string[]): CliOptions {
   return options;
 }
 
+/**
+ * Lazy auto-capture drain report for the current invocation, merged
+ * into the emitted payload as `auto_captures` when non-empty. Set by
+ * `drainAuto` at the top of every state-touching command; `capability`
+ * and `help` never drain.
+ */
+let autoReport: AutoCaptureReport | null = null;
+
 function emit(payload: unknown): void {
-  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+  const body =
+    autoReport !== null &&
+    (autoReport.captured.length > 0 ||
+      autoReport.skipped.length > 0 ||
+      autoReport.session_unreachable === true)
+      ? { ...(payload as Record<string, unknown>), auto_captures: autoReport }
+      : payload;
+  process.stdout.write(`${JSON.stringify(body, null, 2)}\n`);
+}
+
+/**
+ * Drain capture-pending marks left by the agent-status event hook.
+ * Best-effort by contract: an unreachable session or per-pane capture
+ * failure never fails the command — outcomes land in `auto_captures`.
+ */
+async function drainAuto(options: CliOptions, config: PluginConfig): Promise<void> {
+  autoReport = await drainPendingCaptures(options, effectiveTimeoutMs(options, config));
 }
 
 function emitError(
@@ -250,20 +277,57 @@ async function cmdCreate(options: CliOptions): Promise<void> {
   if (labelFlag?.startsWith("-")) {
     fail("invalid --label value", 2);
   }
+  // `--auto` marks the entry as plugin/agent-initiated rather than an
+  // explicit user `create` — same `kind` namespace the lazy work-unit
+  // drain uses.
+  const autoKind = options.args.includes("--auto");
+
+  // An explicit create supersedes any pending auto-capture for the same
+  // pane: capturing twice would record two identical work units.
+  if (paneId !== null) {
+    const sessionKey = sessionKeyFor(options);
+    await updateState((state) => {
+      const paneState = state.auto?.[sessionKey]?.[paneId];
+      if (paneState?.pending !== undefined) delete paneState.pending;
+    });
+  }
+  await drainAuto(options, config);
 
   let entry: CheckpointEntry;
   try {
     entry = await captureCheckpoint(resolved, {
       timeoutMs: effectiveTimeoutMs(options, config),
       label: labelFlag,
+      kind: autoKind ? "auto" : "manual",
     });
   } catch (err) {
     gitFail(err);
   }
 
-  await updateState((state) => {
+  const checkpointCount = await updateState((state) => {
     state.checkpoints[entry.id] = entry;
+    let count = 0;
+    for (const other of Object.values(state.checkpoints)) {
+      if (other.repo_root === resolved.root) count += 1;
+    }
+    return count;
   });
+
+  // Project display-only metadata tokens for pane-targeted creates.
+  if (paneId !== null) {
+    try {
+      await reportPaneMetadata(
+        paneId,
+        {
+          checkpoint_latest: entry.id,
+          checkpoint_count: String(checkpointCount),
+        },
+        { ...options, source: PLUGIN_ID },
+      );
+    } catch {
+      // Display-only projection; never fail the capture for it.
+    }
+  }
 
   const warnings: string[] = [];
   if (entry.submodules && entry.submodules.length > 0) {
@@ -289,6 +353,7 @@ function sortEntries(entries: CheckpointEntry[]): CheckpointEntry[] {
 
 async function cmdList(options: CliOptions): Promise<void> {
   const config = await loadConfig();
+  await drainAuto(options, config);
   const valueFlags = ["--repo", "--limit"];
   const pos = positionals(options.args, valueFlags);
   if (pos.length > 0) fail("list takes no positional arguments", 2);
@@ -346,6 +411,7 @@ async function lookupEntry(id: string): Promise<CheckpointEntry> {
 
 async function cmdShow(options: CliOptions): Promise<void> {
   const config = await loadConfig();
+  await drainAuto(options, config);
   const pos = positionals(options.args, ["--max-bytes"]);
   if (pos.length !== 1) fail("show requires exactly one checkpoint id", 2);
   const id = pos[0] as string;
@@ -411,6 +477,7 @@ function parseDiffSide(
 
 async function cmdDiff(options: CliOptions): Promise<void> {
   const config = await loadConfig();
+  await drainAuto(options, config);
   const valueFlags = ["--max-bytes"];
   const pos = positionals(options.args, valueFlags);
   if (pos.length !== 2) {
@@ -488,6 +555,7 @@ async function cmdDiff(options: CliOptions): Promise<void> {
 
 async function cmdDelete(options: CliOptions): Promise<void> {
   const config = await loadConfig();
+  await drainAuto(options, config);
   const pos = positionals(options.args, []);
   if (pos.length !== 1) fail("delete requires exactly one checkpoint id", 2);
   const id = pos[0] as string;
@@ -583,6 +651,7 @@ function checkpointIdArg(options: CliOptions, command: string): string {
 
 async function cmdPlan(options: CliOptions): Promise<void> {
   const config = await loadConfig();
+  await drainAuto(options, config);
   const id = checkpointIdArg(options, "plan");
   const entry = await lookupEntry(id).catch(gitFail);
   const resolved = await resolveTargetRepo(options, entry, config);
@@ -660,6 +729,7 @@ async function assertRestoreIsolation(
 
 async function cmdRestore(options: CliOptions): Promise<void> {
   const config = await loadConfig();
+  await drainAuto(options, config);
   const force = options.args.includes("--force");
   const id = checkpointIdArg(options, "restore");
   const entry = await lookupEntry(id).catch(gitFail);
@@ -696,6 +766,7 @@ async function cmdRestore(options: CliOptions): Promise<void> {
     preEntry = await captureCheckpoint(resolved, {
       timeoutMs,
       label: `pre-restore:${id}`,
+      kind: "pre_restore",
     });
   } catch (err) {
     gitFail(err);
@@ -775,7 +846,7 @@ async function cmdCapability(): Promise<void> {
 const USAGE = `rebuildup.checkpoints — hidden-ref worktree checkpoints (contract ${CONTRACT})
 
 Usage:
-  checkpoints create [--repo PATH | <pane_id>] [--label TEXT]
+  checkpoints create [--repo PATH | <pane_id>] [--label TEXT] [--auto]
       [--session NAME] [--timeout MS]
   checkpoints list [--repo PATH] [--limit N]
   checkpoints show <checkpoint-id> [--max-bytes N]
@@ -791,6 +862,11 @@ your previous state with 'restore <pre-restore-id>'), refuses when the
 herdr session is unreachable or >=2 live panes share the worktree
 (unless --force), then restores tracked+staged content and deletes
 untracked files — post-checkpoint untracked files are removed.
+
+Every command first drains capture-pending marks recorded by the
+pane.agent_status_changed event hook (working→idle/done transitions):
+each still-valid mark becomes an 'auto' checkpoint for the pane's repo.
+Results are reported in the payload's 'auto_captures' field.
 See docs/contracts/checkpoints-v1.md.
 `;
 

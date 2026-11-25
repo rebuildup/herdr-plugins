@@ -20,12 +20,17 @@ worktree+index to a checkpoint's tree (deleting post-checkpoint
 untracked files) only after capturing a mandatory `pre-restore`
 checkpoint and passing shared-worktree isolation checks.
 
+Auto-capture (#74): the `pane.agent_status_changed` event hook records
+a capture-pending mark on `working → idle|done` transitions (no git in
+the hook); the next CLI invocation lazily captures it as a `kind:"auto"`
+work-unit checkpoint — see `docs/specs/checkpoints.md`.
+
 ## Commands
 
 ```bash
 cd "$(herdr plugin list --json | jq -r '.result.plugins[] | select(.plugin_id=="rebuildup.checkpoints") | .plugin_root')"
 bun run src/cli.ts capability
-bun run src/cli.ts create [--repo PATH | <pane_id>] [--label TEXT]
+bun run src/cli.ts create [--repo PATH | <pane_id>] [--label TEXT] [--auto]
 bun run src/cli.ts list [--repo PATH] [--limit N]
 bun run src/cli.ts show <checkpoint-id> [--max-bytes N]
 bun run src/cli.ts diff <checkpoint-id|HEAD> <checkpoint-id|HEAD> [--max-bytes N]
@@ -65,5 +70,7 @@ dependencies beyond the repo's shared `packages/git-core` and
   checkpoint objects is a later ticket.
 - Restore covers the root repo only: submodule worktrees recorded as
   gitlinks are not restored (warned).
-- Auto-capture / multi-repo orchestration / GC are later tickets
-  (#74–#75).
+- Auto-capture is work-unit granularity (`agent_status` transitions),
+  not upstream's per-turn boundary; it is best-effort and drops marks
+  on capture failure.
+- Multi-repo orchestration / GC are later tickets (#75).

@@ -188,6 +188,12 @@ async function submodulePaths(
 export interface CaptureOptions {
   timeoutMs?: number;
   label?: string | undefined;
+  /**
+   * Capture provenance recorded on the state entry: `manual` for
+   * explicit `create`, `auto` for lazy work-unit captures, `pre_restore`
+   * for the mandatory pre-restore safety capture. Defaults to `manual`.
+   */
+  kind?: "manual" | "auto" | "pre_restore" | undefined;
   /** Injected for tests; defaults to wall clock + random. */
   id?: string | undefined;
   now?: Date | undefined;
@@ -281,6 +287,7 @@ export async function captureCheckpoint(
       created_at: (options.now ?? new Date()).toISOString(),
     };
     if (label !== undefined) entry.label = label;
+    entry.kind = options.kind ?? "manual";
     entry.files_summary = summary.stdout;
     entry.files_summary_truncated = summary.truncated;
     if (submodules.length > 0) entry.submodules = submodules;

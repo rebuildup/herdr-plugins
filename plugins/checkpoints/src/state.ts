@@ -10,9 +10,11 @@
  * (AGENTS §4), same shape as rebuildup.projects.
  */
 
+import { realpathSync } from "node:fs";
 import { mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
-import { pluginDirs } from "../../../packages/herdr-client/src/socket";
+import { pluginDirs, resolveSocketPath } from "../../../packages/herdr-client/src/socket";
 
 export const PLUGIN_ID = "rebuildup.checkpoints";
 export const STATE_SCHEMA_VERSION = 1;
@@ -53,15 +55,97 @@ export interface CheckpointEntry {
   files_summary_truncated?: boolean | undefined;
   /** Paths of gitlinks (submodules) recorded in the checkpoint tree. */
   submodules?: string[] | undefined;
+  /**
+   * Who initiated the capture: `manual` (explicit `create`), `auto`
+   * (lazy work-unit capture from the agent-status hook), or
+   * `pre_restore` (mandatory safety capture before `restore`). Entries
+   * written before #74 have no `kind` and are treated as `manual`.
+   */
+  kind?: "manual" | "auto" | "pre_restore" | undefined;
+}
+
+/**
+ * agent_session fingerprint recorded for generation guarding — same
+ * convention as rebuildup.inbox (`{agent, kind, value}` subset).
+ */
+export interface AgentSessionRef {
+  agent?: string;
+  kind?: string;
+  value?: string;
+}
+
+/**
+ * A capture-pending mark left by the `pane.agent_status_changed` event
+ * hook on a working→idle/done transition. The hook never runs git; the
+ * next CLI invocation drains pending marks lazily (ADR-0002).
+ */
+export interface AutoCapturePending {
+  /** Settle status observed at hook time (`idle` or `done`). */
+  status: string;
+  /** `state_change_seq` at hook time; null when the agent reported none. */
+  seq: number | null;
+  /** agent_session fingerprint at hook time (null when unavailable). */
+  agent_session: AgentSessionRef | null;
+  /** ISO timestamp the pending mark was recorded. */
+  recorded_at: string;
+}
+
+/** Per-pane auto-capture bookkeeping inside one session namespace. */
+export interface PaneAutoState {
+  /** Last agent_status seen by the hook (transition detection). */
+  last_status?: string | undefined;
+  /** Outstanding work-unit capture, drained lazily by CLI commands. */
+  pending?: AutoCapturePending | undefined;
 }
 
 export interface CheckpointsState {
   version: typeof STATE_SCHEMA_VERSION;
   checkpoints: Record<string, CheckpointEntry>;
+  /**
+   * Auto-capture marks, namespaced per herdr session
+   * (`hostname + canonical socket path`, same convention as inbox):
+   * `auto[sessionKey][paneId]`. Optional — absent until the first hook
+   * delivery.
+   */
+  auto?: Record<string, Record<string, PaneAutoState>> | undefined;
 }
 
 export function emptyState(): CheckpointsState {
   return { version: STATE_SCHEMA_VERSION, checkpoints: {} };
+}
+
+/**
+ * Session discriminator for auto-capture namespacing: hostname plus the
+ * canonical (symlink-resolved) socket path — identical convention to
+ * rebuildup.inbox. Pane ids repeat across sessions, so an unscoped key
+ * would leak pending captures between sessions.
+ */
+export function sessionKeyFor(options: {
+  session?: string | undefined;
+  socketPath?: string | undefined;
+}): string {
+  const socketPath = options.socketPath ?? resolveSocketPath({ session: options.session });
+  let canonical = socketPath;
+  try {
+    canonical = realpathSync(socketPath);
+  } catch {
+    canonical = path.resolve(socketPath);
+  }
+  return `${os.hostname()} ${canonical}`;
+}
+
+/** Per-session auto-capture map, created on demand for writes. */
+export function autoSessionEntries(
+  state: CheckpointsState,
+  sessionKey: string,
+): Record<string, PaneAutoState> {
+  if (state.auto === undefined) state.auto = {};
+  const sessions = state.auto;
+  const entries = sessions[sessionKey];
+  if (entries) return entries;
+  const created: Record<string, PaneAutoState> = {};
+  sessions[sessionKey] = created;
+  return created;
 }
 
 export function stateFilePath(): string {
@@ -83,7 +167,14 @@ export async function loadState(): Promise<CheckpointsState> {
     ) {
       return emptyState();
     }
-    return { version: STATE_SCHEMA_VERSION, checkpoints: parsed.checkpoints };
+    const state: CheckpointsState = {
+      version: STATE_SCHEMA_VERSION,
+      checkpoints: parsed.checkpoints,
+    };
+    if (typeof parsed.auto === "object" && parsed.auto !== null) {
+      state.auto = parsed.auto;
+    }
+    return state;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return emptyState();
     throw err;
