@@ -91,9 +91,18 @@ export interface ResolvedAgent {
  */
 export async function resolveAgent(target: string, options: CallOptions): Promise<ResolvedAgent> {
   const agent = await agentGet(target, options);
+  return { agent, identity: await identityForAgent(agent, options) };
+}
 
-  // Session name is display metadata; a snapshot failure must not fail
-  // an operation agent.get already proved reachable.
+/**
+ * Build the full identity for an already-resolved AgentInfo (e.g. the
+ * `agent` field of an `agent.start` result). Session name is display
+ * metadata; a snapshot failure must not fail the operation.
+ */
+export async function identityForAgent(
+  agent: AgentGetResult,
+  options: CallOptions,
+): Promise<AgentIdentity> {
   let snapshot: SessionSnapshot | null = null;
   try {
     snapshot = await sessionSnapshot(options);
@@ -118,7 +127,7 @@ export async function resolveAgent(target: string, options: CallOptions): Promis
   if (typeof agent.launch_pending === "boolean") {
     identity.launch_pending = agent.launch_pending;
   }
-  return { agent, identity };
+  return identity;
 }
 
 export interface GenerationExpectation {

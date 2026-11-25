@@ -188,3 +188,61 @@ export async function agentRename(
 ): Promise<unknown> {
   return request(socketFor(options), "agent.rename", { target, name }, options);
 }
+
+// --- Launch -----------------------------------------------------------------
+
+export interface AgentStartOptions {
+  /** Display name; herdr requires `[a-z][a-z0-9_-]{0,31}`. */
+  name: string;
+  /** Detected interactive agent kind (herdr `parse_agent_label`). */
+  kind: string;
+  /** Existing pane at an interactive shell prompt (public pane id). */
+  paneId: string;
+  /** Provider CLI args appended after the kind's executable. */
+  args?: string[] | undefined;
+  /**
+   * Startup readiness timeout in ms; herdr requires >3000 and <=300000
+   * (default 30000 upstream).
+   */
+  timeoutMs?: number | undefined;
+}
+
+export interface AgentStartResult {
+  /** The launched agent's AgentInfo (pane/workspace/tab ids included). */
+  agent: AgentGetResult;
+  /** Full argv herdr will run: `[executable, ...args]`. */
+  argv: string[];
+}
+
+/**
+ * `agent.start` — launch a supported interactive agent in an existing
+ * pane. herdr prepends the kind's canonical executable to `args`,
+ * shell-encodes the argv, and waits for interactive readiness up to
+ * `timeoutMs` (structured `invalid_agent_timeout` outside
+ * (3000, 300000]). The pane must be at its interactive shell prompt;
+ * busy/agent panes fail with `agent_pane_busy`, unknown panes with
+ * `agent_pane_not_found`, unknown kinds with `unsupported_agent_kind`.
+ * Args containing control characters are rejected upstream with
+ * `invalid_agent_argument` — callers should still validate (plugins
+ * own the privilege-escalation policy, ADR-0018).
+ */
+export async function agentStart(
+  params: AgentStartOptions,
+  options: CallOptions = {},
+): Promise<AgentStartResult> {
+  const wire: Record<string, unknown> = {
+    name: params.name,
+    kind: params.kind,
+    pane_id: params.paneId,
+  };
+  if (params.args !== undefined) wire.args = params.args;
+  if (params.timeoutMs !== undefined) wire.timeout_ms = params.timeoutMs;
+  const result = asRecord(await request(socketFor(options), "agent.start", wire, options));
+  // Tolerant unwrap: `{type:"agent_started", agent, argv}` verbatim.
+  const inner = asRecord(result.agent_started ?? result);
+  const agent = asRecord(inner.agent ?? result.agent) as unknown as AgentGetResult;
+  const argv = Array.isArray(inner.argv)
+    ? inner.argv.filter((a): a is string => typeof a === "string")
+    : [];
+  return { agent, argv };
+}
