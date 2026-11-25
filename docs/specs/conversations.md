@@ -1,16 +1,18 @@
 # Conversations plugin (`rebuildup.conversations`) — specification
 
-Scope: T1 foundation (#86, parent #5) — provider transcript discovery,
-incremental normalization into structured events, identity binding,
-and staleness detection. Contract: `herdr-plugins.conversations/v1`
+Scope: T1 foundation (#86) + T2 adapters/history (#87, parent #5) —
+provider transcript discovery, normalization into structured events
+(claude JSONL, codex rollout JSONL, opencode SQLite), identity
+binding, staleness detection, and the `history` read API. Contract:
+`herdr-plugins.conversations/v1`
 (`docs/contracts/conversations-v1.md`). Design: ADR-0012. Upstream
 mechanism reference: T3 Code `apps/server/src/usage/usageTranscriptReader.ts`
 (pinned revision in `docs/program/feature-ledger.json`).
 
 ## Purpose
 
-Give later tickets (#28 usage, #6 handoff, #87 codex/opencode
-adapters + history reads, #88 search/pagination) a shared, honest
+Give later tickets (#28 usage, #6 handoff, #88 search/pagination) a
+shared, honest
 transcript index: what the provider actually recorded, attributed to
 the herdr identity that was live when it was indexed — without PTY
 scraping, without fabricated structure, and without pretending
@@ -18,17 +20,26 @@ unsupported providers or missing files succeeded.
 
 ## Provider model
 
-`capability.providers` is the support matrix. v1:
+`capability.providers` is the support matrix:
 
 - **claude** — supported. Transcript:
   `$CLAUDE_CONFIG_DIR/projects/<encode(cwd)>/<session-id>.jsonl`
   (default `~/.claude`). `encode(cwd)` replaces every non
   `[A-Za-z0-9]` byte with `-` (verified against claude 2.1.x layouts,
   e.g. `/Users/x/.dotfiles` → `-Users-x--dotfiles`).
-- **codex**, **opencode** — `unsupported` with `reason` +
-  `planned_in: "#87"`. Panes running them appear in `index`'s
-  `skipped` as `unsupported_provider`; they are never indexed and
-  never reported as success.
+- **codex** — supported (T2). Transcript: rollout JSONL under
+  `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<session-id>.jsonl`
+  (default `~/.codex`), found by a depth-bounded walk of `sessions/`
+  and `archived_sessions/` matching the session id in the file name.
+  `.jsonl.zst` archives are compressed and resolve as
+  `transcript_missing`.
+- **opencode** — supported (T2). Transcript: SQLite
+  `opencode.db`/`opencode-*.db` under `$OPENCODE_DATA_DIR` (comma
+  list) else `$XDG_DATA_HOME/opencode` or `~/.local/share/opencode`,
+  opened read-only; session resolved by id in `session_v2` (fallback
+  `session`). Pre-SQLite `storage/**.json` layouts report
+  `unsupported_layout`; a database without the session reports
+  `session_not_found`.
 
 Any other provider hint → `unknown_provider` skip.
 
@@ -77,6 +88,45 @@ Rules:
 - Malformed JSON lines increment `malformed_lines`; they never fail
   the scan and never produce events.
 
+### codex adapter
+
+Rollout lines are `{timestamp, ordinal, type, payload}` (verified
+against codex CLI 0.169.x). Mapping:
+
+| record | events |
+| --- | --- |
+| `event_msg` `item_completed` item `UserMessage` | `turn` + `user_message` |
+| `event_msg` `item_completed` item `AgentMessage` | `assistant_message` |
+| `event_msg` `user_message` / `agent_message` (legacy) | same as above |
+| `response_item` `function_call`/`custom_tool_call`/`local_shell_call` (+`*_output`) | `tool_call` / `tool_result` (`call_id` ↔ `tool_use_id`) |
+| `event_msg` `token_count`, top-level `token_usage_record` | usage attached to the current turn's last `assistant_message` |
+| `turn_context` | carries `model` onto subsequent assistant events |
+| everything else (`session_meta`, `response_item` `message`/`reasoning`, `world_state`, lifecycle `event_msg`s, …) | ignored — provider bookkeeping or duplicated streams, never fabricated |
+
+`response_item` `message` records are deliberately skipped: they
+duplicate the `event_msg` item stream and include developer/
+instruction content (AGENTS.md, skills) that is not conversation.
+
+### opencode adapter
+
+SQLite is mutable and `seq`-ordered, so the byte-cursor machinery
+does not apply: every `index` run fully rescans the session and
+rewrites `events/<key>.jsonl` (`reindexed: true` always). Dedup is
+structural — event ids derive from provider row/part ids, and the
+rewrite is atomic. v2 (`session_message`, `data` JSON with embedded
+`content[]`) and v1 (`message` + `part` tables) rows normalize to the
+same events:
+
+| row/part | events |
+| --- | --- |
+| `user` message | `turn` + `user_message` (`data.text` / text parts) |
+| `assistant` message | `assistant_message` (text parts joined; `model` = `providerID/id`; `usage` from `tokens`; `cost`) + `tool_call`/`tool_result` per `content[]`/`part` `tool` entry (`callID` ↔ `tool_use_id`, `state.status`/`input`/`output`) |
+| `compaction`, `system` message types | `system` (`subtype` carried) |
+| lifecycle types (`idle`, `location-switched`, `model-switched`, `synthetic`, …) and `reasoning`/`step-*` parts | ignored — bookkeeping/provider internals |
+
+Malformed `data` JSON increments `malformed_lines` per row. Epoch-ms
+timestamps convert to ISO-8601; absent timestamps stay `null`.
+
 ## Incremental scanning
 
 Per transcript, `state.json` keeps `cursor {offset, size, mtime_ms,
@@ -86,11 +136,26 @@ the T3 `usageTranscriptReader` guard mechanism), and `turn_count`.
 - Resume iff file not shrunk AND guard hash matches; otherwise full
   re-index from byte 0 with the event log rewritten.
 - Only `\n`-terminated lines commit; a partial tail waits.
-- Events append to `<stateDir>/events/<provider>_<session>.jsonl`
+- Events append to `<stateDir>/events/<provider>:<session>.jsonl`
   (sanitized key); rewrites replace the file atomically (tmp+rename).
+- Exception: opencode transcripts have no byte cursor — each index
+  run rewrites the whole event log from a fresh SQLite scan.
 - All state mutation happens under the single-writer lock
   (`state.json.lock`, stale 30 s, timeout 60 s) — concurrent CLI
   invocations cannot interleave cursor/event writes.
+
+## History read API
+
+`history (--pane PANE | --session-id REF) [--limit N] [--cursor OFF]
+[--offline]` pages `events/<key>.jsonl` in transcript order. The
+cursor is an opaque byte offset; only newline-terminated lines are
+consumed, malformed lines are skipped and counted, and duplicate
+`event_id`s within a page are dropped and counted. Selector
+ambiguity is surfaced via `selector_note`, never resolved silently.
+A missing events file returns `events: []` + `events_present: false`
+with the record's `status`/`error` — never fabricated events. Live
+staleness is computed exactly like `sessions` (best-effort, degrades
+to `live: null`). Full shape: contract `history` section.
 
 ## Identity and staleness
 

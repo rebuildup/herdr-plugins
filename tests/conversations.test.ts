@@ -403,8 +403,8 @@ describe("conversations cli", () => {
     expect(r.json?.contract).toBe("herdr-plugins.conversations/v1");
     const providers = r.json?.providers as { id: string; status: string }[];
     expect(providers.find((p) => p.id === "claude")?.status).toBe("supported");
-    expect(providers.find((p) => p.id === "codex")?.status).toBe("unsupported");
-    expect(providers.find((p) => p.id === "opencode")?.status).toBe("unsupported");
+    expect(providers.find((p) => p.id === "codex")?.status).toBe("supported");
+    expect(providers.find((p) => p.id === "opencode")?.status).toBe("supported");
   });
 
   t("index normalizes a claude fixture end-to-end", async () => {
@@ -504,42 +504,55 @@ describe("conversations cli", () => {
     }
   });
 
-  t("unsupported provider and missing transcript are explicit, not success", async () => {
-    const { stateDir, claudeHome, extra } = setupEnv();
-    writeTranscript(claudeHome, CWD, SESSION_ID, fixtureLines());
-    const herdr = await fakeHerdr({
-      panes: [
-        { pane_id: "w1:p1", cwd: CWD },
-        { pane_id: "w1:p2", cwd: CWD },
-        { pane_id: "w1:p3", cwd: CWD },
-      ],
-      agents: [
-        // supported provider, transcript present → indexed
-        { pane_id: "w1:p1", agent: "claude", agent_session: { value: SESSION_ID } },
-        // unsupported provider → skipped, never indexed
-        { pane_id: "w1:p2", agent: "codex", agent_session: { value: "codex-rollout-1" } },
-        // claude but no transcript on disk → transcript_missing
-        { pane_id: "w1:p3", agent: "claude", agent_session: { value: "no-such-session" } },
-      ],
-    });
-    try {
-      const r = await runCliAsync(["index", "--socket", herdr.socketPath], extra);
-      expect(r.status).toBe(0);
-      const skipped = r.json?.skipped as Record<string, unknown>[];
-      const reasons = skipped.map((s) => s.reason);
-      expect(reasons).toContain("unsupported_provider");
-      expect(reasons).toContain("transcript_missing");
-      const unsupported = skipped.find((s) => s.reason === "unsupported_provider");
-      expect(unsupported?.provider).toBe("codex");
-      const sessions = await runCliAsync(["sessions", "--socket", herdr.socketPath], extra);
-      const list = sessions.json?.sessions as Record<string, unknown>[];
-      expect(list.length).toBe(1);
-      expect(list[0]?.provider).toBe("claude");
-      expect(stateDir).toBeTruthy();
-    } finally {
-      await herdr.close();
-    }
-  });
+  t(
+    "unknown provider, missing session, and missing transcript are explicit, not success",
+    async () => {
+      const { stateDir, claudeHome, extra } = setupEnv();
+      const codexHome = tempDir(); // empty CODEX_HOME → codex resolves missing
+      writeTranscript(claudeHome, CWD, SESSION_ID, fixtureLines());
+      const herdr = await fakeHerdr({
+        panes: [
+          { pane_id: "w1:p1", cwd: CWD },
+          { pane_id: "w1:p2", cwd: CWD },
+          { pane_id: "w1:p3", cwd: CWD },
+          { pane_id: "w1:p4", cwd: CWD },
+        ],
+        agents: [
+          // supported provider, transcript present → indexed
+          { pane_id: "w1:p1", agent: "claude", agent_session: { value: SESSION_ID } },
+          // supported provider (T2) but no rollout on disk → transcript_missing
+          { pane_id: "w1:p2", agent: "codex", agent_session: { value: "codex-rollout-1" } },
+          // claude but no transcript on disk → transcript_missing
+          { pane_id: "w1:p3", agent: "claude", agent_session: { value: "no-such-session" } },
+          // unlisted provider → unknown_provider
+          { pane_id: "w1:p4", agent: "gemini", agent_session: { value: "gem-1" } },
+        ],
+      });
+      try {
+        const r = await runCliAsync(["index", "--socket", herdr.socketPath], {
+          ...extra,
+          CODEX_HOME: codexHome,
+        });
+        expect(r.status).toBe(0);
+        const skipped = r.json?.skipped as Record<string, unknown>[];
+        const reasons = skipped.map((s) => s.reason);
+        expect(reasons).toContain("unknown_provider");
+        expect(reasons).toContain("transcript_missing");
+        expect(reasons.filter((x) => x === "transcript_missing").length).toBe(2);
+        const unknown = skipped.find((s) => s.reason === "unknown_provider");
+        expect(unknown?.pane_id).toBe("w1:p4");
+        const codex = skipped.find((s) => s.provider === "codex");
+        expect(codex?.reason).toBe("transcript_missing");
+        const sessions = await runCliAsync(["sessions", "--socket", herdr.socketPath], extra);
+        const list = sessions.json?.sessions as Record<string, unknown>[];
+        expect(list.length).toBe(1);
+        expect(list[0]?.provider).toBe("claude");
+        expect(stateDir).toBeTruthy();
+      } finally {
+        await herdr.close();
+      }
+    },
+  );
 
   t("pane reuse / generation change marks the index stale", async () => {
     const { claudeHome, extra } = setupEnv();

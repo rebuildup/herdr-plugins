@@ -2,7 +2,8 @@
 
 Structured JSON CLI contract for the `rebuildup.conversations` herdr
 plugin — a provider transcript indexer that normalizes session
-transcripts (claude JSONL in v1) into structured conversation events.
+transcripts (claude JSONL, codex rollout JSONL, opencode SQLite) into
+structured conversation events.
 Follows the same conventions as `herdr-plugins.projects/v1` /
 `herdr-plugins.checkpoints/v1`.
 
@@ -27,6 +28,7 @@ bun run src/cli.ts capability
 bun run src/cli.ts index [--session NAME] [--socket PATH] [--timeout MS]
 bun run src/cli.ts refresh   # alias of index
 bun run src/cli.ts sessions [--offline]
+bun run src/cli.ts history (--pane PANE | --session-id ID) [--limit N] [--cursor OFF] [--offline]
 ```
 
 - All commands print exactly one JSON document on stdout. Handled
@@ -50,11 +52,11 @@ bun run src/cli.ts sessions [--offline]
   "version": "0.1.0",
   "read_only": false,
   "mutation_commands": ["index", "refresh"],
-  "commands": ["capability", "index", "refresh", "sessions"],
+  "commands": ["capability", "index", "refresh", "sessions", "history"],
   "providers": [
     { "id": "claude", "status": "supported", "formats": ["claude-jsonl"] },
-    { "id": "codex", "status": "unsupported", "formats": [], "reason": "…", "planned_in": "#87" },
-    { "id": "opencode", "status": "unsupported", "formats": [], "reason": "…", "planned_in": "#87" }
+    { "id": "codex", "status": "supported", "formats": ["codex-rollout-jsonl"] },
+    { "id": "opencode", "status": "supported", "formats": ["opencode-sqlite"] }
   ],
   "event_types": ["turn", "user_message", "assistant_message", "tool_call", "tool_result", "system"],
   "notes": ["…"],
@@ -81,6 +83,21 @@ For each pane agent in `session.snapshot`:
    - claude: `$CLAUDE_CONFIG_DIR/projects/<encode(cwd)>/<id>.jsonl`
      (default `~/.claude`), falling back to `<id>.jsonl` in any
      immediate subdirectory of `projects/`.
+   - codex: `$CODEX_HOME/sessions/**` and `archived_sessions/**`
+     (default `~/.codex`), depth-bounded walk for a `.jsonl` rollout
+     whose file name carries the session id. `archived_sessions`
+     entries are `.jsonl.zst` compressed and resolve as missing —
+     they are never silently skipped or decompressed.
+   - opencode: `$OPENCODE_DATA_DIR` (comma-separated) else
+     `$XDG_DATA_HOME/opencode` or `~/.local/share/opencode`; the
+     `opencode.db` / `opencode-*.db` SQLite database is opened
+     read-only and the session is looked up by id (`session_v2`,
+     falling back to `session`). Pre-SQLite file storage
+     (`storage/**.json`) is reported as `unsupported_layout`.
+
+No match → `transcript_missing` (or `session_not_found` /
+`unsupported_layout` for opencode); the plugin never guesses at
+alternate locations beyond the provider's known directory.
 
 ## Normalized event schema
 
@@ -176,7 +193,7 @@ normalizes new bytes. Response:
     }
   ],
   "skipped": [
-    { "pane_id": "w1:p2", "provider": "codex", "reason": "unsupported_provider" },
+    { "pane_id": "w1:p2", "provider": "opencode", "session_id": "ses_…", "reason": "session_not_found", "cwd": "/repo", "transcript_path": "/…/opencode.db" },
     { "pane_id": "w1:p3", "provider": "claude", "session_id": "…", "reason": "transcript_missing", "cwd": "/repo" }
   ],
   "sessions_indexed": 1,
@@ -186,10 +203,12 @@ normalizes new bytes. Response:
 ```
 
 `skipped[].reason` values: `unknown_provider` (agent reports no known
-provider), `unsupported_provider` (declared but no adapter — codex,
-opencode in v1), `no_agent_session` (agent exposes no session
-identity), `transcript_missing` (resolution found no file),
-`transcript_missing`/`open_failed`/`read_failed` from the scanner.
+provider), `unsupported_provider` (declared but no adapter),
+`no_agent_session` (agent exposes no session identity),
+`transcript_missing` (resolution found no transcript),
+`session_not_found` (opencode database exists but the session id is
+absent), `unsupported_layout` (opencode pre-SQLite `storage/` JSON
+layout), `open_failed`/`read_failed`/`sqlite_*` from the scanners.
 Nothing unsupported or missing is ever reported as indexed.
 
 ### Incremental scanning
@@ -207,6 +226,27 @@ Normalized events append to `<stateDir>/events/<key>.jsonl`
 (key = `<provider>:<session-id>`, filesystem-sanitized). State writes
 use the single-writer lock + tmp+rename discipline; event appends
 occur inside the same locked section.
+
+Provider notes:
+
+- **codex** — rollout lines `{timestamp,type,payload}`:
+  `event_msg` `item_completed` `UserMessage`/`AgentMessage` (and the
+  legacy `user_message`/`agent_message` payloads) produce turn
+  boundaries and message events; `response_item`
+  `function_call`/`custom_tool_call` (+`*_output`) produce
+  `tool_call`/`tool_result`; `token_count`/`token_usage_record`
+  attach per-request usage to the turn's last `assistant_message`.
+  `response_item` `message` records and `reasoning` items are skipped
+  (they duplicate the event stream / are provider internals).
+- **opencode** — SQLite rows are mutable and `seq`-ordered, so each
+  `index` run fully rescans the session and rewrites its event log
+  (`reindexed: true` always): duplicates and missing rows cannot
+  persist. `session_message.type` `user`/`assistant` produce
+  turn/message/tool events from the embedded `content[]`; `compaction`
+  and `system` produce `system` events; lifecycle types (`idle`,
+  `location-switched`, …) are skipped. Sessions found only in the v1
+  `message`+`part` tables are normalized the same way. Malformed
+  `data` JSON increments `malformed_lines` per row.
 
 ## `sessions`
 
@@ -254,18 +294,78 @@ Lists indexed transcripts, newest activity first:
 - `status` ∈ `ok | missing | error`; `error` carries the scanner's
   failure kind when not `ok`.
 
+## `history`
+
+Pages normalized events for one indexed session, in transcript order:
+
+```bash
+bun run src/cli.ts history --session-id claude:<uuid> [--limit 200] [--cursor OFF]
+bun run src/cli.ts history --pane w1:p1 [--offline]
+```
+
+- Selector: exactly one of `--pane PANE` (the pane's most recently
+  indexed session; `selector_note: "multiple_sessions_for_pane"` when
+  ambiguous) or `--session-id REF` where REF is a full record key
+  `<provider>:<id>` or a bare session id (`selector_note:
+  "ambiguous_session_id"` when several providers/records match).
+  No match → `session_not_found` exit 1; missing selector → usage
+  exit 2. (`--session-id`, not `--session`, because `--session`
+  already selects the herdr session.)
+- `--limit` defaults to 200, capped at 1000. `--cursor` is the opaque
+  `next_cursor` byte offset from the previous page; a cursor beyond
+  the current file size fails with `cursor_invalid` (the event log
+  was rewritten — restart without `--cursor`).
+- `--offline` skips the live-binding check; otherwise unreachable
+  herdr degrades to `live: null`, never a fabricated verdict.
+
+Response:
+
+```json
+{
+  "contract": "herdr-plugins.conversations/v1",
+  "command": "history",
+  "session": { "…": "same shape as a sessions[] entry" },
+  "selector_note": null,
+  "events": [ { "…": "ConversationEvent" } ],
+  "page": {
+    "limit": 200,
+    "offset": 0,
+    "returned": 6,
+    "next_cursor": "18342",
+    "has_more": false,
+    "malformed_lines": 0,
+    "duplicates_skipped": 0,
+    "events_present": true,
+    "events_size": 18342
+  },
+  "generated_at": "…"
+}
+```
+
+Paging consumes only newline-terminated lines; a partial tail is left
+for the next page. Malformed event lines are skipped and counted in
+`page.malformed_lines`; repeated `event_id`s inside a page are
+dropped and counted in `page.duplicates_skipped`. A missing events
+file yields `events: []` with `events_present: false` and the
+record's `status`/`error` surfaced — never fabricated events.
+
 ## Errors
 
 `kind` values: `session_unreachable` (herdr socket unreachable for
-`index`/`sessions` live check is *not* an error — it degrades to
-`live: null`), plus scanner-reported `transcript_missing`,
-`open_failed`, `read_failed` surfaced per-session in `skipped` /
-`sessions[].error`. Usage errors exit 2.
+`index`; live checks in `sessions`/`history` are *not* errors — they
+degrade to `live: null`), `session_not_found` (`history` selector
+matched no indexed record), `cursor_invalid` (`--cursor` beyond the
+events file — rewritten log), plus scanner-reported
+`transcript_missing`, `open_failed`, `read_failed`, `sqlite_*`
+surfaced per-session in `skipped` / `sessions[].error`. Usage errors
+exit 2.
 
 ## Out of scope (v1)
 
-- History read/search/pagination API — T2 (#87) / T3 (#88).
-- codex rollout and opencode SQLite adapters — T2 (#87), declared
-  `unsupported` here.
+- Search, filtering, and richer pagination — T3 (#88); `history`
+  provides ordered byte-cursor paging only.
+- opencode pre-SQLite `storage/**.json` file layout and codex
+  `.jsonl.zst` archived rollouts — explicit `unsupported_layout` /
+  `transcript_missing`, never decompressed or guessed.
 - Hook-driven or scheduled indexing — trigger semantics land with the
   consumers.
