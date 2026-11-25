@@ -43,6 +43,8 @@ import {
   readRunLog,
   runsDir as runsDirPath,
   type ScriptRun,
+  type ShellFamily,
+  type ShellSource,
   updateRuns,
   writeRunLog,
 } from "./runs";
@@ -152,7 +154,9 @@ export function runMarkerToken(runId: string): string {
 }
 
 /** Regex matching ONLY the marker's echoed output (`=digits`), never the
- * echoed input line (which contains literal `$?`). */
+ * echoed input line (which contains the family-specific rc expression,
+ * never bare digits). Identical across shell families (#67): every
+ * wrapper prints `__HERDR_DONE_<id>__=<integer>`. */
 export function runMarkerRegex(runId: string): string {
   return `${MARKER_PREFIX}${runId}__=(-?\\d+)`;
 }
@@ -173,36 +177,270 @@ function shQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
+function psQuote(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+// --- Shell family detection (#67) ------------------------------------------
+//
+// `scripts run` injects into whatever shell the dedicated pane spawned.
+// The completion-marker line is shell-specific, so the family must be
+// known BEFORE composing the command line. Sources, in precedence order:
+//   1. explicit `--shell` flag (`auto` disables the override),
+//   2. `pane.process_info` foreground process name,
+//   3. conservative host-OS default (`win32` → cmd, else sh) — recorded
+//      as `shell_source:"host_default"` so the fallback is never silent.
+// A foreground process that is positively NOT a shell fails
+// `not_a_shell`; a recognized-but-unsupported shell (fish, nu, …) fails
+// `shell_unknown`. The runner never guesses a wrong-shell wrapper.
+
+/** `--shell` values accepted by `scripts run`. */
+export type ShellOverride = "auto" | ShellFamily;
+
+export const SHELL_OVERRIDE_VALUES: readonly ShellOverride[] = ["auto", "sh", "cmd", "powershell"];
+
+/** POSIX-family shells whose `$?` exit-status syntax the `sh` wrapper uses. */
+const SH_SHELL_NAMES: ReadonlySet<string> = new Set([
+  "sh",
+  "bash",
+  "zsh",
+  "dash",
+  "ash",
+  "ksh",
+  "mksh",
+  "ksh93",
+  "yash",
+]);
+const CMD_SHELL_NAMES: ReadonlySet<string> = new Set(["cmd"]);
+const POWERSHELL_NAMES: ReadonlySet<string> = new Set(["powershell", "pwsh"]);
+/** Recognized shells with syntax the wrappers do not support. */
+const UNSUPPORTED_SHELL_NAMES: ReadonlySet<string> = new Set([
+  "fish",
+  "nu",
+  "xonsh",
+  "elvish",
+  "tcsh",
+  "csh",
+]);
+
+/** Bounded retries while a fresh pane's shell reaches the foreground. */
+const SHELL_DETECT_ATTEMPTS = 3;
+const SHELL_DETECT_DELAY_MS = 150;
+
+function baseName(value: string): string {
+  const tail = value.split(/[\\/]/).pop() ?? value;
+  return tail.toLowerCase().replace(/\.exe$/, "");
+}
+
+/** Candidate executable names for one foreground process entry. */
+function processNameCandidates(proc: {
+  name?: string | undefined;
+  argv0?: string | null | undefined;
+  cmdline?: string | null | undefined;
+}): string[] {
+  const out: string[] = [];
+  if (typeof proc.name === "string" && proc.name.length > 0) out.push(proc.name);
+  if (typeof proc.argv0 === "string" && proc.argv0.length > 0) out.push(proc.argv0);
+  if (typeof proc.cmdline === "string" && proc.cmdline.length > 0) {
+    out.push(proc.cmdline.trim().split(/\s+/)[0] ?? "");
+  }
+  return out.map(baseName).filter((n) => n.length > 0);
+}
+
+type NameVerdict = ShellFamily | "unsupported_shell" | null;
+
+function classifyShellName(name: string): NameVerdict {
+  if (SH_SHELL_NAMES.has(name)) return "sh";
+  if (CMD_SHELL_NAMES.has(name)) return "cmd";
+  if (POWERSHELL_NAMES.has(name)) return "powershell";
+  if (UNSUPPORTED_SHELL_NAMES.has(name)) return "unsupported_shell";
+  return null;
+}
+
+export interface ShellDetection {
+  family: ShellFamily;
+  source: ShellSource;
+}
+
+/**
+ * Determine the pane's shell family. Throws structured errors
+ * (`shell_unknown` / `not_a_shell`) when the foreground process is
+ * positively identified as an unsupported shell or a non-shell; falls
+ * back to the host-OS default only when detection is inconclusive
+ * (empty foreground, `process_info` transport failure).
+ */
+export async function detectShellFamily(
+  transport: ScriptTransport,
+  paneId: string,
+  opts: {
+    override?: ShellOverride | undefined;
+    /** `os.platform()` of the host running the herdr session. */
+    platform: string;
+    sleep?: ((ms: number) => Promise<void>) | undefined;
+    attempts?: number | undefined;
+  },
+): Promise<ShellDetection> {
+  if (opts.override !== undefined && opts.override !== "auto") {
+    return { family: opts.override, source: "flag" };
+  }
+  const sleep = opts.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
+  const attempts = Math.max(1, opts.attempts ?? SHELL_DETECT_ATTEMPTS);
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    let info: PaneProcessInfo;
+    try {
+      info = await transport.paneProcessInfo(paneId);
+    } catch {
+      // Transport failure is inconclusive, not proof of a non-shell:
+      // fall through to the documented host-OS default.
+      break;
+    }
+    const procs = info.foreground_processes;
+    if (procs.length === 0) {
+      if (attempt + 1 < attempts) await sleep(SHELL_DETECT_DELAY_MS);
+      continue;
+    }
+    // The pane's own shell is `shell_pid` when reported; prefer it, then
+    // scan the rest of the foreground group for any recognizable shell.
+    const ordered = [...procs].sort((a, b) => {
+      const ap = info.shell_pid !== null && a.pid === info.shell_pid ? 0 : 1;
+      const bp = info.shell_pid !== null && b.pid === info.shell_pid ? 0 : 1;
+      return ap - bp;
+    });
+    let unsupported: string | null = null;
+    for (const proc of ordered) {
+      for (const candidate of processNameCandidates(proc)) {
+        const verdict = classifyShellName(candidate);
+        if (typeof verdict === "string" && verdict !== "unsupported_shell") {
+          return { family: verdict, source: "process_info" };
+        }
+        if (verdict === "unsupported_shell" && unsupported === null) {
+          unsupported = candidate;
+        }
+      }
+    }
+    if (unsupported !== null) {
+      throw structuredError(
+        `pane shell is not supported by scripts run: ${unsupported} ` +
+          `(supported: sh-family, cmd, powershell; override with --shell)`,
+        "shell_unknown",
+      );
+    }
+    // Non-empty foreground with no recognizable shell → the pane is not
+    // running a supported shell; never guess a wrapper.
+    const names = procs
+      .flatMap((p) => processNameCandidates(p))
+      .slice(0, 3)
+      .join(", ");
+    throw structuredError(
+      `pane foreground is not a supported shell (processes: ${names || "unknown"}); ` +
+        `refusing to guess a wrapper — pass --shell to override`,
+      "not_a_shell",
+    );
+  }
+  // Inconclusive detection → documented conservative default.
+  return {
+    family: opts.platform === "win32" ? "cmd" : "sh",
+    source: "host_default",
+  };
+}
+
+// --- Command line / marker -------------------------------------------------
+
 export interface CommandLine {
-  /** The single line sent via `pane.send_input` (Enter appended by keys). */
-  line: string;
+  /**
+   * Lines sent via `pane.send_input` (Enter appended per line). Always
+   * two entries: the user command (or script-file invocation) followed
+   * by the marker echo line. Sending them as separate input lines —
+   * each its own parsed command — avoids cmd.exe's parse-time
+   * `%ERRORLEVEL%` expansion pitfall and works uniformly across
+   * sh/cmd/powershell.
+   */
+  lines: string[];
   /** Absolute script-file path when the command could not be inlined. */
   scriptPath: string | null;
 }
 
 /**
- * Build the injected line. The marker suffix is appended to the SAME input
- * line so `cmd; echo MARKER=$?` reports the command's own exit status.
- * Commands containing newlines or exceeding the inline cap are written to
- * an executable `/bin/sh` script file under the runs dir and invoked by
- * path (documented POSIX-sh limitation for that edge case).
+ * Marker echo line per shell family. Each is a separate input line, so
+ * the rc expression is evaluated AFTER the user command finished:
+ * - sh: `$?` (POSIX exit status).
+ * - cmd: `%ERRORLEVEL%` expands when THIS line is parsed — correct
+ *   because it is its own command line, not `cmd1 & echo ...` on one.
+ * - powershell: `$LASTEXITCODE` covers native commands; for cmdlet-only
+ *   scripts it is `$null`, so fall back to `$?` (boolean → 0/1). The
+ *   subexpression keeps the whole thing one line.
+ */
+export function markerLine(family: ShellFamily, runId: string): string {
+  const token = runMarkerToken(runId);
+  switch (family) {
+    case "cmd":
+      return `echo ${token}=%ERRORLEVEL%`;
+    case "powershell":
+      return `echo "${token}=$( if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } elseif ($?) { 0 } else { 1 } )"`;
+    case "sh":
+      return `echo ${token}=$?`;
+  }
+}
+
+function scriptFileFor(family: ShellFamily, runId: string, dir: string): string {
+  switch (family) {
+    case "cmd":
+      return path.join(dir, `${runId}.cmd`);
+    case "powershell":
+      return path.join(dir, `${runId}.ps1`);
+    case "sh":
+      return path.join(dir, `${runId}.sh`);
+  }
+}
+
+function scriptContent(family: ShellFamily, command: string): string {
+  switch (family) {
+    case "cmd":
+      // .cmd batch files are line-oriented; CRLF is the safe encoding.
+      return `${command.replace(/\r\n|\r|\n/g, "\r\n")}\r\n`;
+    case "powershell":
+      return `${command}\n`;
+    case "sh":
+      return `#!/bin/sh\n${command}\n`;
+  }
+}
+
+/** Short invocation line that runs the script file under its family. */
+function scriptInvokeLine(family: ShellFamily, scriptPath: string): string {
+  switch (family) {
+    case "cmd":
+      return `call "${scriptPath}"`;
+    case "powershell":
+      return `& ${psQuote(scriptPath)}`;
+    case "sh":
+      return `sh ${shQuote(scriptPath)}`;
+  }
+}
+
+/**
+ * Build the injected input lines for one shell family. The user command
+ * (or a script-file invocation for newline/>`MAX_INLINE_COMMAND_CHARS`
+ * commands) is line 1; the family-specific marker echo is line 2.
+ * Script files live under the runs dir (`<runId>.sh|.cmd|.ps1`) and are
+ * retained like run logs — they are the audit trail for what ran.
  */
 export async function buildCommandLine(
   runId: string,
   command: string,
   dir: string,
+  family: ShellFamily,
 ): Promise<CommandLine> {
-  const token = runMarkerToken(runId);
-  const suffix = `; echo ${token}=$?`;
-  if (!command.includes("\n") && command.length + suffix.length <= MAX_INLINE_COMMAND_CHARS) {
-    return { line: `${command}${suffix}`, scriptPath: null };
+  const marker = markerLine(family, runId);
+  if (!command.includes("\n") && command.length + marker.length + 1 <= MAX_INLINE_COMMAND_CHARS) {
+    return { lines: [command, marker], scriptPath: null };
   }
   const { chmod, mkdir, writeFile } = await import("node:fs/promises");
   await mkdir(dir, { recursive: true });
-  const scriptPath = `${dir}/${runId}.sh`;
-  await writeFile(scriptPath, `#!/bin/sh\n${command}\n`);
-  await chmod(scriptPath, 0o755);
-  return { line: `${shQuote(scriptPath)}${suffix}`, scriptPath };
+  const scriptPath = scriptFileFor(family, runId, dir);
+  await writeFile(scriptPath, scriptContent(family, command));
+  if (family === "sh") await chmod(scriptPath, 0o755);
+  return { lines: [scriptInvokeLine(family, scriptPath), marker], scriptPath };
 }
 
 // --- Run record helpers ----------------------------------------------------
@@ -258,6 +496,12 @@ export interface RunnerDeps {
   sessionKey?: string | undefined;
   /** Hostname recorded on new runs; defaults to `os.hostname()`. */
   host?: string | undefined;
+  /**
+   * Host platform (`os.platform()`) used for the conservative
+   * shell-family fallback when `pane.process_info` detection is
+   * inconclusive. Injectable for tests.
+   */
+  platform?: string | undefined;
   sleep?: ((ms: number) => Promise<void>) | undefined;
   now?: (() => Date) | undefined;
 }
@@ -269,6 +513,7 @@ interface ResolvedDeps {
   stopConfirmMs: number;
   sessionKey: string;
   host: string;
+  platform: string;
   sleep: (ms: number) => Promise<void>;
   now: () => Date;
 }
@@ -281,6 +526,7 @@ function resolveDeps(deps: RunnerDeps): ResolvedDeps {
     stopConfirmMs: deps.stopConfirmMs ?? DEFAULT_STOP_CONFIRM_MS,
     sessionKey: deps.sessionKey ?? sessionKeyFor({}),
     host: deps.host ?? os.hostname(),
+    platform: deps.platform ?? os.platform(),
     sleep: deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
     now: deps.now ?? (() => new Date()),
   };
@@ -493,6 +739,11 @@ export interface StartRunInput {
   /** Canonical member repo root the script executes against. */
   repoRoot: string;
   remote: string | null;
+  /**
+   * `--shell` override: `auto` (default) detects via `pane.process_info`
+   * with a host-OS fallback; `sh`/`cmd`/`powershell` force the family.
+   */
+  shell?: ShellOverride | undefined;
 }
 
 /**
@@ -512,8 +763,6 @@ export async function startRun(input: StartRunInput, deps: RunnerDeps): Promise<
   const runId = newRunId();
   const regex = runMarkerRegex(runId);
 
-  const { line, scriptPath } = await buildCommandLine(runId, input.script.command, runsDirPath());
-
   const created = await deps.transport.workspaceCreate({
     cwd: input.repoRoot,
     label: `script: ${input.script.name} (${input.project.id})`,
@@ -529,6 +778,32 @@ export async function startRun(input: StartRunInput, deps: RunnerDeps): Promise<
     (created.root_pane as { tab_id?: string }).tab_id ??
     null;
 
+  // Shell family must be known before composing the marker line (#67).
+  // A structured detection failure closes the fresh pane and aborts —
+  // no run record, no guessed wrapper, no orphaned input.
+  let detection: ShellDetection;
+  try {
+    detection = await detectShellFamily(deps.transport, paneId, {
+      override: input.shell,
+      platform: d.platform,
+      sleep: d.sleep,
+    });
+  } catch (err) {
+    try {
+      await deps.transport.paneClose(paneId);
+    } catch {
+      // Best-effort cleanup; the structured error is what matters.
+    }
+    throw err;
+  }
+
+  const { lines, scriptPath } = await buildCommandLine(
+    runId,
+    input.script.command,
+    runsDirPath(),
+    detection.family,
+  );
+
   const run: ScriptRun = {
     run_id: runId,
     project_id: input.project.id,
@@ -543,8 +818,10 @@ export async function startRun(input: StartRunInput, deps: RunnerDeps): Promise<
     workspace_id: workspaceId,
     tab_id: tabId,
     cwd: input.repoRoot,
-    command_line: line,
+    command_line: lines.join("\n"),
     script_path: scriptPath === null ? null : relativeToStateDir(scriptPath),
+    shell_family: detection.family,
+    shell_source: detection.source,
     started_at: iso(d),
     finished_at: null,
     exit_code: null,
@@ -586,7 +863,14 @@ export async function startRun(input: StartRunInput, deps: RunnerDeps): Promise<
   };
 
   try {
-    await deps.transport.paneSendInput(paneId, { text: line, keys: ["Enter"] });
+    // Two input lines per run: the command (or script invocation), then
+    // the marker echo. The shell queues line 2 behind line 1, so the rc
+    // expression is evaluated only after the command finishes — and each
+    // line is parsed separately, which is what makes cmd.exe's
+    // `%ERRORLEVEL%` correct here.
+    for (const text of lines) {
+      await deps.transport.paneSendInput(paneId, { text, keys: ["Enter"] });
+    }
   } catch (err) {
     const gone = isPaneGoneError(err);
     return finish(

@@ -99,6 +99,25 @@ gap and only manual `scripts run` ships — per #53's acceptance rule.
   arbitrary commands; rejected for execution (remains available for a
   future plugin UI pane).
 
+## Amendment (#67): shell-family-portable wrappers
+
+The original wrapper assumed a POSIX shell (`cmd; echo
+"__HERDR_DONE_<id>__=$?"` on one line). #67 generalizes it:
+
+- Injection is now **two `pane.send_input` lines**: the command (or a
+  per-family script-file invocation) then a family-specific marker echo.
+  Separate parsed lines make cmd.exe `%ERRORLEVEL%` correct (single-line
+  `cmd1 & echo %ERRORLEVEL%` expands before `cmd1` runs) and work
+  uniformly for sh/cmd/powershell. Trade-off: a stdin-reading command
+  can consume the queued marker line → bounded wait stays `running`.
+- Shell family is detected per run: `--shell` flag →
+  `pane.process_info` foreground name → host-OS default
+  (`win32`→cmd else sh), recorded on the run record
+  (`shell_family`/`shell_source`). Unsupported shells (`shell_unknown`)
+  and non-shell foregrounds (`not_a_shell`) abort before injection.
+- Marker regex is unchanged (`=(-?\d+)`); only the echo line differs
+  per family. Script files are per-family (`.sh`/`.cmd`/`.ps1`).
+
 ## Consequences
 
 - Script output is visible in a real herdr pane — matches upstream UX

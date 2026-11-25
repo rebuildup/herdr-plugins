@@ -30,6 +30,7 @@ bun run src/cli.ts settings set <id> <key> <value>
 bun run src/cli.ts settings unset <id> <key>
 bun run src/cli.ts scripts list <project|repo> [--repo PATH]
 bun run src/cli.ts scripts run <project> <name> [--repo PATH]
+    [--shell auto|sh|cmd|powershell]
 bun run src/cli.ts scripts stop <run-id|project>
 bun run src/cli.ts scripts results [project]
 bun run src/cli.ts scripts logs <run-id>
@@ -337,16 +338,51 @@ injects input into panes it did not create.
 - Script definitions resolve against the **selected repo's** `t3.json`
   plus the project's settings/env/builtin layers (same machinery as
   `scripts list`).
-- The command is injected as ONE `pane.send_input` line:
-  `<command>; echo "__HERDR_DONE_<run-id>__=$?"`. Commands containing
-  newlines or longer than 4000 chars are first written to an
-  executable `/bin/sh` script file under the plugin state dir
-  (`runs/<run-id>.sh`) and invoked by path — a documented POSIX-sh
-  limitation for that edge case.
+- The command is injected as **two `pane.send_input` lines** (Enter
+  after each): line 1 is the user command (or a script-file
+  invocation), line 2 is the shell-family marker echo. Sending them as
+  separate parsed command lines is what makes cmd.exe's
+  `%ERRORLEVEL%` correct (it would expand at parse time on a shared
+  `cmd1 & echo ...` line) and works uniformly for sh/cmd/powershell.
+- **Shell family detection (#67).** The marker line is shell-specific,
+  so the family is resolved before composing it, in precedence order:
+  1. `--shell sh|cmd|powershell` — explicit override (`auto` = detect);
+     invalid values fail `invalid_shell`.
+  2. `pane.process_info` foreground process name (`shell_pid` match
+     preferred): POSIX names (sh/bash/zsh/dash/ash/ksh/…) → `sh`,
+     `cmd[.exe]` → `cmd`, `powershell[.exe]`/`pwsh[.exe]` → `powershell`.
+  3. Conservative host-OS default when detection is inconclusive
+     (empty foreground after bounded retries, or `process_info`
+     transport failure): Windows host → `cmd`, otherwise `sh`.
+     Recorded as `shell_source:"host_default"` — never silent.
+  A positively identified unsupported shell (fish, nu, xonsh, …) fails
+  `shell_unknown`; a non-shell foreground fails `not_a_shell`. Both
+  close the just-created pane and persist NO run record — a guessed
+  wrapper is never injected.
+- **Per-family marker line** (line 2):
+  - `sh`: `echo __HERDR_DONE_<run-id>__=$?`
+  - `cmd`: `echo __HERDR_DONE_<run-id>__=%ERRORLEVEL%`
+  - `powershell`: `echo "__HERDR_DONE_<run-id>__=$( if ($null -ne
+    $LASTEXITCODE) { $LASTEXITCODE } elseif ($?) { 0 } else { 1 } )"` —
+    `$LASTEXITCODE` covers native commands; cmdlet-only scripts fall
+    back to `$?` mapped to 0/1 (powershell caveat documented).
+  The echoed input line never matches the digit regex in any family.
+- Commands containing newlines or longer than 4000 chars are first
+  written to a script file under the plugin state dir
+  (`runs/<run-id>.sh|.cmd|.ps1`, per family; `.cmd` content is CRLF)
+  and invoked by a short line: `sh '<path>'` / `call "<path>"` /
+  `& '<path>'`. Script files are retained like run logs (audit trail).
+  Note: `.ps1` invocation is subject to the pane's PowerShell
+  execution policy; `.cmd`/`.sh` paths use host-native separators
+  (a POSIX pane on a Windows host is out of scope). Trade-off of the
+  two-line design: a command that reads stdin may consume the queued
+  marker line — the run then times out `running` rather than reporting
+  a wrong result.
 - **Completion:** `pane.wait_for_output` (`source:"recent_unwrapped"`,
   regex `__HERDR_DONE_<run-id>__=(-?\d+)`) blocks up to `runTimeoutMs`
   (plugin config `config.json`, default 600000 ms = 10 min). The echoed
-  input line cannot match (it contains literal `$?`), and the run-id
+  input line cannot match (it contains the rc expression, never bare
+  digits), and the run-id
   nonce prevents cross-run collisions. The exit code is parsed from the
   marker digits ONLY — never inferred from pane text, process liveness,
   or pane close events.
@@ -391,8 +427,10 @@ rename, dedicated `runs.json.lock`):
   "workspace_id": "wKN",
   "tab_id": "wKN:t1",
   "cwd": "/abs/repo",
-  "command_line": "bun run dev; echo \"__HERDR_DONE_run-…__=$?\"",
+  "command_line": "bun run dev\necho __HERDR_DONE_run-…__=$?",
   "script_path": null,
+  "shell_family": "sh",
+  "shell_source": "host_default",
   "started_at": "…",
   "finished_at": "…",
   "exit_code": 0,
@@ -411,7 +449,9 @@ the wait — it does NOT assert the process is alive. `stopping` means a
 stop was requested (ctrl+c accepted) but exit is not yet confirmed;
 `stop_unconfirmed` means the bounded confirmation window elapsed
 without evidence. `log_path`/`script_path` are relative to the plugin
-state dir (`null` when absent).
+state dir (`null` when absent). `shell_family` ∈ `sh | cmd |
+powershell`, `shell_source` ∈ `flag | process_info | host_default`
+(both `null` on pre-#67 records).
 
 **Ownership tuple (schema v2, #66).** `host` + `session_key` (the
 `sessionKeyFor` discriminator: hostname + canonical socket path) +
@@ -525,7 +565,9 @@ ship here. #32 automations own scheduled/event-driven execution.
 `invalid_project_id`, `settings_key_not_allowed`, `t3json_invalid`,
 `invalid_script_list`, `unknown_script`, `no_repos`, plus the script
 runner kinds `repo_ambiguous`, `ambiguous_script`, `ambiguous_run`,
-`run_not_found`, `no_running_runs`, `script_run_error`, `stale_pane`
-(record `error` / stop `action`, not a CLI error kind). Errors may
+`run_not_found`, `no_running_runs`, `script_run_error`, `stale_pane`,
+`shell_unknown`, `not_a_shell`, `invalid_shell` (`shell_unknown` /
+`not_a_shell` abort `scripts run` before injection; `invalid_shell` is
+a `--shell` value error). Errors may
 carry extra fields (`project_id`, `key`, `root`, `repos`, `name`,
 `matches`, `run_id`, `target`, `path`, `reason`, `layer`).

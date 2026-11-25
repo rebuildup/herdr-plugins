@@ -44,6 +44,21 @@ export type RunResult =
   | "stopped"
   | "unknown";
 
+/**
+ * Shell family the completion-marker wrapper was composed for (#67).
+ * `sh` covers POSIX shells (sh/bash/zsh/…); `cmd` is cmd.exe; `powershell`
+ * is Windows PowerShell / pwsh. Persisted so the injected `command_line`
+ * can be interpreted after the fact.
+ */
+export type ShellFamily = "sh" | "cmd" | "powershell";
+
+/**
+ * How the shell family was chosen: explicit `--shell` flag, the pane's
+ * `pane.process_info` foreground process, or the conservative host-OS
+ * default (`win32` → cmd, otherwise sh) when detection was inconclusive.
+ */
+export type ShellSource = "flag" | "process_info" | "host_default";
+
 /** Results that still address a live (or possibly live) execution pane. */
 export const ACTIVE_RUN_RESULTS: ReadonlySet<RunResult> = new Set([
   "running",
@@ -74,10 +89,14 @@ export interface ScriptRun {
   tab_id: string | null;
   /** Working directory the pane shell started in (repo root). */
   cwd: string;
-  /** The exact line injected into the pane (marker suffix included). */
+  /** The exact lines injected into the pane (marker line included). */
   command_line: string;
   /** Set when the command was too long for a single input line. */
   script_path: string | null;
+  /** Shell family the wrapper was built for (#67); null on v1 records. */
+  shell_family: ShellFamily | null;
+  /** How `shell_family` was chosen; null on v1 records. */
+  shell_source: ShellSource | null;
   started_at: string;
   finished_at: string | null;
   /** Parsed from the completion marker only — never from pane text. */
@@ -170,6 +189,18 @@ export async function loadRuns(): Promise<RunsState> {
       session_key: typeof record.session_key === "string" ? record.session_key : null,
       stop_requested_at:
         typeof record.stop_requested_at === "string" ? record.stop_requested_at : null,
+      shell_family:
+        record.shell_family === "sh" ||
+        record.shell_family === "cmd" ||
+        record.shell_family === "powershell"
+          ? record.shell_family
+          : null,
+      shell_source:
+        record.shell_source === "flag" ||
+        record.shell_source === "process_info" ||
+        record.shell_source === "host_default"
+          ? record.shell_source
+          : null,
     } as ScriptRun;
   }
   return { version: RUNS_SCHEMA_VERSION, runs };
