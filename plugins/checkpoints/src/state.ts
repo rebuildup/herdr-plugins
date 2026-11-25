@@ -62,6 +62,12 @@ export interface CheckpointEntry {
    * written before #74 have no `kind` and are treated as `manual`.
    */
   kind?: "manual" | "auto" | "pre_restore" | undefined;
+  /**
+   * Shared id stamped on every entry captured by one `save` call —
+   * the unit `restore-group` restores together. Absent on entries
+   * written by `create`/auto-capture or before #75.
+   */
+  group_id?: string | undefined;
 }
 
 /**

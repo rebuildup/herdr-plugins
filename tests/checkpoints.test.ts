@@ -219,7 +219,15 @@ describe("checkpoints cli", () => {
     expect(payload.contract).toBe("herdr-plugins.checkpoints/v1");
     expect(payload.plugin).toBe("rebuildup.checkpoints");
     expect(payload.commands).toContain("create");
-    expect(payload.mutation_commands).toEqual(["create", "delete", "restore"]);
+    expect(payload.mutation_commands).toEqual([
+      "create",
+      "save",
+      "delete",
+      "restore",
+      "restore-group",
+      "gc",
+      "prune",
+    ]);
   });
 
   t("create requires a repo target", () => {
