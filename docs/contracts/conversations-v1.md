@@ -57,9 +57,9 @@ bun run src/cli.ts show <ref> [--pane PANE] [--session-id ID] [--provider ID] [-
   "mutation_commands": ["index", "refresh"],
   "commands": ["capability", "index", "refresh", "sessions", "history", "search", "show", "usage"],
   "providers": [
-    { "id": "claude", "status": "supported", "formats": ["claude-jsonl"] },
-    { "id": "codex", "status": "supported", "formats": ["codex-rollout-jsonl"] },
-    { "id": "opencode", "status": "supported", "formats": ["opencode-sqlite"] }
+    { "id": "claude", "status": "supported", "formats": ["claude-jsonl"], "usage": { "cache_tokens": "reported" } },
+    { "id": "codex", "status": "supported", "formats": ["codex-rollout-jsonl"], "usage": { "cache_tokens": "reported" } },
+    { "id": "opencode", "status": "supported", "formats": ["opencode-sqlite"], "usage": { "cache_tokens": "reported" } }
   ],
   "event_types": ["turn", "user_message", "assistant_message", "tool_call", "tool_result", "system"],
   "notes": ["…"],
@@ -71,6 +71,13 @@ bun run src/cli.ts show <ref> [--pane PANE] [--session-id ID] [--provider ID] [-
 have working adapters; `unsupported` providers are declared with a
 `reason` (and `planned_in` ticket) so consumers can distinguish "not
 implemented yet" from "unknown provider". The list extends additively.
+
+Additive per-provider `usage` object (v1, consumed by
+`rebuildup.usage` T3 / #92): `cache_tokens` is `"reported"` when the
+adapter maps provider cache read/write token fields into
+`usage.cache_*_input_tokens`, `"unsupported"` when the provider's
+accounting is not mapped — explicit, so consumers never read a silent
+zero as "no cache tokens".
 
 ## Transcript resolution
 

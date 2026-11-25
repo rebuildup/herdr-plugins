@@ -13,8 +13,8 @@ Prerequisites: herdr ≥ 0.9.0, Bun on `PATH`, and the
 [`rebuildup.conversations`](../conversations/) plugin installed and
 indexed (`conversations index`/`refresh`) — `usage` aggregates its
 normalized event index through the public read-only contract, never
-its state files (ADR-0013). `capability`, `usage`, and `quota` work
-without a reachable herdr session.
+its state files (ADR-0013). `capability`, `usage`, `quota`, and
+`divergence` work without a reachable herdr session.
 
 ## What it does
 
@@ -43,6 +43,19 @@ tokens are never logged, persisted, cached, or emitted. Claude
 (`$CODEX_HOME/auth.json`, ChatGPT auth) are implemented; opencode and
 unknown providers report `unsupported` with a reason.
 
+T3 (#92) adds three surfaces on the same credential-boundary model:
+`usage` reports a per-provider `cache_tokens` breakdown
+(`reported`/`unsupported`/`unknown` from the adapter capability
+matrix); `quotaHubs` in config.json declares CLIProxyAPI-compatible
+HTTP quota hubs (`GET /v0/management/auth-files` +
+`POST /v0/management/api-call`) whose per-account readings appear in
+`quota.hubs[]` / `divergence.hubs[]` — the hub management key is read
+from the env var named by `keyEnv` and is never stored, cached, or
+emitted (ADR-0015); and `divergence` compares subscription-quota
+windows against transcript-measured token sums per provider, reporting
+both sides with a `different_units`-style verdict and never
+reconciling them.
+
 ## Usage
 
 ```bash
@@ -52,22 +65,35 @@ bun run src/cli.ts usage [--pane PANE] [--session-id ID] [--provider ID] \
   [--from ISO] [--to ISO] [--session NAME] [--socket PATH] [--timeout MS] \
   [--offline] [--conversations-root DIR] [--conversations-state-dir DIR]
 bun run src/cli.ts quota [--provider ID] [--refresh] [--timeout MS]
+bun run src/cli.ts divergence [--provider ID] [--from ISO] [--to ISO] \
+  [--refresh] [--offline] [<usage selector flags>]
 ```
 
 - `capability` → contract banner, `sources[]` data-source matrix
   (`conversations-index` available/unavailable, `subscription-quota-api`
   per-provider coverage, declared-unsupported billing slot),
   aggregation dimensions.
-- `usage` → `{totals, breakdowns, coverage, sessions, source,
-  warnings}`. Selectors forward to `conversations usage`; the whole
-  export is paged (500 events/page) and aggregated in one call.
-- `quota` → `{providers[], cache}` with per-provider `status`
+- `usage` → `{totals, breakdowns, cache_tokens, coverage, sessions,
+  source, warnings}`. Selectors forward to `conversations usage`; the
+  whole export is paged (500 events/page) and aggregated in one call.
+  `cache_tokens.providers[]` gives per-provider cache read/write token
+  sums with `reported`/`unsupported`/`unknown` status from the
+  conversations capability matrix.
+- `quota` → `{providers[], hubs[], cache}` with per-provider `status`
   (`ok`/`unsupported`/`no_credential`/`credential_expired`/
   `request_failed`), usage `windows[]` with `used_percent` +
   `resets_at`, plan label, and freshness (`checked_at`, cache hit/age,
   `stale` flag). Successful readings cache for 300s under the plugin
   state dir; `--refresh` bypasses. Endpoint overrides for tests/proxies:
   `HERDR_USAGE_QUOTA_*` env or `quotaEndpoints` in config.json.
+  `hubs[]` reports configured CLIProxyAPI-equivalent hubs
+  (`quotaHubs` config: `{id, url, keyEnv}`) with per-account outcomes.
+- `divergence` → `{comparisons[], hubs[], notes[], source}` placing
+  quota `used_percent` windows next to measured transcript token sums
+  per provider. Verdicts: `different_units` (both present — never
+  reconciled), `no_measured_usage`, `quota_unavailable`, `no_data`;
+  `window_alignment` notes only whether the `--from`/`--to` span
+  matches a reported quota window duration.
 
 The conversations plugin is located via `--conversations-root` /
 `HERDR_USAGE_CONVERSATIONS_ROOT` / `conversationsRoot` config → sibling
@@ -78,4 +104,5 @@ to the standard plugin state location and can be overridden with
 
 Full contract: `docs/contracts/usage-v1.md`.
 Spec: `docs/specs/usage.md`. Design: ADR-0013 (index reuse),
-ADR-0014 (quota credential boundary).
+ADR-0014 (quota credential boundary), ADR-0015 (hub credential
+boundary).

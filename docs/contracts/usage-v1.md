@@ -1,8 +1,8 @@
 # Contract `herdr-plugins.usage/v1`
 
 Token-usage aggregation + subscription quota CLI contract for the
-`rebuildup.usage` herdr plugin (Issue #90 T1, Issue #91 T2 / parent
-#28). Follows the same conventions as
+`rebuildup.usage` herdr plugin (Issue #90 T1, Issue #91 T2, Issue #92
+T3 / parent #28). Follows the same conventions as
 `herdr-plugins.conversations/v1` and the other plugin contracts.
 
 The plugin is **read-only**: `usage` keeps no durable state and
@@ -51,6 +51,9 @@ bun run src/cli.ts usage [--pane PANE] [--session-id ID] [--provider ID] \
   [--from ISO] [--to ISO] [--session NAME] [--socket PATH] [--timeout MS] \
   [--offline] [--conversations-root DIR] [--conversations-state-dir DIR]
 bun run src/cli.ts quota [--provider ID] [--refresh] [--timeout MS]
+bun run src/cli.ts divergence [--pane PANE] [--session-id ID] [--provider ID] \
+  [--from ISO] [--to ISO] [--session NAME] [--socket PATH] [--timeout MS] \
+  [--offline] [--refresh] [--conversations-root DIR] [--conversations-state-dir DIR]
 ```
 
 - All commands print exactly one JSON document on stdout. Handled
@@ -78,7 +81,7 @@ bun run src/cli.ts quota [--provider ID] [--refresh] [--timeout MS]
   "version": "0.5.0",
   "read_only": true,
   "mutation_commands": [],
-  "commands": ["capability", "usage"],
+  "commands": ["capability", "usage", "quota", "divergence"],
   "sources": [
     {
       "id": "conversations-index",
@@ -101,7 +104,26 @@ bun run src/cli.ts quota [--provider ID] [--refresh] [--timeout MS]
       },
       "freshness": "short-term cache (default 300s) …"
     },
-    { "id": "provider-cli-billing", "kind": "cli-billing-endpoint", "status": "unsupported", "planned_in": "#92" }
+    {
+      "id": "cliproxy-api",
+      "kind": "http-quota-hub",
+      "status": "available",
+      "credential_boundary": "docs/adr/0015-usage-hub-credential-boundary.md",
+      "hubs": [
+        {
+          "id": "home",
+          "endpoint": "https://hub.example.com/",
+          "key_env": "HERDR_USAGE_QUOTA_HUB_KEY",
+          "key_configured": true
+        }
+      ],
+      "providers": {
+        "claude": "implemented via hub api-call …",
+        "codex": "implemented via hub api-call …",
+        "note": "hub accounts of other providers are reported per-account as unsupported"
+      },
+      "freshness": "shares the quota cache TTL …"
+    }
   ],
   "aggregation": { "dimensions": ["provider","model","host","project","session","pane"], "…": "…" },
   "generated_at": "…"
@@ -113,9 +135,13 @@ additively: `conversations-index` reports `available` (with
 `plugin_root`/`resolved_via`) or `unavailable` (with `detail`) — the
 command never fails on source resolution. `subscription-quota-api`
 reports `available` with a per-provider implementation matrix and a
-pointer to the credential-boundary ADR; `provider-cli-billing` remains
-an explicit `unsupported` placeholder (`planned_in` #92) so consumers
-can distinguish "not implemented" from "no data".
+pointer to the credential-boundary ADR. `cliproxy-api` reports
+`available` with the configured hub list (`hubs[]`: `id`, sanitized
+`endpoint`, `key_env` name, `key_configured` boolean — never the key
+value) and a per-provider implementation note; it implements the
+CLIProxyAPI management-API path (`auth-files` + `api-call`) for claude
+and codex accounts, with other hub providers reported per-account as
+`unsupported` (ADR-0015).
 
 ## `usage`
 
@@ -144,6 +170,26 @@ window, and aggregates.
     "excluded_untimestamped_events": 0,
     "duplicate_events_skipped": 0,
     "events_without_event_id": 0
+  },
+  "cache_tokens": {
+    "providers": [
+      {
+        "provider": "claude",
+        "status": "reported",
+        "events": 2,
+        "cache_read_input_tokens": 43,
+        "cache_creation_input_tokens": 8,
+        "detail": null
+      },
+      {
+        "provider": "nocache-prop",
+        "status": "unsupported",
+        "events": 0,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "detail": "provider adapter declares no cache-token accounting"
+      }
+    ]
   },
   "breakdowns": {
     "by_provider":  [{ "key": "claude", "events": 2, "input_tokens": 30, "…": "…" }],
@@ -218,6 +264,24 @@ window, and aggregates.
 Each entry: `{key, events, input_tokens, output_tokens,
 cache_read_input_tokens, cache_creation_input_tokens, thinking_tokens
 |null, total_tokens, provider_reported_cost_usd|null}`.
+
+### Cache tokens
+
+`cache_tokens.providers[]` is the per-provider cache-token view
+(T3 / #92): `{provider, status, events, cache_read_input_tokens,
+cache_creation_input_tokens, detail}`. Token sums come from the same
+measured events as `breakdowns.by_provider`; `status` comes from the
+conversations capability matrix (`providers[].usage.cache_tokens`,
+additive in `herdr-plugins.conversations/v1`):
+
+| status | meaning |
+| --- | --- |
+| `reported` | adapter is supported and declares cache-token mapping; sums are measured (zeros mean "no cache tokens measured", a real measurement) |
+| `unsupported` | provider adapter is unsupported, or declares no cache-token accounting — explicit, never a silent zero |
+| `unknown` | capability could not be verified (provider absent from the matrix or capability fetch failed) |
+
+`events` counts usage-carrying events for the provider (0 = none
+measured — coverage, not a zeroed measurement).
 
 ### Coverage — missing is not zero
 
@@ -295,9 +359,61 @@ bun run src/cli.ts quota [--provider ID] [--refresh] [--timeout MS]
       "cache": { "hit": false, "age_seconds": null, "ttl_seconds": 300 }
     }
   ],
+  "hubs": [
+    {
+      "id": "home",
+      "kind": "cliproxy-api",
+      "endpoint": "https://hub.example.com/",
+      "status": "ok",
+      "detail": null,
+      "checked_at": "2026-01-01T00:30:00.000Z",
+      "fetched_at": "2026-01-01T00:31:00.000Z",
+      "stale": false,
+      "stale_reason": null,
+      "cache": { "hit": false, "age_seconds": null, "ttl_seconds": 300 },
+      "accounts": [
+        {
+          "account": "acct-file-id",
+          "provider": "claude",
+          "status": "ok",
+          "detail": null,
+          "plan": "Claude Subscription",
+          "windows": [ { "…": "same QuotaWindow shape as providers[].windows" } ],
+          "checked_at": "2026-01-01T00:30:00.000Z",
+          "reset_credits_available": null
+        },
+        {
+          "account": "acct-file-id-2",
+          "provider": "xai",
+          "status": "unsupported",
+          "detail": "hub provider \"xai\" has no quota mapper in this plugin",
+          "plan": null,
+          "windows": [],
+          "checked_at": null,
+          "reset_credits_available": null
+        }
+      ]
+    }
+  ],
   "generated_at": "…"
 }
 ```
+
+`hubs[]` (T3 / #92, ADR-0015) reports every configured
+CLIProxyAPI-equivalent hub; empty when none are configured. Hub
+`status` values: `ok` (auth-files answered; per-account outcomes are in
+`accounts[]`), `no_credential` (the `keyEnv` env var is unset — the
+detail names the env var, never a value), `unauthorized` (hub answered
+401/403), `request_failed` (other HTTP/transport/parse failure, or an
+invalid hub URL). `stale`/`stale_reason`/`cache` follow the same
+semantics as provider entries; the cache file is
+`quota-cache/hub-<id>.json`.
+
+Per-account `status` reuses the provider status taxonomy plus
+`skipped` is never emitted — disabled auth-files are omitted entirely.
+Accounts of providers without a mapper (`xai`, `antigravity`, …)
+report `unsupported` with the reason. `account` is the hub-side
+auth-file id — a local label, not a credential.
 
 ### Provider statuses
 
@@ -343,6 +459,32 @@ endpoint overrides exist only as test/proxy hooks:
 When `codexUsage` is overridden without `codexCredits`, the credits
 call is skipped (a mock must opt in explicitly).
 
+### Quota hubs (T3 / #92, ADR-0015)
+
+`quotaHubs` in `config.json` declares CLIProxyAPI-compatible hubs:
+
+```json
+{
+  "quotaHubs": [
+    { "id": "home", "url": "https://hub.example.com", "keyEnv": "MY_HUB_KEY" }
+  ]
+}
+```
+
+- `url` — hub base URL; `management.html` suffixes, query, and hash
+  are normalized away. Non-http(s) URLs are rejected per hub.
+- `keyEnv` — **name** of the env var holding the management key
+  (default `HERDR_USAGE_QUOTA_HUB_KEY`). The key value is never stored
+  in config, state, cache, logs, or output (ADR-0015).
+- Protocol: `GET {url}/v0/management/auth-files` then
+  `POST {url}/v0/management/api-call` per enabled account whose
+  provider has a mapper (claude, codex). Upstream calls always use
+  `method: "GET"`; provider tokens stay hub-side behind the `$TOKEN$`
+  placeholder.
+- Hub cache: `quota-cache/hub-<id>.json`, same TTL/`--refresh`
+  semantics; only `ok`/`unsupported` account readings are cached —
+  transient `request_failed` accounts are not.
+
 ### Credential boundary (ADR-0014)
 
 `quota` reads provider credential artifacts **in memory only** to
@@ -353,7 +495,79 @@ unset) and Codex `$CODEX_HOME/auth.json`
 (ChatGPT auth only). Tokens are never logged, persisted, cached,
 emitted, or passed to subprocesses; expired tokens report
 `credential_expired` rather than triggering a refresh. Full rules:
-`docs/adr/0014-usage-quota-credential-boundary.md`.
+`docs/adr/0014-usage-quota-credential-boundary.md`. Hub sources follow
+the parallel boundary in
+`docs/adr/0015-usage-hub-credential-boundary.md`.
+
+## `divergence`
+
+Quota-vs-measured divergence report (T3 / #92). Runs the same
+aggregation as `usage` (same selectors/window) plus the direct
+provider quota probes, then places both sides side by side per
+provider. Exit semantics match `usage`/`quota`: per-provider outcomes
+are data, not errors.
+
+```bash
+bun run src/cli.ts divergence [--provider ID] [--from ISO] [--to ISO] \
+  [--refresh] [--offline] [<usage selector/source flags>]
+```
+
+```json
+{
+  "contract": "herdr-plugins.usage/v1",
+  "command": "divergence",
+  "window": { "from": "2026-01-01T00:00:00Z", "to": "2026-01-01T05:00:00Z" },
+  "filters": { "pane_id": null, "session_id": null, "provider": null },
+  "comparisons": [
+    {
+      "provider": "claude",
+      "verdict": "different_units",
+      "detail": "quota windows report provider-side subscription utilization … never reconciled into each other.",
+      "quota": {
+        "status": "ok",
+        "detail": null,
+        "plan": "max",
+        "checked_at": "…",
+        "stale": false,
+        "windows": [ { "…": "QuotaWindow" } ]
+      },
+      "measured": {
+        "events": 2,
+        "input_tokens": 30,
+        "output_tokens": 12,
+        "cache_read_input_tokens": 3,
+        "cache_creation_input_tokens": 2,
+        "total_tokens": 47
+      },
+      "window_alignment": "matches_quota_window"
+    }
+  ],
+  "hubs": [ "…same shape as quota.hubs…" ],
+  "notes": ["…"],
+  "source": { "…": "same source block as usage" },
+  "generated_at": "…"
+}
+```
+
+### Verdicts
+
+| verdict | meaning |
+| --- | --- |
+| `different_units` | both sides present — quota `used_percent` and transcript token sums are **different units from different sources** (a quota window counts every client on the subscription; the index covers local sessions only). Reported side by side, never reconciled, never converted. |
+| `no_measured_usage` | quota answered `ok` but the index has no usage events for the provider |
+| `quota_unavailable` | measured usage exists but quota status is non-`ok` (`detail` carries the status reason) |
+| `no_data` | neither side has data |
+
+`window_alignment` describes only whether the `--from`/`--to` span
+matches a reported quota window's `window_duration_mins`:
+`unbounded` (no window), `matches_quota_window`, `custom_window`,
+`unknown` (span not computable or no durations reported). A match does
+not imply the measurements cover the same traffic.
+
+`hubs[]` carries the same hub reports as `quota`, but hub accounts are
+**excluded from `comparisons`**: a hub account cannot be proven to be
+the same subscription as the locally indexed transcripts (noted in
+`notes[]`).
 
 ## Errors
 
@@ -366,11 +580,13 @@ errors (exit 2) for bad `--from`/`--to`. A missing conversations
 ## Versioning
 
 `herdr-plugins.usage/v1` is **stable** as of plugin v0.5.0: command
-surface (`capability`/`usage`/`quota`), totals/breakdown/coverage and
-quota report shapes, and error `kind` taxonomy are the v1 contract.
-Additive fields may appear anywhere; clients must ignore unknown
-fields. `sources`, `breakdowns` dimensions, `coverage.providers`,
-quota `windows`, and provider `status` values extend additively.
+surface (`capability`/`usage`/`quota`/`divergence`), totals/breakdown/
+cache-token/coverage and quota/hub/divergence report shapes, and error
+`kind` taxonomy are the v1 contract. Additive fields may appear
+anywhere; clients must ignore unknown fields. `sources`, `breakdowns`
+dimensions, `coverage.providers`, `cache_tokens.providers`, quota
+`windows`/`hubs`/`accounts`, divergence `comparisons`/`verdicts`, and
+provider `status` values extend additively.
 
 A breaking change — removing/renaming a command or field, changing an
 error `kind`'s meaning, altering dedup/window semantics — bumps to

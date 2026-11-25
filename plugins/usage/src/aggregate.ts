@@ -21,10 +21,13 @@
 
 import type {
   BreakdownEntry,
+  CacheTokenProviderEntry,
+  CacheTokenStatus,
   ProviderCoverage,
   SessionCoverageEntry,
   UsageAggregate,
   UsageBreakdowns,
+  UsageCacheTokens,
   UsageEventRecord,
   UsageTotals,
   UsageWindow,
@@ -341,4 +344,75 @@ export function aggregateUsage(input: AggregateInput): UsageAggregate {
     },
     sessions: contributing,
   };
+}
+
+// --- cache token breakdown (T3 / #92) -------------------------------------------
+
+export interface CacheTokenInput {
+  /** Provider rows from `coverage.providers` (includes zero-usage rows). */
+  providers: { provider: string; provider_status?: string | null }[];
+  /** Measured per-provider sums (`breakdowns.by_provider`). */
+  measured: BreakdownEntry[];
+  /**
+   * Adapter-declared cache capability per provider id — the
+   * conversations `capability.providers[].usage.cache_tokens` value.
+   * Absent/unknown ids yield `unknown`, never a guessed `reported`.
+   */
+  cacheCapability?: Record<string, string> | undefined;
+}
+
+function cacheStatusFor(
+  provider: string,
+  providerStatus: string | null | undefined,
+  capability: string | undefined,
+): { status: CacheTokenStatus; detail: string | null } {
+  if (providerStatus === "unsupported") {
+    return {
+      status: "unsupported",
+      detail: "provider adapter is unsupported; no usage events can be indexed",
+    };
+  }
+  if (capability === "unsupported") {
+    return {
+      status: "unsupported",
+      detail: "provider adapter declares no cache-token accounting",
+    };
+  }
+  if (providerStatus === "supported" && capability === "reported") {
+    return { status: "reported", detail: null };
+  }
+  return {
+    status: "unknown",
+    detail: `cache-token capability not verified for provider "${provider}"`,
+  };
+}
+
+/**
+ * Per-provider cache-token view. Token sums come from the measured
+ * breakdown; `status` comes from the adapter capability matrix — a
+ * provider that does not account for cache tokens is `unsupported`
+ * explicitly, and an unverifiable one is `unknown`. Zero sums on a
+ * `reported` provider mean "no cache tokens measured", which is a
+ * measurement, not a fabricated zero.
+ */
+export function buildCacheTokens(input: CacheTokenInput): UsageCacheTokens {
+  const measuredByProvider = new Map(input.measured.map((b) => [b.key, b]));
+  const providers: CacheTokenProviderEntry[] = input.providers.map((p) => {
+    const measured = measuredByProvider.get(p.provider);
+    const verdict = cacheStatusFor(
+      p.provider,
+      p.provider_status,
+      input.cacheCapability?.[p.provider],
+    );
+    return {
+      provider: p.provider,
+      status: verdict.status,
+      events: measured?.events ?? 0,
+      cache_read_input_tokens: measured?.cache_read_input_tokens ?? 0,
+      cache_creation_input_tokens: measured?.cache_creation_input_tokens ?? 0,
+      detail: verdict.detail,
+    };
+  });
+  providers.sort((a, b) => b.events - a.events || a.provider.localeCompare(b.provider));
+  return { providers };
 }
