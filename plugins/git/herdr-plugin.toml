@@ -1,8 +1,8 @@
 id = "rebuildup.git"
 name = "Git"
-version = "0.1.0"
+version = "0.2.0"
 min_herdr_version = "0.9.0"
-description = "Read-only git status/diff for agent panes: branch, change counts, bounded patches, and pane metadata projection."
+description = "Git status/diff for agent panes: branch, change counts, per-file changes, bounded patches, and pane metadata projection."
 platforms = ["linux", "macos", "windows"]
 
 # No build step: the plugin is dependency-free TypeScript executed by Bun
@@ -14,6 +14,13 @@ title = "Git: pane status"
 description = "Show the git status of the focused pane's repository as JSON."
 contexts = ["pane"]
 command = ["bun", "run", "src/cli.ts", "status"]
+
+[[actions]]
+id = "files"
+title = "Git: pane changed files"
+description = "List the git changed files of the focused pane's repository as JSON."
+contexts = ["pane"]
+command = ["bun", "run", "src/cli.ts", "files"]
 
 [[actions]]
 id = "project"

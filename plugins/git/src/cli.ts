@@ -20,7 +20,9 @@ import {
 } from "../../../packages/herdr-client/src/index";
 import {
   collectDiff,
+  collectFiles,
   collectStatus,
+  type DiffFormat,
   type DiffRequest,
   GitError,
   resolveRepo,
@@ -29,7 +31,7 @@ import {
 
 const CONTRACT = "herdr-plugins.git/v1";
 const PLUGIN_ID = "rebuildup.git";
-const PLUGIN_VERSION = "0.1.0";
+const PLUGIN_VERSION = "0.2.0";
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_DIFF_MAX_BYTES = 256 * 1024;
 
@@ -88,6 +90,15 @@ function flagValue(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
   if (index === -1) return undefined;
   return args[index + 1];
+}
+
+/** All values of a repeatable value flag (e.g. --path a --path b). */
+function flagValues(args: string[], name: string): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i += 1) {
+    if (args[i] === name && i + 1 < args.length) out.push(args[i + 1] as string);
+  }
+  return out;
 }
 
 function hasFlag(args: string[], name: string): boolean {
@@ -208,9 +219,54 @@ async function cmdStatus(options: CliOptions): Promise<void> {
   }
 }
 
+// Only flags that consume a value belong here; boolean flags are skipped
+// by the `--` prefix check in positionals().
+const DIFF_VALUE_FLAGS = ["--path", "--max-bytes"];
+
+async function cmdFiles(options: CliOptions): Promise<void> {
+  const config = await loadConfig();
+  const paneId = await resolvePaneId(options.args, ["--path"]);
+  const snapshot = await sessionSnapshot(options);
+  const pane = await findPane(snapshot, paneId);
+  const cwd = paneCwd(pane);
+
+  const pathspec = flagValues(options.args, "--path");
+  for (const p of pathspec) {
+    if (p.startsWith("-")) fail(`invalid --path value (option-like rejected): ${p}`, 2);
+  }
+
+  let repoRoot: string;
+  try {
+    repoRoot = (await resolveRepo(cwd, { timeoutMs: effectiveTimeoutMs(options, config) })).root;
+  } catch (err) {
+    if (err instanceof GitError) fail(err.message, 1, err.kind);
+    throw err;
+  }
+
+  try {
+    const result = await collectFiles(
+      repoRoot,
+      { pathspec: pathspec.length > 0 ? pathspec : undefined },
+      { timeoutMs: effectiveTimeoutMs(options, config) },
+    );
+    emit({
+      contract: CONTRACT,
+      command: "files",
+      pane_id: paneId,
+      repo_root: repoRoot,
+      pathspec,
+      files: result.files,
+      generated_at: new Date().toISOString(),
+    });
+  } catch (err) {
+    if (err instanceof GitError) fail(err.message, 1, err.kind);
+    throw err;
+  }
+}
+
 async function cmdDiff(options: CliOptions): Promise<void> {
   const config = await loadConfig();
-  const paneId = await resolvePaneId(options.args, ["--staged", "--stat", "--max-bytes"]);
+  const paneId = await resolvePaneId(options.args, DIFF_VALUE_FLAGS);
   const snapshot = await sessionSnapshot(options);
   const pane = await findPane(snapshot, paneId);
   const cwd = paneCwd(pane);
@@ -218,7 +274,7 @@ async function cmdDiff(options: CliOptions): Promise<void> {
   // Revision args: positionals after the pane id that do not look like
   // flags. Anything starting with '-' is rejected — git options must be
   // expressed through the explicit flags above.
-  const pos = positionals(options.args, ["--staged", "--stat", "--max-bytes"]);
+  const pos = positionals(options.args, DIFF_VALUE_FLAGS);
   const revisions = pos.slice(1);
   for (const rev of revisions) {
     if (rev.startsWith("-")) {
@@ -227,6 +283,24 @@ async function cmdDiff(options: CliOptions): Promise<void> {
   }
   if (revisions.length > 2) {
     fail("diff accepts at most two revisions", 2);
+  }
+
+  const formats = ["--stat", "--name-status", "--numstat"].filter((f) => hasFlag(options.args, f));
+  if (formats.length > 1) {
+    fail(`diff accepts only one output format flag (got ${formats.join(", ")})`, 2);
+  }
+  const format: DiffFormat | undefined =
+    formats[0] === "--stat"
+      ? "stat"
+      : formats[0] === "--name-status"
+        ? "name-status"
+        : formats[0] === "--numstat"
+          ? "numstat"
+          : undefined;
+
+  const paths = flagValues(options.args, "--path");
+  for (const p of paths) {
+    if (p.startsWith("-")) fail(`invalid --path value (option-like rejected): ${p}`, 2);
   }
 
   const maxBytesRaw = flagValue(options.args, "--max-bytes");
@@ -238,7 +312,9 @@ async function cmdDiff(options: CliOptions): Promise<void> {
   const request: DiffRequest = {
     staged: hasFlag(options.args, "--staged"),
     stat: hasFlag(options.args, "--stat"),
+    format,
     revisions: revisions.length > 0 ? revisions : undefined,
+    paths: paths.length > 0 ? paths : undefined,
     maxBytes: (maxBytes as number | undefined) ?? config.diffMaxBytes ?? DEFAULT_DIFF_MAX_BYTES,
   };
 
@@ -262,8 +338,12 @@ async function cmdDiff(options: CliOptions): Promise<void> {
       staged: request.staged ?? false,
       stat: request.stat ?? false,
       revisions: request.revisions ?? [],
-      output: request.stat ? null : result.output,
-      stat_output: request.stat ? result.output : null,
+      format: format ?? "patch",
+      output: format === undefined ? result.output : null,
+      stat_output: format === "stat" ? result.output : null,
+      name_status_output: format === "name-status" ? result.output : null,
+      numstat_output: format === "numstat" ? result.output : null,
+      paths,
       truncated: result.truncated,
       bytes: result.bytes,
       generated_at: new Date().toISOString(),
@@ -343,7 +423,7 @@ async function cmdCapability(options: CliOptions): Promise<void> {
     contract: CONTRACT,
     plugin: PLUGIN_ID,
     version: PLUGIN_VERSION,
-    commands: ["capability", "status", "diff", "project"],
+    commands: ["capability", "status", "diff", "files", "project"],
     read_only: true,
     requires: { git: true, bun: true },
     defaults: {
@@ -353,11 +433,13 @@ async function cmdCapability(options: CliOptions): Promise<void> {
   });
 }
 
-const USAGE = `rebuildup.git — read-only git status/diff (contract ${CONTRACT})
+const USAGE = `rebuildup.git — git status/diff for agent panes (contract ${CONTRACT})
 
 Usage:
   git status <pane_id> [--session NAME] [--timeout MS]
-  git diff <pane_id> [--staged] [--stat] [--max-bytes N] [rev [rev]]
+  git diff <pane_id> [--staged] [--stat|--name-status|--numstat]
+      [--path PATH]... [--max-bytes N] [rev [rev]]
+  git files <pane_id> [--path PATH]... [--session NAME]
   git project <pane_id> [--session NAME]
   git capability
 
@@ -372,6 +454,8 @@ async function main(): Promise<void> {
       return cmdStatus(options);
     case "diff":
       return cmdDiff(options);
+    case "files":
+      return cmdFiles(options);
     case "project":
       return cmdProject(options);
     case "capability":
