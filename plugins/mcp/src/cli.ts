@@ -1,21 +1,17 @@
 /**
- * rebuildup.mcp CLI — discovery and (from T2, #138) the stdio MCP
- * server entrypoint for contract `herdr-plugins.mcp/v1` (draft).
+ * rebuildup.mcp CLI — discovery and the stdio MCP server entrypoint
+ * for contract `herdr-plugins.mcp/v1`.
  *
- * T1 (#135) scope: `capability` reports the contract skeleton —
- * access levels, planned tool table, session resolution, upstream
- * gaps — and `serve` honestly reports `not_implemented` until the
- * server core lands. Boundary decisions: ADR-0025.
+ * T1 (#135) shipped the contract skeleton; T2 (#138) implements the
+ * stdio server core (`serve`) and the read tool surface. Boundary
+ * decisions: ADR-0025.
  *
- * All commands emit a single JSON document on stdout; diagnostics go
- * to stderr. Exit code 0 on success, 1 on handled errors, 2 on usage.
+ * Discovery commands emit a single JSON document on stdout; `serve`
+ * keeps stdout protocol-only (JSON-RPC) and logs to stderr. Exit code
+ * 0 on success, 1 on handled errors, 2 on usage.
  */
 
-import {
-  pluginDirs,
-  resolveSocketPath,
-  sessionSnapshot,
-} from "../../../packages/herdr-client/src/index";
+import { pluginDirs, sessionSnapshot } from "../../../packages/herdr-client/src/index";
 import {
   ACCESS_LEVELS,
   type AccessLevel,
@@ -25,9 +21,14 @@ import {
   ERROR_CODES,
   PLUGIN_ID,
   PLUGIN_VERSION,
+  SURFACE_STATUS,
   TOOL_TABLE,
   UPSTREAM_GAPS,
 } from "./model";
+import { resolvePluginSource } from "./plugincli";
+import { serveMcp } from "./server";
+import { resolveTarget } from "./session";
+import { defaultToolContext, pluginAvailability } from "./tools";
 
 interface CliOptions {
   command: string;
@@ -74,11 +75,9 @@ function fail(message: string, code: 1 | 2): never {
   process.exit(code);
 }
 
-function resolvedSocket(options: CliOptions): string {
-  // Pane-scoped env (HERDR_PANE_ID etc.) is ignored by design
-  // (ADR-0025 §4): resolveSocketPath only honors HERDR_SOCKET_PATH /
-  // HERDR_SESSION, which legitimately describe the target session.
-  return options.socketPath ?? resolveSocketPath({ session: options.session });
+/** Contract-order resolution (ADR-0025 §4): --socket > --session > env > default. */
+function resolvedTarget(options: CliOptions) {
+  return resolveTarget({ socketPath: options.socketPath, session: options.session });
 }
 
 async function probeSession(options: CliOptions): Promise<{
@@ -87,9 +86,9 @@ async function probeSession(options: CliOptions): Promise<{
   error?: string;
 }> {
   try {
+    const target = resolvedTarget(options);
     const snapshot = await sessionSnapshot({
-      session: options.session,
-      socketPath: options.socketPath,
+      socketPath: target.socketPath,
       timeoutMs: 2000,
     });
     const name = snapshot.session?.name;
@@ -99,11 +98,18 @@ async function probeSession(options: CliOptions): Promise<{
   }
 }
 
+/** Sibling-plugin availability for the contracts this plugin consumes/plans. */
+function pluginAvailabilityReport(): Promise<Record<string, unknown>[]> {
+  return pluginAvailability({ probePlugin: resolvePluginSource });
+}
+
 async function cmdCapability(options: CliOptions): Promise<void> {
   const session = await probeSession(options);
+  const target = resolvedTarget(options);
   emit({
     contract: CONTRACT,
     contract_status: CONTRACT_STATUS,
+    surfaces: SURFACE_STATUS,
     plugin: PLUGIN_ID,
     version: PLUGIN_VERSION,
     commands: ["capability", "serve", "help"],
@@ -112,7 +118,12 @@ async function cmdCapability(options: CliOptions): Promise<void> {
     startup: [],
     state_file: null,
     config_dir: pluginDirs(PLUGIN_ID).configDir,
-    socket: resolvedSocket(options),
+    socket: target.socketPath,
+    session_resolution: {
+      resolved_via: target.resolvedVia,
+      session_name_flag: target.sessionName ?? null,
+      rule: "--socket > --session/HERDR_SESSION > HERDR_SOCKET_PATH > default; pane env ignored",
+    },
     session,
     access_levels: {
       levels: [...ACCESS_LEVELS],
@@ -133,6 +144,7 @@ async function cmdCapability(options: CliOptions): Promise<void> {
       status: tool.status,
       backs_onto: tool.backs_onto,
     })),
+    plugins: await pluginAvailabilityReport(),
     error_codes: [...ERROR_CODES],
     upstream_gaps: UPSTREAM_GAPS,
     remote: {
@@ -145,18 +157,9 @@ async function cmdCapability(options: CliOptions): Promise<void> {
 }
 
 async function cmdServe(options: CliOptions): Promise<void> {
-  // Honest not-implemented until T2 (#138) lands the stdio server core.
-  emit({
-    contract: CONTRACT,
-    ok: false,
-    error: {
-      code: "unsupported",
-      message:
-        "rebuildup.mcp serve is not implemented yet (T1 skeleton, issue #135); the stdio MCP server core lands in T2 (#138)",
-      details: { ticket: "#138", access_level: options.accessLevel },
-    },
-  });
-  process.exit(1);
+  const target = resolvedTarget(options);
+  const ctx = defaultToolContext(target, options.accessLevel);
+  await serveMcp({ ctx });
 }
 
 const USAGE = `rebuildup.mcp — outside-agent MCP surface (contract ${CONTRACT}, ${CONTRACT_STATUS})
@@ -170,8 +173,11 @@ Access levels: ${ACCESS_LEVELS.join(" | ")} (default ${DEFAULT_ACCESS_LEVEL})
 
 Session resolution: --socket > --session/HERDR_SESSION > HERDR_SOCKET_PATH
 > default session socket. Pane env vars are ignored (ADR-0025 §4).
-serve is a per-client stdio MCP server; it lands in T2 (#138) — T1
-ships the contract skeleton and capability discovery only.
+An MCP client with no ambient herdr env must pass --session/--socket
+(or set HERDR_SESSION/HERDR_SOCKET_PATH) in its server config.
+
+serve is a per-client stdio MCP server (newline-delimited JSON-RPC);
+stdout is protocol-only, diagnostics go to stderr.
 Remote HTTP/OAuth is an upstream gap (herdrdev/herdr#6199), out of v1.
 `;
 

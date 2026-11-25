@@ -10,8 +10,20 @@ export const CONTRACT = "herdr-plugins.mcp/v1";
 export const PLUGIN_ID = "rebuildup.mcp";
 export const PLUGIN_VERSION = "0.1.0";
 
-/** Contract lifecycle: draft until the T2 read surface stabilizes. */
+/** Contract lifecycle: draft until the T3/T4 surfaces land. */
 export const CONTRACT_STATUS = "draft" as const;
+
+/**
+ * Per-surface stability (contract "Versioning"): the read surface is
+ * stable as of T2 (#138); mutations land in T3 (#139), events in T4
+ * (#140). `capability` reports this map so clients can detect what is
+ * implemented without parsing the tool table.
+ */
+export const SURFACE_STATUS = {
+  read: "stable",
+  mutation: "planned",
+  events: "planned",
+} as const;
 
 /**
  * Server-side access levels (ADR-0025 §2). `supervised` maps to T3's
@@ -47,49 +59,49 @@ export const TOOL_TABLE: readonly ToolSpec[] = [
     name: "herdr_capability",
     access: "read-only",
     readOnly: true,
-    status: "planned",
+    status: "implemented",
     backs_onto: "contract + session.snapshot liveness",
   },
   {
     name: "session_snapshot",
     access: "read-only",
     readOnly: true,
-    status: "planned",
+    status: "implemented",
     backs_onto: "session.snapshot (herdr-client)",
   },
   {
     name: "agent_list",
     access: "read-only",
     readOnly: true,
-    status: "planned",
+    status: "implemented",
     backs_onto: "agent.list (herdr-client)",
   },
   {
     name: "agent_get",
     access: "read-only",
     readOnly: true,
-    status: "planned",
+    status: "implemented",
     backs_onto: "agent.get (herdr-client)",
   },
   {
     name: "agent_read",
     access: "read-only",
     readOnly: true,
-    status: "planned",
+    status: "implemented",
     backs_onto: "agent.read scrollback (herdr-client)",
   },
   {
     name: "workspace_list",
     access: "read-only",
     readOnly: true,
-    status: "planned",
+    status: "implemented",
     backs_onto: "session.snapshot workspaces (herdr-client)",
   },
   {
     name: "pane_list",
     access: "read-only",
     readOnly: true,
-    status: "planned",
+    status: "implemented",
     backs_onto: "session.snapshot panes (herdr-client)",
   },
   // Plugin contract reads
@@ -97,49 +109,49 @@ export const TOOL_TABLE: readonly ToolSpec[] = [
     name: "conversations_search",
     access: "read-only",
     readOnly: true,
-    status: "planned",
+    status: "implemented",
     backs_onto: "rebuildup.conversations CLI (env-pinned spawn)",
   },
   {
     name: "conversations_show",
     access: "read-only",
     readOnly: true,
-    status: "planned",
+    status: "implemented",
     backs_onto: "rebuildup.conversations CLI (env-pinned spawn)",
   },
   {
     name: "git_status",
     access: "read-only",
     readOnly: true,
-    status: "planned",
+    status: "implemented",
     backs_onto: "rebuildup.git CLI (env-pinned spawn)",
   },
   {
     name: "git_files",
     access: "read-only",
     readOnly: true,
-    status: "planned",
+    status: "implemented",
     backs_onto: "rebuildup.git CLI (env-pinned spawn)",
   },
   {
     name: "git_log",
     access: "read-only",
     readOnly: true,
-    status: "planned",
+    status: "implemented",
     backs_onto: "rebuildup.git CLI (env-pinned spawn)",
   },
   {
     name: "projects_list",
     access: "read-only",
     readOnly: true,
-    status: "planned",
+    status: "implemented",
     backs_onto: "rebuildup.projects CLI (env-pinned spawn)",
   },
   {
     name: "usage_report",
     access: "read-only",
     readOnly: true,
-    status: "planned",
+    status: "implemented",
     backs_onto: "rebuildup.usage CLI (env-pinned spawn)",
   },
   // Mutations (supervised+)
