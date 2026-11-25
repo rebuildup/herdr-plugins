@@ -258,10 +258,10 @@
         "packages/provider-core/"
       ],
       "classification": "plugin",
-      "issues": [27],
+      "issues": [27, 99, 100, 101, 102],
       "depends_on": ["conversations", "#8"],
       "acceptance": "モデル/推論設定、permission mode、構造化承認/質問、中断/再開、送信・steer・queue、添付/画像/ファイル、Skills/commands、履歴・stash・引用・編集・goals を Provider/ACP capability 単位で提供。PTY 推測・権限昇格・独自 Provider 実行基盤を避ける。",
-      "verification": "未着手。対応 capability は実 Provider で個別検証。GUI 固有編集は herdr-t3 に割当。"
+      "verification": "T1-T4 (#99-#102) 実装済み: plugins/controls v0.6.0 + herdr-plugins.controls/v1 確定。T1 (#99): agent 操作中核 send/wait/interrupt/read/rename (agent.* 1:1 thin wrapper、identity echo、--expect-* stale_generation guard、blocked send は requires_interactive_input で agent.prompt 不発、ADR-0017)。T2 (#100): start 起動時制御 — model/reasoning/permission-mode/resume を provider 別検証済み argv へ写像、--arg は権限昇格 denylist + --unsafe-args opt-out、unsupported_launch_option を RPC 前に明示 (ADR-0018)。T3 (#101): command = provider slash passthrough (fragile:true、advisory per-provider table)、queue/steer は upstream gap と判定し plugin 側 queue は defer。T4 (#102): 構造化対話 (approval/question/添付/goal/subagent approval) の upstream gap を ADR-0019 で確定 — herdr に dialog API なし、ACP 直結は独自 Provider 実行基盤に抵触し却下、v1 は capability.dialogs で全て unsupported + PTY interactive fallback (interrupt/read) を明示。upstream 要望は herdrdev/herdr#6196 (dialogs) / #6197 (queue/steer) として起票済み、agent_session_path は #6191 が upstream not-planned でクローズ。検証: fake-socket contract tests (tests/controls*.test.ts) + 実機 smoke を docs/research/controls-v1-live-verification.md に記録 (隔離 herdr 0.9.5 session verify102、実 claude/codex で start/send/wait/interrupt/read/rename/command・blocked 拒否・stale guard を end-to-end 確認)。残差: provider 別 command/launch table は advisory・未検証、Linux/Windows 未検証、GUI composer 編集は herdr-t3 責務。"
     },
     {
       "id": "usage-quota",
@@ -300,10 +300,10 @@
         "docs/orchestration-v2/provider-switching-and-context.md"
       ],
       "classification": "plugin",
-      "issues": [6],
+      "issues": [6, 103],
       "depends_on": ["conversations", "checkpoints"],
       "acceptance": "モデル/Provider 間の作業移管、サブタスク委譲、親子関係、並列作業・worktree handoff、継続/再開、移管結果追跡。既存 Agent Router と project-init の委譲・権限・正本参照を再利用し routing は再実装しない。",
-      "verification": "未着手。Agent Router 仕様確認 (dotfiles/pc-setup 管轄、変更しない) が前提。#30 MCP・#32 automation との境界を決定。"
+      "verification": "T1 (#103) 実装済み: plugins/handoff (contract herdr-plugins.handoff/v1: create/list/status/capability)、docs/contracts/handoff-v1.md、docs/specs/handoff.md、ADR-0017 (Agent Router 境界・read-only 調査)。payload は参照+bounded excerpt、stale identity は read-side 報告のみ・適用しない。残り: #104 local 実行 / #105 cross-machine / #106 委譲・lineage (#30/#32 境界は #106 で確定)。"
     },
     {
       "id": "mcp-outside-agents",
