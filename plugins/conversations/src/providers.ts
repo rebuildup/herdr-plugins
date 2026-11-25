@@ -1,11 +1,9 @@
 /**
  * Provider adapter registry for rebuildup.conversations.
  *
- * v1 ships the claude adapter (JSONL transcripts under the claude
- * config `projects/` dir). codex and opencode are declared so
- * `capability` can disclose them as `unsupported` with a reason —
- * adapters land in T2 (#87). An unlisted provider is reported as
- * `unknown_provider`, never silently indexed.
+ * v1 ships claude (JSONL), codex (rollout JSONL), and opencode
+ * (SQLite `opencode.db`) adapters — T2 (#87). An unlisted provider is
+ * reported as `unknown_provider`, never silently indexed.
  */
 
 export interface ProviderDescriptor {
@@ -27,17 +25,13 @@ export const PROVIDERS: readonly ProviderDescriptor[] = [
   },
   {
     id: "codex",
-    status: "unsupported",
-    formats: [],
-    reason: "codex rollout adapter lands in T2 (#87); declared for capability disclosure only",
-    planned_in: "#87",
+    status: "supported",
+    formats: ["codex-rollout-jsonl"],
   },
   {
     id: "opencode",
-    status: "unsupported",
-    formats: [],
-    reason: "opencode SQLite adapter lands in T2 (#87); declared for capability disclosure only",
-    planned_in: "#87",
+    status: "supported",
+    formats: ["opencode-sqlite"],
   },
 ];
 

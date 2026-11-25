@@ -63,10 +63,15 @@ while `agent_resume.rs` discards them for non-pi agents, so
 ## Consequences
 
 - T2 (#87) adds codex/opencode adapters behind the same
-  `TranscriptAdapter` seam (resolve + line parse); the contract and
-  state layout do not change.
-- T3 (#88) adds history read/search over `events/*.jsonl` — the index
-  already carries everything it needs.
+  resolve + normalize seam; the contract and state layout do not
+  change. Landed shapes: codex rollout JSONL shares the
+  byte-cursor incremental scanner; opencode SQLite cannot use a byte
+  cursor (mutable, `seq`-ordered rows), so it fully rescans and
+  rewrites the event log per index run — dedup stays structural via
+  provider row ids. `history` pages `events/*.jsonl` with an opaque
+  byte-offset cursor.
+- T3 (#88) adds search/filtering over `events/*.jsonl` on top of the
+  `history` pager — the index already carries everything it needs.
 - **Upstream gap recorded** (Issue candidate for #89, benefits #4/#6):
   herdr should expose `agent_session_path` (or equivalent) on
   `AgentInfo` for claude/codex — additive, small, and would let the
