@@ -3,8 +3,9 @@
 Verification record for the v0.4.0 release candidate. Fixed target:
 
 - Ticket branch HEAD (code under test): `31640357c3f7d7f01657184f7bcbcddc09096440`
-  (branch `94`, on top of `release-0-4-0` @ `6364074`; this document and
-  the ledger/PR sync land as docs-only commits on top)
+  (branch `94`, on top of `release-0-4-0` @ `6364074`; this document, the
+  ledger/PR sync, and a biome-format-only commit land on top — no
+  behavioral change after the verified SHA)
 - herdr: `0.9.5` (protocol 22), Bun: `1.4.4`, git: `2.56.1`
 - Platform exercised: macOS (arm64)
 
