@@ -1,19 +1,23 @@
 # Checkpoints plugin (`rebuildup.checkpoints`) — specification
 
-Scope: T1 foundation (#72) — hidden-ref capture/list/show/diff/delete.
-Contract: `herdr-plugins.checkpoints/v1`
+Scope: T1 foundation (#72) — hidden-ref capture/list/show/diff/delete;
+T2 (#73) — safe restore (`plan` + `restore`). Contract:
+`herdr-plugins.checkpoints/v1`
 (`docs/contracts/checkpoints-v1.md`). Design: ADR-0011. Upstream
-semantics reference: T3 Code `GitVcsDriver.captureCheckpoint` +
-`CheckpointService` ref naming (pinned revision in
+semantics reference: T3 Code `GitVcsDriver.captureCheckpoint` /
+`restoreCheckpoint` (~lines 1843–2069) +
+`orchestration-v2/CheckpointRestoreSafety.ts` (pinned revision in
 `docs/program/feature-ledger.json`).
 
 ## Purpose
 
 Give agents and users a safe way to snapshot "the worktree as it is
 now" — tracked modifications, staged content, and untracked files —
-without committing, without touching the user's index/staging, and
-without a daemon. Later tickets add restore (#73), turn-boundary
-auto-capture (#74), and multi-repo/GC (#75).
+without committing, without touching the user's index/staging (on
+capture), and without a daemon. `restore` is the one command that
+mutates the worktree — it does so only behind a mandatory pre-restore
+checkpoint and shared-worktree isolation checks. Later tickets add
+turn-boundary auto-capture (#74) and multi-repo/GC (#75).
 
 ## Capture procedure
 
@@ -86,12 +90,81 @@ See contract doc. Highlights:
 - `delete <id>` — `update-ref -d` when the ref exists + state removal;
   already-gone ref or unreachable repo still removes the state entry
   (`ref_existed:false` + warning) — idempotent cleanup.
+- `plan <id> [--repo PATH]` — read-only restore preview:
+  `files_to_change` = union of `git diff --name-only <commit>` and
+  `git diff --cached --name-only <commit>` (worktree ∪ index deltas);
+  `untracked_to_delete` = `ls-files --others --exclude-standard`
+  entries absent from the commit tree — precisely what the post-restore
+  `clean -fd` passes remove (a plain `clean -dn` count would wrongly
+  include currently-untracked files that `--staged` makes tracked).
+  Plans against the live ref target, or the recorded `commit` with a
+  warning when the ref is gone.
+- `restore <id> [--repo PATH] [--force]` — safe restore, below.
+
+## Restore procedure (#73)
+
+Target resolution: default is the entry's `repo_root`; `--repo PATH`
+may name **another worktree of the same repository** — verified by
+comparing canonical `git rev-parse --git-common-dir` of both
+(`repo_mismatch` otherwise). The hidden ref resolves through the
+shared object store in any linked worktree.
+
+Pre-mutation gates, in order:
+
+1. Ref liveness: `verify-ref` on the entry's ref; missing →
+   `checkpoint_ref_missing`. A moved ref restores its current target
+   with a warning.
+2. **Shared-worktree isolation** (mirrors upstream
+   `CheckpointRestoreSafety` / `SHARED_WORKSPACE_RESTORE_MESSAGE`,
+   simplified to pane cwds): `session.snapshot` → every pane cwd
+   canonicalized (realpath, `path.resolve` fallback) → counted when at
+   or under the repo root via `path.relative` containment. **≥2
+   sharing panes → `shared_worktree`** (ids in `error.panes`).
+   **Session unreachable → `session_unreachable`** — refusing is the
+   deliberate safe default: isolation cannot be proven, so restore is
+   denied unless `--force`. `--force` skips the check entirely and is
+   reported as `isolation:"forced"` + warning. Panes without a cwd are
+   ignored (documented limit).
+3. **Mandatory pre-restore checkpoint** via `captureCheckpoint`
+   (label `pre-restore:<id>`), persisted to state *before* any
+   mutation. Capture failure refuses the restore; this is the recovery
+   anchor for every later failure.
+
+Mutation (`plugins/checkpoints/src/restore.ts`, upstream
+`GitVcsDriver.restoreCheckpoint` semantics):
+
+4. `git restore --source <oid> --worktree --staged
+   --ignore-skip-worktree-bits -- .` — syncs index+worktree to the
+   checkpoint tree; paths absent from the checkpoint are deleted
+   (verified empirically: restore removes index/worktree entries not
+   in the source). `--ignore-skip-worktree-bits` matches upstream —
+   v1 refuses sparse checkouts, so every skip-worktree bit is manual.
+5. Bounded `git clean -fd -- .` passes (max 4) repeated while stdout
+   still matches `^Removing ` — a removed untracked `.gitignore`
+   exposes newly-untracked files. `-x` is never passed: ignored files
+   survive (they were never captured). Exhausting the cap →
+   `clean_incomplete`; non-zero exit → `clean_failed`.
+6. Post-verify: `git diff --quiet <oid>` (worktree), `git diff
+   --cached --quiet <oid>` (index), `git clean -dn` empty — any
+   mismatch → `restore_verify_failed`.
+
+Failure contract: mutation-phase errors (`restore_failed`,
+`clean_failed`, `clean_incomplete`, `restore_verify_failed`,
+`git_error`, `timeout`) return `error.pre_restore_checkpoint_id` /
+`pre_restore_ref` / `pre_restore_commit`; the pre-restore ref always
+exists and can itself be restored. Success reports
+`pre_restore:{id,ref,commit,label}`, `isolation`, `sharing_panes`,
+`clean_passes`, and submodule warnings (v1 restores the root repo
+only — recorded gitlinks' submodule worktrees are untouched).
 
 ## Error taxonomy
 
 `not_a_repo`, `bare_repo`, `empty_repo` (unborn HEAD),
 `sparse_checkout`, `unknown_checkpoint`, `cross_repo`,
-`pane_not_found`, `no_pane_cwd`, plus shared `git_missing` / `timeout` /
+`pane_not_found`, `no_pane_cwd`, `repo_mismatch`,
+`checkpoint_ref_missing`, `shared_worktree`, `session_unreachable`,
+`restore_failed`, `clean_failed`, `clean_incomplete`,
+`restore_verify_failed`, plus shared `git_missing` / `timeout` /
 `git_error`. Unsupported conditions are structured errors, never
 success-shaped output.
 
@@ -104,7 +177,16 @@ success-shaped output.
   make this visible. Nested-repo capture semantics deferred.
 - `git add -A` rehashes the full worktree through the scratch index —
   O(repo size); upstream's user-index stat-cache reuse is deferred.
-- No restore (#73), no auto-capture on turn boundaries (#74), no
-  multi-repo session grouping or GC (#75).
+- Restore mutates the real index+worktree (upstream semantics), unlike
+  capture which never does; the pre-restore checkpoint + post-verify
+  bound the blast radius. No scratch-index restore variant.
+- Restore is root-repo only: submodule worktrees are not restored
+  (record-and-warn). Nested *untracked* repos are skipped by
+  `git clean -fd` (needs `-ff`), so they survive restore.
+- Session-unreachable restore requires `--force` (safe default);
+  panes lacking a cwd are not counted toward the shared-worktree
+  threshold.
+- No auto-capture on turn boundaries (#74), no multi-repo session
+  grouping or GC (#75).
 - Checkpoint commits/objects are unreachable from branches; `git gc`
   may eventually prune them — GC policy is #75's problem.

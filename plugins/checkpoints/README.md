@@ -14,8 +14,11 @@ synthetic commit stored under
 `refs/herdr-plugins/checkpoints/<repo-key>/<id>`. Capture runs entirely
 through a temporary `GIT_INDEX_FILE`; the user's real index, staging
 area, and worktree are never modified. `list` / `show` / `diff` /
-`delete` read and manage those refs plus a small state index under
-`HERDR_PLUGIN_STATE_DIR`.
+`plan` / `restore` / `delete` read and manage those refs plus a small
+state index under `HERDR_PLUGIN_STATE_DIR`. `restore` rewrites the
+worktree+index to a checkpoint's tree (deleting post-checkpoint
+untracked files) only after capturing a mandatory `pre-restore`
+checkpoint and passing shared-worktree isolation checks.
 
 ## Commands
 
@@ -26,8 +29,16 @@ bun run src/cli.ts create [--repo PATH | <pane_id>] [--label TEXT]
 bun run src/cli.ts list [--repo PATH] [--limit N]
 bun run src/cli.ts show <checkpoint-id> [--max-bytes N]
 bun run src/cli.ts diff <checkpoint-id|HEAD> <checkpoint-id|HEAD> [--max-bytes N]
+bun run src/cli.ts plan <checkpoint-id> [--repo PATH]
+bun run src/cli.ts restore <checkpoint-id> [--repo PATH] [--force]
 bun run src/cli.ts delete <checkpoint-id>
 ```
+
+`restore` always captures a `pre-restore` checkpoint first, refuses
+shared worktrees (≥2 live panes under the repo root) and unreachable
+herdr sessions unless `--force`, then restores tracked+staged content
+and deletes untracked files — files created after the checkpoint are
+removed. `plan` previews the same counts without mutating.
 
 - Repo target: `--repo PATH`, or a pane id (argument, `HERDR_PANE_ID`,
   or the manifest action context) resolved through the herdr session
@@ -52,5 +63,7 @@ dependencies beyond the repo's shared `packages/git-core` and
 - Shared object store: checkpoint objects live in the repo's own object
   database; `git log --all` shows the hidden refs. GC of deleted
   checkpoint objects is a later ticket.
-- Restore / auto-capture / multi-repo orchestration are later tickets
-  (#73–#75).
+- Restore covers the root repo only: submodule worktrees recorded as
+  gitlinks are not restored (warned).
+- Auto-capture / multi-repo orchestration / GC are later tickets
+  (#74–#75).

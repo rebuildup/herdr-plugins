@@ -7,10 +7,17 @@
  * Repo targeting: `create`/`list --repo` accept `--repo PATH`; `create`
  * otherwise resolves a pane (positional arg, HERDR_PANE_ID, or
  * HERDR_PLUGIN_CONTEXT_JSON.focused_pane_id) through the herdr session
- * snapshot — the same path rebuildup.git uses.
+ * snapshot — the same path rebuildup.git uses. `plan`/`restore` default
+ * to the checkpoint's recorded repo; `--repo PATH` may select another
+ * worktree of the same repository (shared git common dir).
+ *
+ * `restore` always captures a `pre-restore` checkpoint first, refuses
+ * shared worktrees (>=2 live panes under the repo root) and unreachable
+ * sessions unless `--force`, then runs `git restore --source --worktree
+ * --staged` + bounded `git clean -fd` + post-verify (see restore.ts).
  */
 
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { type BoundedResult, GitError, resolveRepo } from "../../../packages/git-core/src/index";
 import {
@@ -31,6 +38,7 @@ import {
   showCommit,
   verifyRef,
 } from "./capture";
+import { panesSharingRepo, planRestore, restoreWorktree } from "./restore";
 import { type CheckpointEntry, loadState, PLUGIN_ID, updateState } from "./state";
 
 const CONTRACT = "herdr-plugins.checkpoints/v1";
@@ -79,18 +87,24 @@ function emit(payload: unknown): void {
   process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
 }
 
-function emitError(message: string, code: number, kind?: string): never {
+function emitError(
+  message: string,
+  code: number,
+  kind?: string,
+  extra?: Record<string, unknown>,
+): never {
   const error: Record<string, unknown> = {
     code: code === 2 ? "usage" : "error",
     message,
   };
   if (kind) error.kind = kind;
+  if (extra) Object.assign(error, extra);
   process.stderr.write(`${JSON.stringify({ contract: CONTRACT, ok: false, error })}\n`);
   process.exit(code);
 }
 
-function fail(message: string, code = 1, kind?: string): never {
-  emitError(message, code, kind);
+function fail(message: string, code = 1, kind?: string, extra?: Record<string, unknown>): never {
+  emitError(message, code, kind, extra);
 }
 
 function flagValue(args: string[], name: string): string | undefined {
@@ -514,15 +528,240 @@ async function cmdDelete(options: CliOptions): Promise<void> {
   });
 }
 
+/**
+ * Resolve which worktree `plan`/`restore` operate on. Default is the
+ * checkpoint's recorded `repo_root`; `--repo PATH` may select another
+ * worktree of the SAME repository (shared git common dir / object
+ * store), which is the only cross-checkout case checkpoint commits can
+ * meaningfully restore into. Anything else is `repo_mismatch`.
+ */
+async function resolveTargetRepo(
+  options: CliOptions,
+  entry: CheckpointEntry,
+  config: PluginConfig,
+): Promise<ResolvedRepo> {
+  const timeoutMs = effectiveTimeoutMs(options, config);
+  const repoFlag = flagValue(options.args, "--repo");
+  if (repoFlag === undefined) {
+    try {
+      return await resolveCheckpointRepo(entry.repo_root, { timeoutMs });
+    } catch (err) {
+      gitFail(err);
+    }
+  }
+  if (repoFlag.startsWith("-")) fail("invalid --repo value", 2);
+  let resolved: ResolvedRepo;
+  try {
+    resolved = await resolveCheckpointRepo(repoFlag, { timeoutMs });
+    const entryRepo = await resolveRepo(entry.repo_root, { timeoutMs });
+    const [targetCommon, entryCommon] = await Promise.all([
+      realpath(resolved.info.gitCommonDir),
+      realpath(entryRepo.gitCommonDir),
+    ]);
+    if (targetCommon !== entryCommon) {
+      fail(
+        `--repo ${repoFlag} belongs to a different repository than checkpoint ${entry.id} ` +
+          `(git common dir ${targetCommon} != ${entryCommon})`,
+        1,
+        "repo_mismatch",
+      );
+    }
+    return resolved;
+  } catch (err) {
+    if (err instanceof GitError || err instanceof CheckpointError) gitFail(err);
+    throw err;
+  }
+}
+
+function checkpointIdArg(options: CliOptions, command: string): string {
+  const pos = positionals(options.args, ["--repo"]);
+  if (pos.length !== 1) fail(`${command} requires exactly one checkpoint id`, 2);
+  const id = pos[0] as string;
+  if (id.startsWith("-")) fail(`invalid checkpoint id: ${id}`, 2);
+  return id;
+}
+
+async function cmdPlan(options: CliOptions): Promise<void> {
+  const config = await loadConfig();
+  const id = checkpointIdArg(options, "plan");
+  const entry = await lookupEntry(id).catch(gitFail);
+  const resolved = await resolveTargetRepo(options, entry, config);
+  const timeoutMs = effectiveTimeoutMs(options, config);
+
+  // Plan against the live ref when it exists, else the recorded commit —
+  // plan is advisory and never mutates, so a missing ref is a warning.
+  const warnings: string[] = [];
+  const refOid = await verifyRef(resolved.root, entry.ref, { timeoutMs });
+  const commit = refOid ?? entry.commit;
+  if (refOid === null) {
+    warnings.push(`checkpoint ref ${entry.ref} is missing; planning against recorded commit`);
+  }
+  if (entry.submodules && entry.submodules.length > 0) {
+    warnings.push(
+      `checkpoint recorded ${entry.submodules.length} submodule gitlink(s); ` +
+        `restore covers the root repo only, submodule worktrees are not restored`,
+    );
+  }
+
+  const plan = await planRestore(resolved.root, commit, { timeoutMs }).catch(gitFail);
+
+  emit({
+    contract: CONTRACT,
+    command: "plan",
+    checkpoint: entry,
+    repo_root: resolved.root,
+    commit,
+    ref: { name: entry.ref, exists: refOid !== null, oid: refOid },
+    plan,
+    warnings,
+    generated_at: new Date().toISOString(),
+  });
+}
+
+/**
+ * Shared-worktree isolation for `restore`: count live panes whose cwd is
+ * the target root or nested under it. Two or more sharing panes means
+ * another agent/user could be mid-edit — refuse unless `--force`.
+ * An unreachable session cannot prove isolation, so it refuses too
+ * (safer default; documented in the contract).
+ */
+async function assertRestoreIsolation(
+  options: CliOptions,
+  repoRoot: string,
+  force: boolean,
+): Promise<{ mode: "isolated" | "forced" | "single_pane" | "no_panes"; sharing: string[] }> {
+  if (force) return { mode: "forced", sharing: [] };
+  const callOptions: CallOptions = { session: options.session, socketPath: options.socketPath };
+  if (options.timeoutMs !== undefined) callOptions.timeoutMs = options.timeoutMs;
+  let snapshot: SessionSnapshot;
+  try {
+    snapshot = await sessionSnapshot(callOptions);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    fail(
+      `cannot verify worktree isolation: herdr session unreachable (${detail}). ` +
+        `Pass --force to restore anyway.`,
+      1,
+      "session_unreachable",
+    );
+  }
+  const sharing = await panesSharingRepo(snapshot.panes ?? [], repoRoot);
+  if (sharing.length >= 2) {
+    fail(
+      `refusing to restore: ${sharing.length} live panes share worktree ${repoRoot} ` +
+        `(${sharing.join(", ")}). Restore would race their edits; pass --force to override.`,
+      1,
+      "shared_worktree",
+      { panes: sharing },
+    );
+  }
+  return { mode: sharing.length === 1 ? "single_pane" : "no_panes", sharing };
+}
+
+async function cmdRestore(options: CliOptions): Promise<void> {
+  const config = await loadConfig();
+  const force = options.args.includes("--force");
+  const id = checkpointIdArg(options, "restore");
+  const entry = await lookupEntry(id).catch(gitFail);
+  const resolved = await resolveTargetRepo(options, entry, config);
+  const timeoutMs = effectiveTimeoutMs(options, config);
+
+  const refOid = await verifyRef(resolved.root, entry.ref, { timeoutMs });
+  if (refOid === null) {
+    fail(
+      `checkpoint ref no longer exists: ${entry.ref} (state entry is stale; ` +
+        `the objects may have been gc'd). Nothing was restored.`,
+      1,
+      "checkpoint_ref_missing",
+    );
+  }
+  const warnings: string[] = [];
+  if (refOid !== entry.commit) {
+    warnings.push(
+      `checkpoint ref moved since capture (recorded ${entry.commit.slice(0, 12)}, ` +
+        `now ${refOid.slice(0, 12)}); restoring the ref's current target`,
+    );
+  }
+
+  const isolation = await assertRestoreIsolation(options, resolved.root, force);
+  if (isolation.mode === "forced") {
+    warnings.push("restore forced: shared-worktree isolation check bypassed via --force");
+  }
+
+  // Mandatory pre-restore checkpoint: persisted BEFORE any mutation so a
+  // mid-restore failure always leaves a recoverable ref. If capture
+  // fails the restore is refused — nothing has been touched yet.
+  let preEntry: CheckpointEntry;
+  try {
+    preEntry = await captureCheckpoint(resolved, {
+      timeoutMs,
+      label: `pre-restore:${id}`,
+    });
+  } catch (err) {
+    gitFail(err);
+  }
+  await updateState((state) => {
+    state.checkpoints[preEntry.id] = preEntry;
+  });
+
+  let result: { clean_passes: number };
+  try {
+    result = await restoreWorktree(resolved.root, refOid, { timeoutMs });
+  } catch (err) {
+    if (err instanceof GitError || err instanceof CheckpointError) {
+      fail(
+        `${err.message} — the worktree may be partially restored; ` +
+          `pre-restore checkpoint ${preEntry.id} preserves the previous state ` +
+          `(restore it with: checkpoints restore ${preEntry.id})`,
+        1,
+        err.kind,
+        {
+          pre_restore_checkpoint_id: preEntry.id,
+          pre_restore_ref: preEntry.ref,
+          pre_restore_commit: preEntry.commit,
+        },
+      );
+    }
+    throw err;
+  }
+
+  if (entry.submodules && entry.submodules.length > 0) {
+    warnings.push(
+      `checkpoint recorded ${entry.submodules.length} submodule gitlink(s); ` +
+        `v1 restores the root repo only — submodule worktrees were not restored`,
+    );
+  }
+
+  emit({
+    contract: CONTRACT,
+    command: "restore",
+    ok: true,
+    checkpoint: entry,
+    repo_root: resolved.root,
+    restored_commit: refOid,
+    pre_restore: {
+      id: preEntry.id,
+      ref: preEntry.ref,
+      commit: preEntry.commit,
+      label: preEntry.label ?? null,
+    },
+    isolation: isolation.mode,
+    sharing_panes: isolation.sharing,
+    clean_passes: result.clean_passes,
+    warnings,
+    generated_at: new Date().toISOString(),
+  });
+}
+
 async function cmdCapability(): Promise<void> {
   const config = await loadConfig();
   emit({
     contract: CONTRACT,
     plugin: PLUGIN_ID,
     version: PLUGIN_VERSION,
-    commands: ["capability", "create", "list", "show", "diff", "delete"],
+    commands: ["capability", "create", "list", "show", "diff", "plan", "restore", "delete"],
     read_only: false,
-    mutation_commands: ["create", "delete"],
+    mutation_commands: ["create", "delete", "restore"],
     requires: { git: true, bun: true },
     defaults: {
       timeoutMs: config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
@@ -541,12 +780,18 @@ Usage:
   checkpoints list [--repo PATH] [--limit N]
   checkpoints show <checkpoint-id> [--max-bytes N]
   checkpoints diff <checkpoint-id|HEAD> <checkpoint-id|HEAD> [--max-bytes N]
+  checkpoints plan <checkpoint-id> [--repo PATH]
+  checkpoints restore <checkpoint-id> [--repo PATH] [--force]
+      [--session NAME] [--socket PATH] [--timeout MS]
   checkpoints delete <checkpoint-id>
   checkpoints capability
 
-Checkpoints are synthetic commits under
-refs/herdr-plugins/checkpoints/<repo-key>/<id>; capture never touches the
-user's index or staging area. See docs/contracts/checkpoints-v1.md.
+restore first captures a mandatory pre-restore checkpoint (recover
+your previous state with 'restore <pre-restore-id>'), refuses when the
+herdr session is unreachable or >=2 live panes share the worktree
+(unless --force), then restores tracked+staged content and deletes
+untracked files — post-checkpoint untracked files are removed.
+See docs/contracts/checkpoints-v1.md.
 `;
 
 async function main(): Promise<void> {
@@ -560,6 +805,10 @@ async function main(): Promise<void> {
       return cmdShow(options);
     case "diff":
       return cmdDiff(options);
+    case "plan":
+      return cmdPlan(options);
+    case "restore":
+      return cmdRestore(options);
     case "delete":
       return cmdDelete(options);
     case "capability":
