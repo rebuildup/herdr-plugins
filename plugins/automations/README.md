@@ -15,27 +15,57 @@ automations, adapted to herdr's no-daemon model.
 
 ## Status
 
-T1 scaffold (#137): `capability` discovery only. The plugin holds no
+T2 registry core (#144) implemented: task CRUD, pause/resume,
+manual `run-now` records, run history with deterministic missed-run
+derivation, and `reconcile` materialization. The plugin holds no
 clock and no daemon — scheduled firing is driven by external clocks
 (`schedule install` OS entries or opt-in `watch`) calling the
-idempotent `tick`/`fire` path (ADR-0022). Registry CRUD lands in
-#144, firing/delivery in #145, event triggers in #146, webhook
-evaluation (if adopted) in #147.
+idempotent `tick`/`fire` path (ADR-0022), which lands in #145; event
+triggers in #146, webhook evaluation (if adopted) in #147.
 
 ## Commands
 
 ```bash
 bun run src/cli.ts capability
+bun run src/cli.ts create \
+  --name "nightly review" \
+  --prompt "Review open PRs and summarize." \
+  --schedule '{"type":"interval","every_ms":86400000}' \
+  --destination '{"kind":"pane","pane_id":"w1:t1:p1"}'
+bun run src/cli.ts list [--enabled true|false] [--limit N]
+bun run src/cli.ts get <task_id>
+bun run src/cli.ts update <task_id> [--name N] [--prompt P] \
+  [--schedule '<json>'] [--destination '<json>'] [--misfire skip|run_once]
+bun run src/cli.ts set-enabled <task_id> <true|false>
+bun run src/cli.ts delete <task_id>
+bun run src/cli.ts run-now <task_id>
+bun run src/cli.ts runs [--task <id>] [--status S] [--limit N] [--stored-only]
+bun run src/cli.ts reconcile [--task <id>]
 bun run src/cli.ts help
 ```
 
-Planned (see contract doc): `create`/`list`/`get`/`update`/
-`set-enabled`/`delete`/`run-now`/`runs`/`fire`/`tick`/`watch`/
-`schedule`/`reconcile`/`hook`.
+Global flags: `--session NAME --socket PATH --timeout MS`.
+
+Schedules: `interval` (`every_ms >= 60000`), `fixed_time`
+(`time_of_day` HH:MM + optional `weekdays` 0=Sun..6=Sat + optional IANA
+`time_zone`), `once` (ISO 8601 with explicit offset, must be future).
+`webhook`/`event` are schema-reserved → `unsupported_schedule` until
+#146/#147.
+
+`run-now` records a manual run (`trigger:"manual"`,
+`scheduled_for:null`, `status:"scheduled"`); actual delivery lands
+with the #145 run path.
 
 ## State
 
-Durable state will live only under herdr's plugin state dir
-(`HERDR_PLUGIN_STATE_DIR` at runtime) with a single-writer lock and
-atomic rename (ADR-0001); session-namespaced like `rebuildup.inbox`.
-Nothing is written inside the installed source tree.
+Durable state lives only under herdr's plugin state dir
+(`HERDR_PLUGIN_STATE_DIR` at runtime): `state.json` + lock file,
+single-writer lock + atomic rename (ADR-0001), session-namespaced
+(`hostname + canonical socket path`) like `rebuildup.inbox`. Nothing
+is written inside the installed source tree.
+
+Missed runs: occurrences owed only inside enabled windows
+(`[enabled_at, disabled_at ?? now]`) and only after a 60 s driver
+jitter grace are derived as `missed` at read time — never reported as
+having run. `reconcile` (and `set-enabled false`) materialize them
+into real run records.

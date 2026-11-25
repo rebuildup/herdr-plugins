@@ -1,11 +1,12 @@
 # Contract: `herdr-plugins.automations/v1`
 
-> **Status: DRAFT (skeleton).** Defined by Issue #137 (parent #32 T1)
-> alongside ADR-0022 (firing mechanism) and ADR-0023 (delivery,
-> idempotency, boundaries). Fields below are normative in name and
-> shape; #144/#145/#146/#147 flesh out per-command semantics. External
-> clients MUST depend only on this contract, never on the plugin's
-> internal state file format.
+> **Status: DRAFT.** Defined by Issue #137 (parent #32 T1) alongside
+> ADR-0022 (firing mechanism) and ADR-0023 (delivery, idempotency,
+> boundaries). #144 (T2) implemented the task-registry surface
+> (`create`/`list`/`get`/`update`/`set-enabled`/`delete`/`run-now`/
+> `runs`/`reconcile`); #145/#146/#147 flesh out the remaining commands.
+> External clients MUST depend only on this contract, never on the
+> plugin's internal state file format.
 
 Versioned structured interface for the `rebuildup.automations` plugin:
 scheduled and event-triggered agent prompts/runs. Upstream reference:
@@ -96,12 +97,22 @@ occurrence (or `created_at` for the first), so effective period is
   },
   "created_by": "cli|mcp|hook",           // actor string; MCP exposure deferred (#30)
   "created_at": "…", "updated_at": "…",
+  // T2 (#144) bookkeeping — occurrences are owed only inside enabled
+  // windows: [enabled_at, disabled_at ?? now]. Pause materializes owed
+  // missed runs before disabled_at closes the window.
+  "enabled_at": "…", "disabled_at": null,
+  // Interval grid origin: created_at initially, advanced by #145 fires
+  // to the last fired scheduled_for; reset on schedule update.
+  "schedule_anchor_at": "…",
   "last_run_at": null, "run_count": 0,
   "next_run_at": "…",                     // derived at read; null when disabled/past
   "driver": {                             // derived at read, honest about coverage
     "state": "os-scheduler|watch|none|install_failed|stale",
     "detail": "…"                         // e.g. stale entry path, watch pid, error
-  }
+  },
+  // T2 (#144) derived read-side fields (never stored):
+  "missed_total": 0,                      // owed occurrences past grace with no run record
+  "missed_truncated": false               // true when reporting was capped
 }
 ```
 
@@ -129,25 +140,37 @@ occurrence (or `created_at` for the first), so effective period is
 
 - `missed` — derived at read time for occurrences that passed with
   no run record (lazy resolution; may be materialized on write).
-  NEVER reported as `success`.
+  NEVER reported as `success`. Reads emit derived entries with
+  `run_id: null` and `derived: true`; `reconcile` (and pause via
+  `set-enabled false`) materialize them into real `missed` records.
+- An occurrence is owed only inside an enabled window
+  (`enabled_at` .. `disabled_at`/now) and only becomes `missed` after
+  a **60 s grace** (`MISSED_GRACE_MS`) — the documented driver jitter
+  bound (ADR-0022), so a just-passed occurrence a tick can still fire
+  is never pre-judged.
 - `skipped` — driver declined the occurrence (e.g. `misfire: skip`
   late fire, `max_fires`/cooldown for event triggers).
 - `success`/`failed` reflect OBSERVED delivery/execution results
   only (API acceptance, agent status transitions). PTY text is never
   parsed into success (AGENTS §4).
 
-## Commands (skeleton)
+## Commands
 
 | Command | Status | Description |
 | --- | --- | --- |
-| `capability` | scaffolded (#137) | Discovery document. |
-| `create` / `list` / `get` / `update` / `set-enabled` / `delete` | #144 | Task registry CRUD. |
-| `run-now` / `runs` | #144 | Manual run (`trigger:"manual"`, `scheduled_for:null`) / run history. |
+| `capability` | implemented (#137/#144) | Discovery document. |
+| `create` | implemented (#144) | `--name --prompt --schedule <json> --destination <json> [--misfire] [--enabled] [--created-by]`; schedule `update` resets `schedule_anchor_at`. |
+| `list` / `get` | implemented (#144) | Task views with derived `next_run_at`/`driver`/`missed_total`; `list [--enabled] [--limit]`. |
+| `update` | implemented (#144) | Partial update of name/prompt/schedule/destination/misfire; ≥1 field required. |
+| `set-enabled` | implemented (#144) | `true` opens a new owed window (`enabled_at=now`); `false` materializes owed missed runs then closes it (`disabled_at=now`). |
+| `delete` | implemented (#144) | Removes the task AND its run records; unknown id → `task_not_found`. |
+| `run-now` | implemented (#144 registry; execution #145) | Creates a `trigger:"manual"`, `scheduled_for:null`, `status:"scheduled"` run — pending execution by the #145 run path; never collides with the occurrence key. |
+| `runs` | implemented (#144) | Run history newest-first; stored runs merged with derived `missed` entries (`run_id:null`, `derived:true`) unless `--stored-only`; `--task/--status/--limit`. |
+| `reconcile [--task]` | implemented (#144) | Materializes derived missed occurrences into real `missed` run records (idempotent). |
 | `fire <task-id> --scheduled-for <ts>` | #145 | Idempotent single-occurrence fire. |
 | `tick` | #145 | Scan due occurrences across enabled tasks; apply `misfire`; fire. The OS/watch driver entrypoint. |
 | `watch [--interval SEC]` | #145 | Opt-in foreground driver: sleep-until-next-due + `tick` loop (single timer, no high-frequency polling). |
 | `schedule install\|uninstall\|status` | #145 | OS scheduler adapter — ONE entry per plugin invoking `tick` (launchd / systemd --user timer / schtasks). |
-| `reconcile` | #144/#145 | Resolve missed occurrences, prune stale driver state, repair derived fields. |
 | `hook` (event entrypoint) | #146 | `[[events]]` handler for reserved `event` schedules. |
 | `serve` (webhook) | #147 | Only if #147 adopts opt-in foreground serve; otherwise absent. |
 
@@ -166,9 +189,14 @@ occurrence (or `created_at` for the first), so effective period is
 
 ## Missed-run & offline policy (normative)
 
-- Reads resolve due-but-unfired occurrences deterministically into
-  `missed` (ADR-0002 path 1). Nothing is reported as having run that
-  did not.
+- Occurrences are owed only inside enabled windows
+  (`enabled_at`..`disabled_at`/now) and become `missed` only after the
+  60 s driver-jitter grace; reads (`list`, `get`, `runs`) resolve them
+  deterministically into derived `missed` entries (lazy resolution,
+  ADR-0002 path 1). Nothing is reported as having run that did not.
+- `set-enabled false` materializes owed missed runs before closing
+  the window, so a later resume cannot silently forgive occurrences
+  an earlier read already reported.
 - `misfire: "skip"` (default): late occurrences are marked `missed`,
   never executed. `misfire: "run_once"`: the next `tick` fires the
   most recent missed occurrence once, then resumes the schedule.
@@ -187,8 +215,9 @@ JSON error object on stderr:
 | Code | Meaning |
 | --- | --- |
 | `usage` | Bad args (exit 2). |
-| `invalid_schedule` | Schedule fails schema validation. |
+| `invalid_schedule` | Schedule fails schema validation (incl. past `once.run_at`, bad zone/weekday). |
 | `unsupported_schedule` | Reserved type (`webhook`/`event`) or platform-inexpressible schedule. |
+| `invalid_task` | Destination/name/prompt/misfire fails validation (#144 additive code). |
 | `task_not_found` | Unknown `task_id`. |
 | `destination_unavailable` | Pane closed / no live agent / surface gone at fire time. |
 | `socket_unavailable` | herdr socket unreachable — never reported as success. |
