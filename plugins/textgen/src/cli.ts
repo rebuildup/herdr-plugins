@@ -24,6 +24,12 @@ import {
   writeConfigJson,
 } from "./config";
 import { generate } from "./generate";
+import {
+  collectGitContext,
+  type GitContextResult,
+  isGitTask,
+  resolveGitPluginRoot,
+} from "./gitcontext";
 import { parseInputJson, validateTaskInput } from "./input";
 import {
   CONTRACT,
@@ -49,6 +55,8 @@ interface CliOptions {
   raw: boolean;
   configDir: string | undefined;
   cwd: string | undefined;
+  gitPane: string | undefined;
+  gitRoot: string | undefined;
 }
 
 function parseArgs(argv: string[]): CliOptions {
@@ -67,6 +75,8 @@ function parseArgs(argv: string[]): CliOptions {
     raw: false,
     configDir: undefined,
     cwd: undefined,
+    gitPane: undefined,
+    gitRoot: undefined,
   };
   const rest: string[] = [];
   for (let i = 0; i < args.length; i += 1) {
@@ -84,6 +94,8 @@ function parseArgs(argv: string[]): CliOptions {
     else if (arg === "--raw") options.raw = true;
     else if (arg === "--config-dir") options.configDir = next();
     else if (arg === "--cwd") options.cwd = next();
+    else if (arg === "--git-pane") options.gitPane = next();
+    else if (arg === "--git-root") options.gitRoot = next();
     else rest.push(arg);
   }
   options.args = rest;
@@ -195,11 +207,29 @@ async function cmdCapability(options: CliOptions): Promise<void> {
     })),
   );
 
+  const gitResolution = await resolveGitPluginRoot(options.gitRoot ?? config.gitPluginRoot);
+
   emit({
     contract: CONTRACT,
     command: "capability",
     plugin: PLUGIN_ID,
     version: PLUGIN_VERSION,
+    integrations: {
+      git: gitResolution.ok
+        ? {
+            status: "resolved",
+            plugin_id: "rebuildup.git",
+            plugin_root: gitResolution.root,
+            resolved_via: gitResolution.via,
+            contract: "herdr-plugins.git/v1",
+            git_tasks: ["branch_name", "commit_message", "pr_content"],
+          }
+        : {
+            status: "unavailable",
+            plugin_id: "rebuildup.git",
+            error: gitResolution.error,
+          },
+    },
     credential_boundary: {
       execution_path: "docs/adr/0017-textgen-execution-path.md",
       api_credentials: "docs/adr/0018-textgen-api-credential-boundary.md",
@@ -225,7 +255,7 @@ async function cmdCapability(options: CliOptions): Promise<void> {
     agent_manifests: manifests === undefined ? "unreachable" : "queried",
     config: redactConfig(config),
     config_warnings: warnings,
-    commands: ["capability", "generate", "config"],
+    commands: ["capability", "generate", "git-context", "config"],
     generated_at: now(),
   });
 }
@@ -250,8 +280,16 @@ async function cmdGenerate(options: CliOptions): Promise<void> {
     });
   }
   const spec = taskSpec(options.task as TaskKind);
+  const gitPane = options.gitPane !== undefined && options.gitPane !== "" ? options.gitPane : null;
+  if (gitPane !== null && !isGitTask(spec.kind)) {
+    usageError(
+      `--git-pane is only supported for git tasks (branch_name, commit_message, pr_content); got ${spec.kind}`,
+    );
+  }
 
   // Input: --input FILE | --input - | stdin (when piped) | required error.
+  // With --git-pane the payload may be empty: the git adapter supplies
+  // the task fields and explicit input only overrides them.
   let inputText = "";
   if (options.inputFile !== undefined && options.inputFile !== "-") {
     try {
@@ -266,9 +304,37 @@ async function cmdGenerate(options: CliOptions): Promise<void> {
   } else if (options.inputFile === "-" || !process.stdin.isTTY) {
     inputText = await readStdin();
   }
-  const rawInput = parseInputJson(inputText, spec);
+  let rawInput: Record<string, unknown> =
+    inputText.trim() === "" && gitPane !== null ? {} : parseInputJson(inputText, spec);
   // Validate early so boundary errors surface before any provider call.
   const { config, warnings: configWarnings } = await loadConfigWithWarnings(options.configDir);
+
+  // Git/forge context adapter (Issue #108): gather diff/commits/conventions
+  // through the rebuildup.git plugin's read-only git-v1 CLI. Explicit
+  // input fields win over collected ones; collection is read-only and
+  // never mutates the repository or the forge.
+  let gitContext: { pane: string; result: GitContextResult } | null = null;
+  if (gitPane !== null) {
+    const resolution = await resolveGitPluginRoot(options.gitRoot ?? config.gitPluginRoot);
+    if (!resolution.ok) {
+      fail(resolution.error, 1, "git_unavailable");
+    }
+    const collected = await collectGitContext({
+      task: spec.kind,
+      pane: gitPane,
+      gitRoot: resolution.root,
+      ...(options.session !== undefined ? { session: options.session } : {}),
+      ...(options.socketPath !== undefined ? { socketPath: options.socketPath } : {}),
+      ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+    });
+    gitContext = { pane: gitPane, result: collected };
+    const merged: Record<string, unknown> = { ...collected.input };
+    for (const [key, value] of Object.entries(rawInput)) {
+      if (value !== undefined && value !== null) merged[key] = value;
+    }
+    rawInput = merged;
+  }
+
   validateTaskInput(spec, rawInput, config.limits);
 
   // Agent manifests improve default provider choice when herdr is up.
@@ -284,10 +350,17 @@ async function cmdGenerate(options: CliOptions): Promise<void> {
     agentTransport: transport,
     ...(manifests !== undefined ? { manifests } : {}),
     ...(options.configDir !== undefined ? { configDir: options.configDir } : {}),
-    ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
+    ...(options.cwd !== undefined
+      ? { cwd: options.cwd }
+      : gitContext?.result.repoRoot !== null && gitContext?.result.repoRoot !== undefined
+        ? { cwd: gitContext.result.repoRoot }
+        : {}),
     ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
   });
   result.warnings.push(...configWarnings);
+  if (gitContext !== null) {
+    result.warnings.push(...gitContext.result.warnings);
+  }
 
   if (options.raw) {
     if (typeof result.result === "string") {
@@ -297,7 +370,79 @@ async function cmdGenerate(options: CliOptions): Promise<void> {
     }
     return;
   }
-  emit(result);
+  emit({
+    ...result,
+    ...(gitContext !== null
+      ? {
+          git_context: {
+            pane_id: gitContext.pane,
+            repo_root: gitContext.result.repoRoot,
+            branch: gitContext.result.branch,
+            sources: gitContext.result.sources,
+          },
+        }
+      : {}),
+  });
+}
+
+// --- git-context -----------------------------------------------------------------
+
+/**
+ * `git-context` previews the repository input the git adapter would feed
+ * a task — the same collection `generate --git-pane` performs, without
+ * invoking any provider. Useful for debugging and for callers that want
+ * to inspect/override collected fields before generating.
+ */
+async function cmdGitContext(options: CliOptions): Promise<void> {
+  if (options.task === undefined || options.task === "") {
+    usageError("git-context requires --task <kind>");
+  }
+  if (!isTaskKind(options.task)) {
+    fail(`unknown task kind: ${options.task}`, 2, "bad_request", {
+      known: TASKS.map((t) => t.kind),
+    });
+  }
+  const spec = taskSpec(options.task as TaskKind);
+  if (!isGitTask(spec.kind)) {
+    usageError(
+      `git-context only supports git tasks (branch_name, commit_message, pr_content); got ${spec.kind}`,
+    );
+  }
+  const pane = options.gitPane;
+  if (pane === undefined || pane === "") {
+    usageError("git-context requires --git-pane <pane_id>");
+  }
+  const { config } = await loadConfigWithWarnings(options.configDir);
+  const resolution = await resolveGitPluginRoot(options.gitRoot ?? config.gitPluginRoot);
+  if (!resolution.ok) {
+    fail(resolution.error, 1, "git_unavailable");
+  }
+  const collected = await collectGitContext({
+    task: spec.kind,
+    pane,
+    gitRoot: resolution.root,
+    ...(options.session !== undefined ? { session: options.session } : {}),
+    ...(options.socketPath !== undefined ? { socketPath: options.socketPath } : {}),
+    ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+  });
+  emit({
+    contract: CONTRACT,
+    command: "git-context",
+    ok: true,
+    task: spec.kind,
+    pane_id: pane,
+    git_plugin: {
+      plugin_id: "rebuildup.git",
+      plugin_root: resolution.root,
+      resolved_via: resolution.via,
+    },
+    repo_root: collected.repoRoot,
+    branch: collected.branch,
+    input: collected.input,
+    sources: collected.sources,
+    warnings: collected.warnings,
+    generated_at: now(),
+  });
 }
 
 // --- config --------------------------------------------------------------------
@@ -430,6 +575,9 @@ async function main(): Promise<void> {
       case "generate":
         await cmdGenerate(options);
         return;
+      case "git-context":
+        await cmdGitContext(options);
+        return;
       case "config":
         await configSubcommand(options);
         return;
@@ -440,6 +588,8 @@ async function main(): Promise<void> {
           "rebuildup.textgen — herdr-plugins.textgen/v1\n" +
             "  capability\n" +
             "  generate --task <kind> [--provider <id>] [--model <m>] [--input <file|->] [--raw]\n" +
+            "          [--git-pane <pane>] [--git-root <dir>] [--cwd DIR]\n" +
+            "  git-context --task <kind> --git-pane <pane> [--git-root <dir>]\n" +
             "  config show | set-default-provider | set-default-model | add-api-generator | remove-api-generator\n" +
             "tasks: " +
             TASKS.map((t) => t.kind).join(", ") +

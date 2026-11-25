@@ -1,4 +1,4 @@
-# Spec: rebuildup.textgen (Issue #107, parent #29 T1)
+# Spec: rebuildup.textgen (Issue #107 T1, #108 T2; parent #29)
 
 Status: release-0-6-0 candidate. Contract: `herdr-plugins.textgen/v1`
 (`docs/contracts/textgen-v1.md`). Decisions: ADR-0017 (execution path),
@@ -36,6 +36,10 @@ CLI (cli.ts)
   control chars, fences, JSON shapes).
 - `config.ts` — `config.json` under `HERDR_PLUGIN_CONFIG_DIR`;
   normalized view, atomic writes, key resolution (env → key file).
+- `gitcontext.ts` — git/forge input adapter (#108): resolves the
+  `rebuildup.git` plugin root (override → sibling → `herdr plugin
+  list`) and gathers task inputs through its read-only git-v1 CLI;
+  probes repository convention files at the reported repo root.
 - `providers.ts` — provider refs (`agent:`, `api:`, bare), defaults,
   manifests-aware resolution.
 
@@ -126,10 +130,55 @@ models, provider ids, `keyEnv` names — never secrets. `config` CLI:
 `add-api-generator` (disabled unless `--enable`), `remove-api-generator`.
 Writes are atomic (tmp+rename).
 
+## Git/forge integration (#108, T2)
+
+Upstream task mapping (T3 Code `textGeneration` → registry):
+`generateBranchName` → `branch_name`, `generateCommitMessage` →
+`commit_message`, `generatePRContent` → `pr_content` (the remaining
+tasks — `generateThreadTitle`, `generateReviewGuide`,
+`generateTranscriptionPostProcessing`, next-prompt — are covered by T1
+registry entries or out of scope).
+
+`generate --git-pane <pane>` (and the provider-free `git-context`
+preview command) feeds the three git tasks from a pane's repository:
+
+- **Discovery**: `--git-root` → `config.gitPluginRoot` → sibling
+  `../git` → `herdr plugin list --json`; validated as a
+  `rebuildup.git` root (`herdr-plugin.toml` id + `src/cli.ts`). Same
+  cross-plugin pattern as usage→conversations (ADR-0013): only the
+  public CLI contract is consumed — never another plugin's state
+  files. The child's `HERDR_PLUGIN_*` env is scrubbed and pinned to
+  the git plugin dirs.
+- **Read-only by construction**: only git-v1 `status`, `diff`, `log`,
+  `compare`, `pr status` run. Mutations (`stage`/`commit`/`branch`/
+  `push`/`pr create`) are never invoked; every response's `contract`
+  field must equal `herdr-plugins.git/v1` (`git_contract_mismatch`
+  otherwise).
+- **Per-task collection**: `branch_name` ← status + `diff --stat`;
+  `commit_message` ← status + `diff --staged` (empty staged ⇒ unstaged
+  `diff` with an explicit `# scope:` note) + convention files
+  (`AGENTS.md`, `CONTRIBUTING.md`, `.commitlintrc*`,
+  `commitlint.config.*`, `.github/CONTRIBUTING.md`; ≤8 KB/file,
+  ≤40 KB total — repository content, not plugin state); `pr_content` ←
+  status + `compare` (no upstream ⇒ worktree `diff` fallback + warning)
+  + `log --limit 30` + `#N`/`owner/repo#N` ref extraction +
+  `pr status` → `pr_context`. `pr status` failure (no `gh`/auth) is a
+  warning, not a blocker.
+- **Merge rule**: collected fields fill the task input; explicit
+  `--input`/stdin fields override them. Empty input is allowed in git
+  mode. Agent-path `cwd` defaults to the collected `repo_root`.
+- **Generation-only invariant**: results remain candidates; adoption
+  (`git branch create`, `git commit -m`, `git pr create --title …
+  --body-file -`) is the caller's job, and textgen being uninstalled,
+  unconfigured, or failing never affects the git/forge manual path —
+  the adapter is additive and the git plugin has no dependency on
+  textgen.
+- `git-context` prints the collected `{input, sources, warnings,
+  repo_root, branch}` without provider invocation; `capability` reports
+  `integrations.git` (`resolved`/`unavailable`).
+
 ## Downstream (not this ticket)
 
-- #108 T2: git/forge adapters consuming `diff`/`commits` inputs and
-  adopting `branch_name`/`commit_message`/`pr_content` results.
 - #109 T3: `review_guide`/`next_prompt` agent-pane flows, timeout/
   interrupt/quota options, `agent_status` transition triggers.
 - #110 T4: contract finalization, real-provider verification matrix,
