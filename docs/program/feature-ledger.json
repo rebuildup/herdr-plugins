@@ -350,7 +350,7 @@
       "issues": [32],
       "depends_on": ["project-scripts", "handoff-delegation", "forge-github", "mcp-outside-agents"],
       "acceptance": "時刻/cron、Webhook、Issue/PR イベント、複数段階 durable workflow、質問/承認、pause/resume/cancel、再起動後継続、イベント/実行状態。既存自動化・Agent Router・project-init 運用基盤を先に調査。",
-      "verification": "未着手。Issue 内 upstream 参照 docs/user/workflows.md は pinned revision に存在しない (実体は project-settings.md の Scheduled tasks/Webhook automations 節)。重複実行・冪等性・署名検証を保証。独自 orchestrator は既存能力で満たせない要件を示してから判断。"
+      "verification": "T1 (#137) 実施済み: t3code @ 9cc4018c 棚卸し確定 (interval≥60s/fixed_time/once/webhook, thread mode 3 種, HMAC/filters/dedupe/coalesce)、発火方式 ADR-0022 (OS scheduler 1 entry→tick が主経路、opt-in watch が代替、_wake 多重化・upstream timer hook は却下/ギャップ記録)、配送・冪等・境界 ADR-0023 (pane prompt/agent.start、task_id+scheduled_for 冪等キー、missed-run lazy resolution、CLI-only・#30/#60 境界)、契約 herdr-plugins.automations/v1 draft (docs/contracts/automations-v1.md)、docs/specs/automations.md、plugins/automations scaffold (capability のみ)。v1 スコープ確定: webhook/event は reserved で #146/#147 が確定。残 T2–T5 (#144–#147)。upstream gap 候補: herdr timer hook / inbound webhook / 構造化 worktree-settle event (起票は #147 で確定)。"
     },
     {
       "id": "secrets-remote-devices",
