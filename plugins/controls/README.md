@@ -26,6 +26,14 @@ Thin, stateless wrappers over herdr's `agent.*` socket API:
   `--format`, `--no-strip-ansi`). Not structured history — use
   `rebuildup.conversations` for conversation events.
 - `rename <target>` — `agent.rename` (`--name` / `--clear`).
+- `start <pane_id> --agent <kind>` — `agent.start` launch-time
+  controls: `--model`, `--reasoning`, `--permission-mode`
+  (supervised / auto-accept-edits / auto / full-access), `--resume` /
+  `--resume-from`, repeatable `--arg` passthrough (privilege-flag
+  denylist; `--unsafe-args` opt-out), `--timeout-ms` startup wait,
+  optional `--wait*` post-launch `agent.wait`. Provider support is
+  per-kind and explicit — unsupported pairs fail
+  `unsupported_launch_option` (see `capability.providers[].launch`).
 - `capability` — offline contract/provider/operation discovery.
 
 Every operation resolves `<target>` (pane id or agent name) via
@@ -47,6 +55,9 @@ bun run src/cli.ts interrupt pane-1            # sends esc
 bun run src/cli.ts interrupt pane-1 --key ctrl+c
 bun run src/cli.ts read pane-1 --lines 100
 bun run src/cli.ts rename pane-1 --name worker-1
+bun run src/cli.ts start pane-2 --agent claude --name worker-2 \
+  --model sonnet --permission-mode supervised --wait
+bun run src/cli.ts start pane-3 --agent codex --resume-from pane-1
 ```
 
 All commands accept `--session NAME`, `--socket PATH`, `--timeout MS`.

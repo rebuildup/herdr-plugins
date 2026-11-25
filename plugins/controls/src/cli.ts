@@ -22,6 +22,7 @@ import {
   agentRead,
   agentRename,
   agentSendKeys,
+  agentStart,
   agentWait,
   type CallOptions,
 } from "../../../packages/herdr-client/src/index";
@@ -29,12 +30,20 @@ import { CONTRACT, capabilityPayload } from "./capability";
 import {
   checkGeneration,
   type GenerationExpectation,
+  identityForAgent,
   isAgentRpcError,
   type ResolvedAgent,
   resolveAgent,
 } from "./identity";
+import {
+  buildLaunchArgs,
+  canonicalKind,
+  PERMISSION_MODES,
+  type PermissionMode,
+  type ResumeSessionKind,
+} from "./launch";
 
-const PLUGIN_VERSION = "0.6.0";
+const PLUGIN_VERSION = "0.7.0";
 
 interface CliOptions extends CallOptions {
   command: string;
@@ -463,6 +472,216 @@ async function cmdRename(options: CliOptions): Promise<void> {
   });
 }
 
+const AGENT_NAME_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/;
+
+/** herdr agent.start timeout bounds (src/app/agents.rs). */
+const START_TIMEOUT_MIN_MS = 3000;
+const START_TIMEOUT_MAX_MS = 300000;
+
+async function cmdStart(options: CliOptions): Promise<void> {
+  const parsed = parseCommandArgs(
+    options.args,
+    new Set([
+      "--agent",
+      "--name",
+      "--model",
+      "--reasoning",
+      "--permission-mode",
+      "--resume",
+      "--resume-from",
+      "--arg",
+      "--timeout-ms",
+      "--wait-until",
+      "--wait-timeout-ms",
+    ]),
+  );
+  const pane = parsed.positionals[0];
+  if (!pane || parsed.positionals.length > 1) {
+    fail("start requires exactly one <pane_id>", 2);
+  }
+  const kindRaw = parsed.values.get("--agent");
+  if (kindRaw === undefined || kindRaw === "") {
+    fail("start requires --agent <kind>", 2);
+  }
+  const kind = canonicalKind(kindRaw as string);
+
+  const nameRaw = parsed.values.get("--name");
+  // Default name keeps launches distinct; herdr enforces uniqueness.
+  const name = nameRaw ?? `${kind}-${Math.random().toString(16).slice(2, 6)}`;
+  if (!AGENT_NAME_PATTERN.test(name)) {
+    fail(`--name must match [a-z][a-z0-9_-]{0,31} (herdr agent name rules), got: ${name}`, 2);
+  }
+
+  const permissionModeRaw = parsed.values.get("--permission-mode");
+  let permissionMode: PermissionMode | undefined;
+  if (permissionModeRaw !== undefined) {
+    if (!(PERMISSION_MODES as readonly string[]).includes(permissionModeRaw)) {
+      fail(
+        `--permission-mode must be one of ${PERMISSION_MODES.join("|")}, got: ${permissionModeRaw}`,
+        2,
+      );
+    }
+    permissionMode = permissionModeRaw as PermissionMode;
+  }
+
+  // --- Resume value: --resume <value> or --resume-from <agent target> ---
+  const resumeRaw = parsed.values.get("--resume");
+  const resumeFrom = parsed.values.get("--resume-from");
+  if (resumeRaw !== undefined && resumeFrom !== undefined) {
+    fail("start accepts at most one of --resume or --resume-from", 2);
+  }
+  let resumeValue: string | undefined;
+  let resumeSessionKind: ResumeSessionKind | null = null;
+  let resumeSource: unknown;
+  if (resumeRaw !== undefined) {
+    resumeValue = resumeRaw;
+  } else if (resumeFrom !== undefined) {
+    // Resolve the source agent and reuse its reported session ref —
+    // the same agent_session signal every other command echoes.
+    const source = await resolveGuarded(resumeFrom, options, parsed);
+    const session = source.identity.agent_session;
+    if (session?.value === undefined) {
+      fail(`target ${resumeFrom} has no reported agent_session to resume`, 1, "no_agent_session", {
+        identity: source.identity,
+      });
+    }
+    const sessionAgent = session?.agent ?? null;
+    if (sessionAgent !== null && sessionAgent !== kind && sessionAgent !== kindRaw) {
+      fail(
+        `agent_session reports provider '${sessionAgent}', which does not match --agent '${kindRaw}'`,
+        1,
+        "resume_session_mismatch",
+        { identity: source.identity, expected_agent: kindRaw },
+      );
+    }
+    resumeValue = session.value;
+    resumeSessionKind = session?.kind === "path" ? "path" : session?.kind === "id" ? "id" : null;
+    // The reporting source is not part of the echoed AgentSessionRef
+    // contract; read it from the raw agent record for the launch echo.
+    const rawSession = source.agent.agent_session as Record<string, unknown> | null | undefined;
+    resumeSource = typeof rawSession?.source === "string" ? rawSession.source : null;
+  }
+
+  const extraArgs = parsed.multi.get("--arg") ?? [];
+  const unsafeArgs = parsed.flags.has("--unsafe-args");
+
+  let built: ReturnType<typeof buildLaunchArgs>;
+  try {
+    built = buildLaunchArgs({
+      kind,
+      ...(parsed.values.get("--model") !== undefined
+        ? { model: parsed.values.get("--model") as string }
+        : {}),
+      ...(parsed.values.get("--reasoning") !== undefined
+        ? { reasoning: parsed.values.get("--reasoning") as string }
+        : {}),
+      ...(permissionMode !== undefined ? { permissionMode } : {}),
+      ...(resumeValue !== undefined ? { resumeValue } : {}),
+      resumeSessionKind,
+      extraArgs,
+      unsafeArgs,
+    });
+  } catch (err) {
+    const e = err as { message?: string; kind?: string; extra?: Record<string, unknown> };
+    if (e.kind === "usage") fail(e.message ?? String(err), 2);
+    fail(e.message ?? String(err), 1, e.kind ?? "error", e.extra);
+  }
+
+  const timeoutRaw = parsed.values.get("--timeout-ms");
+  let timeoutMs: number | undefined;
+  if (timeoutRaw !== undefined) {
+    const value = Number(timeoutRaw);
+    if (!Number.isInteger(value) || value <= START_TIMEOUT_MIN_MS || value > START_TIMEOUT_MAX_MS) {
+      fail(
+        `--timeout-ms must be an integer in (${START_TIMEOUT_MIN_MS}, ${START_TIMEOUT_MAX_MS}], got: ${timeoutRaw}`,
+        2,
+      );
+    }
+    timeoutMs = value;
+  }
+
+  // Post-launch wait options are validated before agent.start so a
+  // usage error never leaves a launched agent behind.
+  const waitUntil = parseStatuses(parsed.multi.get("--wait-until"), "--wait-until");
+  const waitTimeoutRaw = parsed.values.get("--wait-timeout-ms");
+  let waitTimeoutMs: number | undefined;
+  if (waitTimeoutRaw !== undefined) {
+    const value = Number(waitTimeoutRaw);
+    if (!Number.isFinite(value) || value < 0) {
+      fail(`--wait-timeout-ms must be a non-negative number, got: ${waitTimeoutRaw}`, 2);
+    }
+    waitTimeoutMs = value;
+  }
+
+  let started: Awaited<ReturnType<typeof agentStart>>;
+  try {
+    started = await agentStart(
+      {
+        name,
+        kind,
+        paneId: pane as string,
+        args: built.args,
+        ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+      },
+      options,
+    );
+  } catch (err) {
+    if (isAgentRpcError(err)) fail(err.message, 1, err.code);
+    fail(
+      `herdr session unreachable: ${err instanceof Error ? err.message : String(err)}`,
+      1,
+      "session_unreachable",
+    );
+  }
+
+  const identity = await identityForAgent(started.agent, options);
+
+  // Optional post-launch observation: agent.start already waits for
+  // interactive readiness (timeout_ms above); --wait* adds an explicit
+  // agent.wait until idle/working with a structured timeout.
+  const wantsWait =
+    parsed.flags.has("--wait") || waitUntil !== undefined || waitTimeoutMs !== undefined;
+  let waitResult: unknown;
+  if (wantsWait) {
+    try {
+      waitResult = await agentWait(
+        (identity.pane_id ?? pane) as string,
+        {
+          until: waitUntil ?? ["idle", "working"],
+          ...(waitTimeoutMs !== undefined ? { timeoutMs: waitTimeoutMs } : {}),
+        },
+        options,
+      );
+    } catch (err) {
+      if (isAgentRpcError(err)) fail(err.message, 1, err.code, { launched: true, identity });
+      fail(
+        `herdr session unreachable: ${err instanceof Error ? err.message : String(err)}`,
+        1,
+        "session_unreachable",
+        { launched: true, identity },
+      );
+    }
+  }
+
+  emit({
+    contract: CONTRACT,
+    command: "start",
+    identity,
+    launch: {
+      kind,
+      requested_kind: kindRaw,
+      name,
+      pane_id: pane,
+      args: built.args,
+      argv: started.argv,
+      applied: built.applied,
+      ...(resumeSource !== undefined ? { resume_source: resumeSource } : {}),
+    },
+    ...(wantsWait ? { waited: true, wait: waitResult } : {}),
+    generated_at: now(),
+  });
+}
+
 const USAGE = `rebuildup.controls — agent operation core (herdr-plugins.controls/v1)
 
 Usage: bun run src/cli.ts <command> [args] [--session NAME] [--socket PATH] [--timeout MS]
@@ -474,8 +693,12 @@ Commands:
   interrupt <target> [--key KEY]... [--keys k1,k2]   (PTY-level keys; default: esc)
   read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--no-strip-ansi]
   rename <target> (--name NAME | --clear)
+  start <pane_id> --agent <kind> [--name NAME] [--model M] [--reasoning L]
+       [--permission-mode supervised|auto-accept-edits|auto|full-access]
+       [--resume SESSION | --resume-from TARGET] [--arg ARG]... [--unsafe-args]
+       [--timeout-ms MS] [--wait] [--wait-until STATUS]... [--wait-timeout-ms MS]
 
-Identity guards (all commands): --expect-pane ID --expect-state-seq N --expect-agent-session VALUE
+Identity guards (all agent-target commands): --expect-pane ID --expect-state-seq N --expect-agent-session VALUE
   Any mismatch aborts with stale_generation before the agent.* call.
 
 Errors: {contract, ok:false, error:{code,message,kind?}} on stderr; exit 1 handled, 2 usage.`;
@@ -495,6 +718,8 @@ async function main(): Promise<void> {
       return cmdRead(options);
     case "rename":
       return cmdRename(options);
+    case "start":
+      return cmdStart(options);
     case "help":
     case "--help":
     case "-h":
