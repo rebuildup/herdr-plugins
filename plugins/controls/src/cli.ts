@@ -1,0 +1,519 @@
+/**
+ * rebuildup.controls CLI — agent operation core contract
+ * (`herdr-plugins.controls/v1`) for agents and external clients.
+ * Single JSON document on stdout; diagnostics on stderr.
+ * Exit 0 success, 1 handled error, 2 usage.
+ *
+ * All operations go through herdr's `agent.*` socket API — never PTY
+ * text scraping, never fabricated agent state (ADR-0017). `interrupt`
+ * is explicitly PTY-level key injection; `read` is scrollback, not
+ * structured history.
+ */
+
+import {
+  AGENT_READ_FORMATS,
+  AGENT_READ_SOURCES,
+  AGENT_STATUSES,
+  type AgentReadFormat,
+  type AgentReadResult,
+  type AgentReadSource,
+  type AgentStatus,
+  agentPrompt,
+  agentRead,
+  agentRename,
+  agentSendKeys,
+  agentWait,
+  type CallOptions,
+} from "../../../packages/herdr-client/src/index";
+import { CONTRACT, capabilityPayload } from "./capability";
+import {
+  checkGeneration,
+  type GenerationExpectation,
+  isAgentRpcError,
+  type ResolvedAgent,
+  resolveAgent,
+} from "./identity";
+
+const PLUGIN_VERSION = "0.6.0";
+
+interface CliOptions extends CallOptions {
+  command: string;
+  args: string[];
+  session: string | undefined;
+}
+
+function parseArgs(argv: string[]): CliOptions {
+  const args = [...argv];
+  const command = args.shift() ?? "help";
+  const options: CliOptions = { command, args, session: undefined };
+  const rest: string[] = [];
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i] as string;
+    if (arg === "--session") {
+      options.session = args[++i];
+    } else if (arg === "--socket") {
+      options.socketPath = args[++i];
+    } else if (arg === "--timeout") {
+      const value = Number(args[++i]);
+      if (Number.isFinite(value) && value > 0) options.timeoutMs = value;
+    } else {
+      rest.push(arg);
+    }
+  }
+  options.args = rest;
+  return options;
+}
+
+function emit(payload: unknown): void {
+  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+}
+
+function fail(message: string, code = 1, kind?: string, extra?: Record<string, unknown>): never {
+  const error: Record<string, unknown> = {
+    code: code === 2 ? "usage" : "error",
+    message,
+  };
+  if (kind) error.kind = kind;
+  if (extra) Object.assign(error, extra);
+  process.stderr.write(`${JSON.stringify({ contract: CONTRACT, ok: false, error })}\n`);
+  process.exit(code);
+}
+
+function now(): string {
+  return new Date().toISOString();
+}
+
+// --- Per-command argument parsing -------------------------------------------
+
+interface ParsedArgs {
+  positionals: string[];
+  /** Last value per option name. */
+  values: Map<string, string>;
+  /** All values per option name, for repeatable options. */
+  multi: Map<string, string[]>;
+  flags: Set<string>;
+}
+
+/**
+ * Split command args into positionals, `--name value`/`--name=value`
+ * options, and bare boolean flags (same convention as
+ * rebuildup.projects).
+ */
+function parseCommandArgs(args: string[], valueFlags: ReadonlySet<string>): ParsedArgs {
+  const positionals: string[] = [];
+  const values = new Map<string, string>();
+  const multi = new Map<string, string[]>();
+  const flags = new Set<string>();
+  const push = (name: string, value: string): void => {
+    values.set(name, value);
+    const list = multi.get(name);
+    if (list) list.push(value);
+    else multi.set(name, [value]);
+  };
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i] as string;
+    if (arg.startsWith("--")) {
+      const eq = arg.indexOf("=");
+      if (eq > 0) {
+        push(arg.slice(0, eq), arg.slice(eq + 1));
+        continue;
+      }
+      if (valueFlags.has(arg)) {
+        const value = args[++i];
+        if (value === undefined) fail(`${arg} requires a value`, 2);
+        push(arg, value);
+      } else {
+        flags.add(arg);
+      }
+      continue;
+    }
+    positionals.push(arg);
+  }
+  return { positionals, values, multi, flags };
+}
+
+// --- Shared resolution --------------------------------------------------------
+
+const EXPECT_VALUE_FLAGS = new Set([
+  "--expect-pane",
+  "--expect-state-seq",
+  "--expect-agent-session",
+]);
+
+function expectationFrom(parsed: ParsedArgs): GenerationExpectation {
+  const expected: GenerationExpectation = {};
+  const pane = parsed.values.get("--expect-pane");
+  if (pane !== undefined) expected.pane = pane;
+  const seqRaw = parsed.values.get("--expect-state-seq");
+  if (seqRaw !== undefined) {
+    const seq = Number(seqRaw);
+    if (!Number.isInteger(seq) || seq < 0) {
+      fail(`--expect-state-seq must be a non-negative integer, got: ${seqRaw}`, 2);
+    }
+    expected.stateSeq = seq;
+  }
+  const session = parsed.values.get("--expect-agent-session");
+  if (session !== undefined) expected.agentSession = session;
+  return expected;
+}
+
+/**
+ * Resolve + generation-guard the target. RPC errors keep herdr's error
+ * code as the structured `kind` (e.g. `agent_not_found`, `timeout`);
+ * transport failures become `session_unreachable`.
+ */
+async function resolveGuarded(
+  target: string,
+  options: CallOptions,
+  parsed: ParsedArgs,
+): Promise<ResolvedAgent> {
+  let resolved: ResolvedAgent;
+  try {
+    resolved = await resolveAgent(target, options);
+  } catch (err) {
+    if (isAgentRpcError(err)) fail(err.message, 1, err.code);
+    fail(
+      `herdr session unreachable: ${err instanceof Error ? err.message : String(err)}`,
+      1,
+      "session_unreachable",
+    );
+  }
+  try {
+    checkGeneration(resolved, expectationFrom(parsed));
+  } catch (err) {
+    const e = err as { message?: string; kind?: string; extra?: Record<string, unknown> };
+    fail(e.message ?? String(err), 1, e.kind ?? "stale_generation", e.extra);
+  }
+  return resolved;
+}
+
+function parseStatuses(values: string[] | undefined, flag: string): AgentStatus[] | undefined {
+  if (values === undefined) return undefined;
+  const out: AgentStatus[] = [];
+  for (const value of values) {
+    if (!(AGENT_STATUSES as readonly string[]).includes(value)) {
+      fail(`${flag} must be one of ${AGENT_STATUSES.join("|")}, got: ${value}`, 2);
+    }
+    out.push(value as AgentStatus);
+  }
+  return out;
+}
+
+function parseTimeoutMs(parsed: ParsedArgs): number | undefined {
+  const raw = parsed.values.get("--timeout-ms");
+  if (raw === undefined) return undefined;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) {
+    fail(`--timeout-ms must be a non-negative number, got: ${raw}`, 2);
+  }
+  return value;
+}
+
+// --- Commands -----------------------------------------------------------------
+
+async function cmdCapability(): Promise<void> {
+  emit(capabilityPayload(PLUGIN_VERSION, now()));
+}
+
+async function cmdSend(options: CliOptions): Promise<void> {
+  const parsed = parseCommandArgs(
+    options.args,
+    new Set([...EXPECT_VALUE_FLAGS, "--wait-until", "--timeout-ms"]),
+  );
+  const target = parsed.positionals[0];
+  const text = parsed.positionals.slice(1).join(" ");
+  if (!target || text === "") {
+    fail("send requires <target> and <text>", 2);
+  }
+  const until = parseStatuses(parsed.multi.get("--wait-until"), "--wait-until");
+  const timeoutMs = parseTimeoutMs(parsed);
+  const wantsWait = parsed.flags.has("--wait") || until !== undefined;
+
+  const resolved = await resolveGuarded(target as string, options, parsed);
+
+  // herdr rejects agent.prompt on a blocked agent with `agent_blocked`
+  // before any input is sent; surface the same semantics as a structured
+  // error without ever reporting success (issue #99 requirement).
+  if (resolved.identity.agent_status === "blocked") {
+    fail(
+      `agent is blocked and requires interactive input; agent.prompt would be rejected`,
+      1,
+      "requires_interactive_input",
+      {
+        identity: resolved.identity,
+        agent_status: "blocked",
+        hint: "resolve the interactive prompt in the pane (see `interrupt` for PTY-level keys) or use a structured dialog surface when available",
+      },
+    );
+  }
+
+  const wait =
+    wantsWait || timeoutMs !== undefined
+      ? {
+          ...(until !== undefined ? { until } : {}),
+          ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+        }
+      : undefined;
+
+  let result: unknown;
+  try {
+    result = await agentPrompt(target as string, text, wait, options);
+  } catch (err) {
+    if (isAgentRpcError(err)) fail(err.message, 1, err.code);
+    fail(
+      `herdr session unreachable: ${err instanceof Error ? err.message : String(err)}`,
+      1,
+      "session_unreachable",
+    );
+  }
+  emit({
+    contract: CONTRACT,
+    command: "send",
+    identity: resolved.identity,
+    waited: wait !== undefined,
+    result,
+    generated_at: now(),
+  });
+}
+
+async function cmdWait(options: CliOptions): Promise<void> {
+  const parsed = parseCommandArgs(
+    options.args,
+    new Set([...EXPECT_VALUE_FLAGS, "--until", "--timeout-ms"]),
+  );
+  const target = parsed.positionals[0];
+  if (!target || parsed.positionals.length > 1) {
+    fail("wait requires exactly one <target>", 2);
+  }
+  const until = parseStatuses(parsed.multi.get("--until"), "--until");
+  const timeoutMs = parseTimeoutMs(parsed);
+
+  const resolved = await resolveGuarded(target as string, options, parsed);
+
+  let result: unknown;
+  try {
+    result = await agentWait(
+      target as string,
+      {
+        ...(until !== undefined ? { until } : {}),
+        ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+      },
+      options,
+    );
+  } catch (err) {
+    if (isAgentRpcError(err)) fail(err.message, 1, err.code);
+    fail(
+      `herdr session unreachable: ${err instanceof Error ? err.message : String(err)}`,
+      1,
+      "session_unreachable",
+    );
+  }
+  emit({
+    contract: CONTRACT,
+    command: "wait",
+    identity: resolved.identity,
+    result,
+    generated_at: now(),
+  });
+}
+
+async function cmdInterrupt(options: CliOptions): Promise<void> {
+  const parsed = parseCommandArgs(
+    options.args,
+    new Set([...EXPECT_VALUE_FLAGS, "--key", "--keys"]),
+  );
+  const target = parsed.positionals[0];
+  if (!target || parsed.positionals.length > 1) {
+    fail("interrupt requires exactly one <target>", 2);
+  }
+  // --key is repeatable; a comma-separated --keys value is also accepted.
+  const keys: string[] = [];
+  for (const k of parsed.multi.get("--key") ?? []) keys.push(k);
+  const keysOpt = parsed.values.get("--keys");
+  if (keysOpt !== undefined) {
+    for (const k of keysOpt.split(",")) {
+      const trimmed = k.trim();
+      if (trimmed !== "") keys.push(trimmed);
+    }
+  }
+  const finalKeys = keys.length > 0 ? keys : ["esc"];
+
+  const resolved = await resolveGuarded(target as string, options, parsed);
+
+  let result: unknown;
+  try {
+    result = await agentSendKeys(target as string, finalKeys, options);
+  } catch (err) {
+    if (isAgentRpcError(err)) fail(err.message, 1, err.code);
+    fail(
+      `herdr session unreachable: ${err instanceof Error ? err.message : String(err)}`,
+      1,
+      "session_unreachable",
+    );
+  }
+  emit({
+    contract: CONTRACT,
+    command: "interrupt",
+    identity: resolved.identity,
+    keys: finalKeys,
+    pty_level: true,
+    result,
+    generated_at: now(),
+  });
+}
+
+async function cmdRead(options: CliOptions): Promise<void> {
+  const parsed = parseCommandArgs(
+    options.args,
+    new Set([...EXPECT_VALUE_FLAGS, "--source", "--lines", "--format", "--no-strip-ansi"]),
+  );
+  const target = parsed.positionals[0];
+  if (!target || parsed.positionals.length > 1) {
+    fail("read requires exactly one <target>", 2);
+  }
+  const sourceRaw = parsed.values.get("--source") ?? "recent";
+  if (!(AGENT_READ_SOURCES as readonly string[]).includes(sourceRaw)) {
+    fail(`--source must be one of ${AGENT_READ_SOURCES.join("|")}, got: ${sourceRaw}`, 2);
+  }
+  const formatRaw = parsed.values.get("--format");
+  let format: AgentReadFormat | undefined;
+  if (formatRaw !== undefined) {
+    if (!(AGENT_READ_FORMATS as readonly string[]).includes(formatRaw)) {
+      fail(`--format must be one of ${AGENT_READ_FORMATS.join("|")}, got: ${formatRaw}`, 2);
+    }
+    format = formatRaw as AgentReadFormat;
+  }
+  let lines: number | undefined;
+  const linesRaw = parsed.values.get("--lines");
+  if (linesRaw !== undefined) {
+    const value = Number(linesRaw);
+    if (!Number.isInteger(value) || value < 0) {
+      fail(`--lines must be a non-negative integer, got: ${linesRaw}`, 2);
+    }
+    lines = value;
+  }
+  // ansi output is meaningless stripped; strip_ansi defaults to true for
+  // text and false for ansi unless the caller says otherwise.
+  const stripAnsi = parsed.flags.has("--no-strip-ansi") ? false : format !== "ansi";
+
+  const resolved = await resolveGuarded(target as string, options, parsed);
+
+  let read: AgentReadResult;
+  try {
+    read = await agentRead(
+      target as string,
+      {
+        source: sourceRaw as AgentReadSource,
+        ...(lines !== undefined ? { lines } : {}),
+        ...(format !== undefined ? { format } : {}),
+        stripAnsi,
+      },
+      options,
+    );
+  } catch (err) {
+    if (isAgentRpcError(err)) fail(err.message, 1, err.code);
+    fail(
+      `herdr session unreachable: ${err instanceof Error ? err.message : String(err)}`,
+      1,
+      "session_unreachable",
+    );
+  }
+  emit({
+    contract: CONTRACT,
+    command: "read",
+    identity: resolved.identity,
+    scrollback: true,
+    read,
+    generated_at: now(),
+  });
+}
+
+async function cmdRename(options: CliOptions): Promise<void> {
+  const parsed = parseCommandArgs(options.args, new Set([...EXPECT_VALUE_FLAGS, "--name"]));
+  const target = parsed.positionals[0];
+  if (!target || parsed.positionals.length > 1) {
+    fail("rename requires exactly one <target>", 2);
+  }
+  const name = parsed.values.get("--name");
+  const clear = parsed.flags.has("--clear");
+  if ((name === undefined) === !clear) {
+    fail("rename requires exactly one of --name NAME or --clear", 2);
+  }
+
+  const resolved = await resolveGuarded(target as string, options, parsed);
+
+  let result: unknown;
+  try {
+    result = await agentRename(target as string, clear ? null : (name as string), options);
+  } catch (err) {
+    if (isAgentRpcError(err)) fail(err.message, 1, err.code);
+    fail(
+      `herdr session unreachable: ${err instanceof Error ? err.message : String(err)}`,
+      1,
+      "session_unreachable",
+    );
+  }
+  emit({
+    contract: CONTRACT,
+    command: "rename",
+    identity: resolved.identity,
+    name: clear ? null : name,
+    result,
+    generated_at: now(),
+  });
+}
+
+const USAGE = `rebuildup.controls — agent operation core (herdr-plugins.controls/v1)
+
+Usage: bun run src/cli.ts <command> [args] [--session NAME] [--socket PATH] [--timeout MS]
+
+Commands:
+  capability                                  Contract/provider/operation discovery (offline)
+  send <target> <text...> [--wait] [--wait-until STATUS]... [--timeout-ms MS]
+  wait <target> [--until STATUS]... [--timeout-ms MS]
+  interrupt <target> [--key KEY]... [--keys k1,k2]   (PTY-level keys; default: esc)
+  read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--no-strip-ansi]
+  rename <target> (--name NAME | --clear)
+
+Identity guards (all commands): --expect-pane ID --expect-state-seq N --expect-agent-session VALUE
+  Any mismatch aborts with stale_generation before the agent.* call.
+
+Errors: {contract, ok:false, error:{code,message,kind?}} on stderr; exit 1 handled, 2 usage.`;
+
+async function main(): Promise<void> {
+  const options = parseArgs(process.argv.slice(2));
+  switch (options.command) {
+    case "capability":
+      return cmdCapability();
+    case "send":
+      return cmdSend(options);
+    case "wait":
+      return cmdWait(options);
+    case "interrupt":
+      return cmdInterrupt(options);
+    case "read":
+      return cmdRead(options);
+    case "rename":
+      return cmdRename(options);
+    case "help":
+    case "--help":
+    case "-h":
+      process.stdout.write(`${USAGE}\n`);
+      return;
+    default:
+      fail(`unknown command: ${options.command}\n\n${USAGE}`, 2);
+  }
+}
+
+if (import.meta.main) {
+  main().catch((err) => {
+    process.stderr.write(
+      `${JSON.stringify({
+        contract: CONTRACT,
+        ok: false,
+        error: { code: "error", message: String(err) },
+      })}\n`,
+    );
+    process.exit(1);
+  });
+}

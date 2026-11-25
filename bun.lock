@@ -22,6 +22,10 @@
       "name": "@herdr-plugins/checkpoints",
       "version": "0.4.0",
     },
+    "plugins/controls": {
+      "name": "@herdr-plugins/controls",
+      "version": "0.6.0",
+    },
     "plugins/conversations": {
       "name": "@herdr-plugins/conversations",
       "version": "0.5.0",
@@ -69,6 +73,8 @@
     "@herdr-plugins/checkpoints": ["@herdr-plugins/checkpoints@workspace:plugins/checkpoints"],
 
     "@herdr-plugins/client": ["@herdr-plugins/client@workspace:packages/herdr-client"],
+
+    "@herdr-plugins/controls": ["@herdr-plugins/controls@workspace:plugins/controls"],
 
     "@herdr-plugins/conversations": ["@herdr-plugins/conversations@workspace:plugins/conversations"],
 
