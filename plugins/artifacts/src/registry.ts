@@ -91,13 +91,37 @@ export function sniffMime(head: Buffer): string {
   // Text-ish content: decode and look for HTML/SVG shape in the prefix.
   if (head.includes(0)) return "application/octet-stream";
   const text = head.toString("utf8");
-  const lower = text.slice(0, 1024).toLowerCase();
-  const trimmed = lower.replace(/^﻿/, "").trimStart();
-  if (/<!doctype html|<html[\s>]/.test(trimmed)) return "text/html";
+  // Upstream HtmlRender rule (HTML_DOCUMENT_START): the document must
+  // *open* like HTML — `<!doctype html` or `<html` after optional
+  // whitespace/BOM. A doctype buried mid-document is not HTML.
+  const body = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  if (HTML_DOCUMENT_START.test(body)) return "text/html";
+  const lower = body.slice(0, 1024).toLowerCase();
+  const trimmed = lower.trimStart();
   if (/^<\?xml[\s?]/.test(trimmed) && lower.includes("<svg")) return "image/svg+xml";
   if (trimmed.startsWith("<svg")) return "image/svg+xml";
   return "text/plain";
 }
+
+/** Upstream `HtmlRender` document-start rule (anchored, BOM tolerated). */
+const HTML_DOCUMENT_START = /^\s*<(?:!doctype\s+html|html)[\s>]/i;
+
+/** Upstream `HtmlRender` file rule: resolved path must end in .html/.htm. */
+const HTML_FILE_EXTENSION = /\.html?$/i;
+
+/** Extension → concrete MIME used for sniff-vs-extension mismatch warnings. */
+const EXT_MIME: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".bmp": "image/bmp",
+  ".svg": "image/svg+xml",
+  ".pdf": "application/pdf",
+  ".html": "text/html",
+  ".htm": "text/html",
+};
 
 const KIND_BY_EXT: Record<string, ArtifactKind> = {
   ".html": "html",
@@ -249,22 +273,44 @@ export async function registerArtifact(options: RegisterOptions): Promise<Artifa
   const cap = MAX_BYTES[kind];
   const warnings: string[] = [];
 
-  // HTML shape validation is a refusal (upstream HtmlRender rules); other
-  // kinds record a mime_mismatch warning instead of failing.
-  if (kind === "html" && mime !== "text/html") {
-    fail("mime_mismatch", "invalid", `kind 'html' requires HTML leading bytes; sniffed ${mime}`, {
-      sniffed_mime: mime,
-      artifact_kind: kind,
-    });
-  }
-  const expectedImage = kind === "image" && !mime.startsWith("image/") && mime !== "image/svg+xml";
-  const expectedPdf = kind === "pdf" && mime !== "application/pdf";
-  if (
-    (expectedImage || expectedPdf) &&
-    mime !== "text/plain" &&
-    mime !== "application/octet-stream"
-  ) {
-    warnings.push("mime_mismatch");
+  // Kind-specific validation (T3 #142, upstream HtmlRender/attachmentStore
+  // rules, ADR-0024 §4). HTML is the only refusal kind: path sources must
+  // keep a .html/.htm name on the *resolved* path and the bytes must open
+  // like a document; stdin bytes are judged on content alone (the
+  // upstream "pass html instead" equivalent — there is no filename to
+  // check). image/pdf/file/other record structured warnings instead.
+  if (kind === "html") {
+    if (hasPath && realSourcePath !== undefined && !HTML_FILE_EXTENSION.test(realSourcePath)) {
+      fail(
+        "invalid_html",
+        "invalid",
+        `kind 'html' requires a .html/.htm file name; resolved path is ${realSourcePath}`,
+        { artifact_kind: kind, resolved_path: realSourcePath },
+      );
+    }
+    if (mime !== "text/html") {
+      fail("mime_mismatch", "invalid", `kind 'html' requires HTML leading bytes; sniffed ${mime}`, {
+        sniffed_mime: mime,
+        artifact_kind: kind,
+      });
+    }
+  } else {
+    // A concrete sniffed type (not generic text/plain or
+    // application/octet-stream) that disagrees with the kind family or
+    // with the filename extension is reported as a structured warning —
+    // never a refusal for non-html kinds (ADR-0024 §4).
+    const concrete = mime !== "text/plain" && mime !== "application/octet-stream";
+    if (concrete) {
+      const kindMismatch =
+        (kind === "image" && mime !== "image/svg+xml" && !mime.startsWith("image/")) ||
+        (kind === "pdf" && mime !== "application/pdf");
+      if (kindMismatch) warnings.push("mime_mismatch");
+      const ext = path.extname(filename ?? "").toLowerCase();
+      const extMime = EXT_MIME[ext];
+      if (extMime !== undefined && mime !== extMime) {
+        warnings.push("extension_mime_mismatch");
+      }
+    }
   }
 
   const artifactId = newArtifactId();
@@ -333,6 +379,12 @@ export async function registerArtifact(options: RegisterOptions): Promise<Artifa
   if (options.agentSession !== undefined) record.owner.agent_session = options.agentSession;
   if (options.refs !== undefined && options.refs.length > 0) record.refs = [...options.refs];
   if (warnings.length > 0) record.warnings = warnings;
+  // HTML artifacts carry the render-isolation notice as metadata: the
+  // plugin validates shape only; sandbox/CSP is a client requirement
+  // (ADR-0024 §4, issue #142).
+  if (kind === "html") {
+    record.meta = { render: { isolation: "required", policy: "client" } };
+  }
 
   // Index insert under the single-writer lock; the payload copy above is
   // already durable, so a failed insert leaves a detectable orphan dir.
@@ -449,6 +501,10 @@ export function agentSessionForPane(snapshot: SessionSnapshot, paneId: string): 
 export interface ListOptions {
   kind?: ArtifactKind | undefined;
   paneId?: string | undefined;
+  /** Exact match on owner.agent_session. */
+  agentSession?: string | undefined;
+  /** Exact match on owner.created_by. */
+  createdBy?: CreatedBy | undefined;
   /** Filter on the record's session name (not the live session). */
   session?: string | undefined;
   limit?: number | undefined;
@@ -480,12 +536,18 @@ function applyFilters(
   options: {
     kind?: ArtifactKind | undefined;
     paneId?: string | undefined;
+    agentSession?: string | undefined;
+    createdBy?: CreatedBy | undefined;
     session?: string | undefined;
   },
 ): AnnotatedArtifact[] {
   return records.filter((record) => {
     if (options.kind !== undefined && record.kind !== options.kind) return false;
     if (options.paneId !== undefined && record.owner.pane_id !== options.paneId) return false;
+    if (options.agentSession !== undefined && record.owner.agent_session !== options.agentSession)
+      return false;
+    if (options.createdBy !== undefined && record.owner.created_by !== options.createdBy)
+      return false;
     if (options.session !== undefined && record.session !== options.session) return false;
     return true;
   });
@@ -539,9 +601,17 @@ export async function getArtifact(
 
 export interface SearchOptions extends ListOptions {
   query: string;
+  /** Inclusive lower bound on created_at (ISO-8601, validated by the CLI). */
   since?: string | undefined;
+  /** Inclusive upper bound on created_at (ISO-8601, validated by the CLI). */
+  until?: string | undefined;
 }
 
+/**
+ * Free-text surface: identity, kind/mime, filename, owner fields, host,
+ * session, and back-references — metadata only, never payload bytes
+ * (issue #142: 検索は filename・metadata、content scan はしない).
+ */
 function searchableText(record: AnnotatedArtifact): string {
   return [
     record.artifact_id,
@@ -549,8 +619,12 @@ function searchableText(record: AnnotatedArtifact): string {
     record.kind,
     record.mime,
     record.session,
+    record.host,
     path.basename(record.storage.ref),
     record.owner.pane_id ?? "",
+    record.owner.agent_session ?? "",
+    record.owner.created_by,
+    ...(record.refs ?? []),
   ]
     .join("\n")
     .toLowerCase();
@@ -577,6 +651,7 @@ export async function searchArtifacts(options: SearchOptions): Promise<{
     applyFilters(annotated, options).filter((record) => {
       if (!searchableText(record).includes(query)) return false;
       if (options.since !== undefined && record.created_at < options.since) return false;
+      if (options.until !== undefined && record.created_at > options.until) return false;
       return true;
     }),
   );
@@ -642,5 +717,166 @@ export async function deleteArtifact(artifactId: string, force: boolean): Promis
     artifact_id: artifactId,
     storage_mode: removed.storage.mode,
     removed_payload: removedPayload,
+  };
+}
+
+export type VerifyStatus = "ok" | "corrupt" | "missing";
+
+/** Per-artifact integrity verdict produced by `verify` (issue #142). */
+export interface ArtifactVerification {
+  artifact_id: string;
+  /**
+   * `ok` — payload present and hash/size/mime/metadata all consistent;
+   * `corrupt` — payload present but a check failed or the record's
+   * storage metadata is inconsistent; `missing` — payload absent,
+   * not a regular file, or unsafe (symlink inside the artifacts tree).
+   */
+  status: VerifyStatus;
+  /** Structured issue codes explaining a non-ok status. */
+  issues: string[];
+  checks: {
+    payload_exists: boolean;
+    /** null when the payload could not be read. */
+    sha256_match: boolean | null;
+    size_match: boolean | null;
+    mime_match: boolean | null;
+  };
+  /** The annotated record (same shape as `get`). */
+  artifact: AnnotatedArtifact;
+}
+
+/**
+ * Re-check one record against the filesystem: payload existence,
+ * sha256 re-hash, size, re-sniffed MIME, storage-layout consistency,
+ * and oversize-flag consistency. Register-time warnings are historical
+ * facts and are NOT re-reported as verify issues — only current
+ * inconsistencies are.
+ */
+async function verifyRecord(
+  record: ArtifactRecord,
+  live: ReadonlySet<string> | null,
+): Promise<ArtifactVerification> {
+  const annotated = await annotate(record, live);
+  const issues: string[] = [];
+  const checks: ArtifactVerification["checks"] = {
+    payload_exists: false,
+    sha256_match: null,
+    size_match: null,
+    mime_match: null,
+  };
+
+  // Storage-layout consistency is a metadata check independent of
+  // payload readability.
+  let metadataBroken = false;
+  let payloadPath: string | null;
+  if (record.storage.mode === "state_copy") {
+    payloadPath = expectedStoredPath(record);
+    if (payloadPath === null) {
+      metadataBroken = true;
+      issues.push("storage_ref_invalid");
+    }
+  } else {
+    payloadPath = record.storage.resolved_path;
+  }
+
+  let actualSize: number | null = null;
+  if (payloadPath !== null) {
+    try {
+      // state_copy payloads are lstat'ed so a symlink inside the
+      // artifacts tree is never followed (ADR-0024 §2); path_ref
+      // targets are external files and are stat'ed.
+      const info =
+        record.storage.mode === "state_copy" ? await lstat(payloadPath) : await stat(payloadPath);
+      const usable =
+        record.storage.mode === "state_copy"
+          ? info.isFile() && !info.isSymbolicLink()
+          : info.isFile();
+      if (!usable) {
+        issues.push("storage_ref_missing");
+      } else {
+        checks.payload_exists = true;
+        actualSize = info.size;
+        const [digest, head] = await Promise.all([sha256File(payloadPath), readHead(payloadPath)]);
+        checks.sha256_match = digest === record.sha256;
+        checks.size_match = info.size === record.size;
+        checks.mime_match = sniffMime(head) === record.mime;
+        if (checks.sha256_match === false) issues.push("sha256_mismatch");
+        if (checks.size_match === false) issues.push("size_mismatch");
+        if (checks.mime_match === false) issues.push("mime_drift");
+      }
+    } catch {
+      issues.push("storage_ref_missing");
+    }
+  }
+
+  // The oversize flag must agree with the best-known current size
+  // (actual payload size when readable, recorded size otherwise).
+  const effectiveSize = actualSize ?? record.size;
+  if (effectiveSize > MAX_BYTES[record.kind] !== record.oversize) {
+    issues.push("oversize_flag_inconsistent");
+  }
+
+  let status: VerifyStatus;
+  if (metadataBroken) {
+    status = "corrupt";
+  } else if (!checks.payload_exists) {
+    status = "missing";
+  } else {
+    status = issues.length === 0 ? "ok" : "corrupt";
+  }
+  return { artifact_id: record.artifact_id, status, issues, checks, artifact: annotated };
+}
+
+export interface VerifyOptions {
+  /** Verify a single artifact; omit to verify the whole index. */
+  artifactId?: string | undefined;
+  snapshot: SessionSnapshot | null;
+}
+
+export async function verifyArtifacts(options: VerifyOptions): Promise<{
+  results: ArtifactVerification[];
+  summary: { total: number; ok: number; corrupt: number; missing: number };
+  orphans: string[];
+  /** Index ids whose persisted records failed parsing (same as list/search). */
+  corrupt: string[];
+}> {
+  const state = await loadState();
+  let records = Object.values(state.artifacts);
+  if (options.artifactId !== undefined) {
+    if (!ARTIFACT_ID_PATTERN.test(options.artifactId)) {
+      fail(
+        "artifact_not_found",
+        "not_found",
+        `unknown or malformed artifact_id: ${options.artifactId}`,
+        {
+          artifact_id: options.artifactId,
+        },
+      );
+    }
+    const record = state.artifacts[options.artifactId];
+    if (record === undefined) {
+      fail("artifact_not_found", "not_found", `artifact not found: ${options.artifactId}`, {
+        artifact_id: options.artifactId,
+      });
+    }
+    records = [record];
+  }
+  const live = livePaneIdSet(options.snapshot);
+  const results: ArtifactVerification[] = [];
+  for (const record of records) {
+    results.push(await verifyRecord(record, live));
+  }
+  results.sort((a, b) => a.artifact_id.localeCompare(b.artifact_id));
+  const summary = {
+    total: results.length,
+    ok: results.filter((r) => r.status === "ok").length,
+    corrupt: results.filter((r) => r.status === "corrupt").length,
+    missing: results.filter((r) => r.status === "missing").length,
+  };
+  return {
+    results,
+    summary,
+    orphans: await orphanIds(new Set(Object.keys(state.artifacts))),
+    corrupt: [...state.corrupt].sort(),
   };
 }

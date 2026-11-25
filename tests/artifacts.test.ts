@@ -139,6 +139,7 @@ describe("artifacts cli (draft scaffold)", () => {
       "list",
       "get",
       "search",
+      "verify",
       "delete",
     ]);
     expect(doc.planned_commands).toEqual([...PLANNED_COMMANDS]);
