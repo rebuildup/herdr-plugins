@@ -1,5 +1,5 @@
 /**
- * rebuildup.git CLI — read-only Git status/diff contract
+ * rebuildup.git CLI — Git status/diff plus local mutation contract
  * (`herdr-plugins.git/v1`) shared by the herdr TUI (via manifest actions),
  * agents, and external clients such as herdr-t3. Single JSON document on
  * stdout; diagnostics on stderr. Exit 0 success, 1 handled error, 2 usage.
@@ -19,11 +19,18 @@ import {
   sessionSnapshot,
 } from "../../../packages/herdr-client/src/index";
 import {
+  assertSafeGitArg,
+  collectBranchCreate,
+  collectBranchSwitch,
+  collectCommit,
   collectCompare,
   collectDiff,
   collectFiles,
   collectLog,
+  collectStage,
   collectStatus,
+  collectUnstage,
+  collectUpstream,
   type DiffFormat,
   type DiffRequest,
   GitError,
@@ -486,6 +493,183 @@ async function cmdCompare(options: CliOptions): Promise<void> {
   }
 }
 
+/** Resolve pane → snapshot → repo root; shared by all repo commands. */
+async function repoRootForPane(
+  options: CliOptions,
+  config: PluginConfig,
+  valueFlags: string[] = [],
+): Promise<{ paneId: string; repoRoot: string }> {
+  const paneId = await resolvePaneId(options.args, valueFlags);
+  const snapshot = await sessionSnapshot(options);
+  const pane = await findPane(snapshot, paneId);
+  const cwd = paneCwd(pane);
+  try {
+    const repoRoot = (await resolveRepo(cwd, { timeoutMs: effectiveTimeoutMs(options, config) }))
+      .root;
+    return { paneId, repoRoot };
+  } catch (err) {
+    if (err instanceof GitError) fail(err.message, 1, err.kind);
+    throw err;
+  }
+}
+
+function mutationPayload(
+  command: string,
+  paneId: string,
+  repoRoot: string,
+  fields: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    contract: CONTRACT,
+    command,
+    pane_id: paneId,
+    repo_root: repoRoot,
+    ok: true,
+    ...fields,
+    generated_at: new Date().toISOString(),
+  };
+}
+
+function pathspecArgs(args: string[]): string[] {
+  const paths = flagValues(args, "--path");
+  for (const p of paths) {
+    if (p.startsWith("-")) fail(`invalid --path value (option-like rejected): ${p}`, 2);
+  }
+  return paths;
+}
+
+async function cmdStageOrUnstage(options: CliOptions, unstaging: boolean): Promise<void> {
+  const command = unstaging ? "unstage" : "stage";
+  const config = await loadConfig();
+  const { paneId, repoRoot } = await repoRootForPane(options, config, ["--path"]);
+  const paths = pathspecArgs(options.args);
+  const all = hasFlag(options.args, "--all");
+  try {
+    const run = unstaging ? collectUnstage : collectStage;
+    const output = await run(
+      repoRoot,
+      { all, paths: paths.length > 0 ? paths : undefined },
+      { timeoutMs: effectiveTimeoutMs(options, config) },
+    );
+    emit(mutationPayload(command, paneId, repoRoot, { all, paths, output }));
+  } catch (err) {
+    if (err instanceof GitError) fail(err.message, 1, err.kind);
+    throw err;
+  }
+}
+
+async function cmdCommit(options: CliOptions): Promise<void> {
+  const config = await loadConfig();
+  const { paneId, repoRoot } = await repoRootForPane(options, config, ["-m"]);
+  const messages = flagValues(options.args, "-m");
+  const allowEmpty = hasFlag(options.args, "--allow-empty");
+  try {
+    const result = await collectCommit(
+      repoRoot,
+      { messages, allowEmpty },
+      { timeoutMs: effectiveTimeoutMs(options, config) },
+    );
+    emit(
+      mutationPayload("commit", paneId, repoRoot, {
+        sha: result.sha,
+        summary: result.summary,
+      }),
+    );
+  } catch (err) {
+    if (err instanceof GitError) fail(err.message, 1, err.kind);
+    throw err;
+  }
+}
+
+/**
+ * `branch create|switch <pane> <name>` and `upstream <pane> <ref>` share
+ * the "optional pane positional + required trailing value" shape: when a
+ * pane is resolvable from env/context the first positional is the value,
+ * otherwise the first positional is the pane and the second is the value.
+ */
+async function resolvePaneAndValue(
+  options: CliOptions,
+  config: PluginConfig,
+  what: string,
+): Promise<{ paneId: string; repoRoot: string; value: string }> {
+  const envPane = process.env.HERDR_PANE_ID ?? invocationContext().focused_pane_id;
+  const pos = positionals(options.args, []);
+  let paneId: string;
+  let value: string | undefined;
+  if (envPane) {
+    paneId = envPane;
+    value = pos[0];
+  } else {
+    paneId = pos[0] ?? "";
+    value = pos[1];
+  }
+  if (!paneId) fail(`pane id required for ${what}`, 2);
+  if (!value) fail(`${what} requires a ${what === "upstream" ? "ref" : "name"} argument`, 2);
+  try {
+    assertSafeGitArg(value, what === "upstream" ? "upstream ref" : "branch name");
+  } catch (err) {
+    if (err instanceof GitError) fail(err.message, 2, err.kind);
+    throw err;
+  }
+  const snapshot = await sessionSnapshot(options);
+  const pane = await findPane(snapshot, paneId);
+  const cwd = paneCwd(pane);
+  try {
+    const repoRoot = (await resolveRepo(cwd, { timeoutMs: effectiveTimeoutMs(options, config) }))
+      .root;
+    return { paneId, repoRoot, value };
+  } catch (err) {
+    if (err instanceof GitError) fail(err.message, 1, err.kind);
+    throw err;
+  }
+}
+
+async function cmdBranch(options: CliOptions): Promise<void> {
+  const sub = options.args[0];
+  if (sub !== "create" && sub !== "switch") {
+    fail("branch requires a subcommand: create <pane> <name> [--switch] | switch <pane> <name>", 2);
+  }
+  const rest: CliOptions = { ...options, args: options.args.slice(1) };
+  const config = await loadConfig();
+  const { paneId, repoRoot, value: name } = await resolvePaneAndValue(rest, config, "branch");
+  try {
+    const output =
+      sub === "create"
+        ? await collectBranchCreate(
+            repoRoot,
+            { name, switchTo: hasFlag(rest.args, "--switch") },
+            { timeoutMs: effectiveTimeoutMs(options, config) },
+          )
+        : await collectBranchSwitch(
+            repoRoot,
+            { name },
+            {
+              timeoutMs: effectiveTimeoutMs(options, config),
+            },
+          );
+    emit(mutationPayload("branch", paneId, repoRoot, { action: sub, name, output }));
+  } catch (err) {
+    if (err instanceof GitError) fail(err.message, 1, err.kind);
+    throw err;
+  }
+}
+
+async function cmdUpstream(options: CliOptions): Promise<void> {
+  const config = await loadConfig();
+  const { paneId, repoRoot, value } = await resolvePaneAndValue(options, config, "upstream");
+  try {
+    const output = await collectUpstream(
+      repoRoot,
+      { upstream: value },
+      { timeoutMs: effectiveTimeoutMs(options, config) },
+    );
+    emit(mutationPayload("upstream", paneId, repoRoot, { upstream: value, output }));
+  } catch (err) {
+    if (err instanceof GitError) fail(err.message, 1, err.kind);
+    throw err;
+  }
+}
+
 async function cmdProject(options: CliOptions): Promise<void> {
   const config = await loadConfig();
   const paneId = await resolvePaneId(options.args);
@@ -555,8 +739,22 @@ async function cmdCapability(options: CliOptions): Promise<void> {
     contract: CONTRACT,
     plugin: PLUGIN_ID,
     version: PLUGIN_VERSION,
-    commands: ["capability", "status", "files", "diff", "log", "compare", "project"],
-    read_only: true,
+    commands: [
+      "capability",
+      "status",
+      "files",
+      "diff",
+      "log",
+      "compare",
+      "stage",
+      "unstage",
+      "commit",
+      "branch",
+      "upstream",
+      "project",
+    ],
+    read_only: false,
+    mutation_commands: ["stage", "unstage", "commit", "branch", "upstream"],
     requires: { git: true, bun: true },
     defaults: {
       timeoutMs: config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
@@ -565,7 +763,7 @@ async function cmdCapability(options: CliOptions): Promise<void> {
   });
 }
 
-const USAGE = `rebuildup.git — git status/diff for agent panes (contract ${CONTRACT})
+const USAGE = `rebuildup.git — git status/diff/mutations for agent panes (contract ${CONTRACT})
 
 Usage:
   git status <pane_id> [--session NAME] [--timeout MS]
@@ -575,6 +773,12 @@ Usage:
   git log <pane_id> [--limit N] [--skip N] [--all] [--first-parent]
       [--author X] [--grep X] [--since X] [--until X] [--path PATH]...
   git compare <pane_id> [base [head]] [--max-bytes N]
+  git stage <pane_id> [--all | --path PATH]...
+  git unstage <pane_id> [--all | --path PATH]...
+  git commit <pane_id> -m MSG [-m MSG]... [--allow-empty]
+  git branch create <pane_id> <name> [--switch]
+  git branch switch <pane_id> <name>
+  git upstream <pane_id> <upstream-ref>
   git project <pane_id> [--session NAME]
   git capability
 
@@ -595,6 +799,16 @@ async function main(): Promise<void> {
       return cmdLog(options);
     case "compare":
       return cmdCompare(options);
+    case "stage":
+      return cmdStageOrUnstage(options, false);
+    case "unstage":
+      return cmdStageOrUnstage(options, true);
+    case "commit":
+      return cmdCommit(options);
+    case "branch":
+      return cmdBranch(options);
+    case "upstream":
+      return cmdUpstream(options);
     case "project":
       return cmdProject(options);
     case "capability":
