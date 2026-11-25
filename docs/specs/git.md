@@ -1,8 +1,11 @@
 # Git plugin (`rebuildup.git`) — specification
 
-Stage 1 scope: read-only Git status/diff for herdr panes. Mutation
-operations (staging, commit, push, PR) and Checkpoint integration are later
-stages tracked by Issue #2 / #4.
+Stage 1 scope: read-only Git status/diff for herdr panes, extended in
+v0.2.0 with a structured per-file change list (`files`) and
+pathspec-limited, machine-readable diffs. Commit history, branch
+comparison, mutation operations (staging, commit, push), and PR
+integration are later stages tracked by Issues #23–#25 (tickets
+#36–#39); Checkpoint integration is Issue #4.
 
 ## Purpose
 
@@ -32,13 +35,17 @@ only runs read-only `git` commands and projects display metadata.
 | --- | --- |
 | `capability` | Contract/plugin/command discovery. |
 | `status` | Repo identity + branch/upstream/ahead-behind + change counts. |
-| `diff` | Patch or `--stat` for worktree, index (`--staged`), or revisions. |
+| `files` | Structured per-file change list (porcelain `-z`). |
+| `diff` | Patch, `--stat`, `--name-status`, or `--numstat` for worktree, index (`--staged`), or revisions; `--path` pathspec filter. |
 | `project` | Compute `status` for a pane and project pane metadata tokens. |
 
-`status`/`diff`/`project` accept `--session`, `--socket`, `--timeout`
-(overrides `config.json` `timeoutMs`, default 10000) and `--max-bytes`
-for `diff` (default 262144). All output is a single JSON document; errors
-are `{ok:false,error:{code,message}}` on stderr with exit 1 (2 for usage).
+`status`/`files`/`diff`/`project` accept `--session`, `--socket`,
+`--timeout` (overrides `config.json` `timeoutMs`, default 10000) and
+`diff` accepts `--max-bytes` (default 262144). `files`/`diff` accept
+repeatable `--path <pathspec>` values, passed to git after `--`; values
+starting with `-` are rejected. All output is a single JSON document;
+errors are `{ok:false,error:{code,message}}` on stderr with exit 1
+(2 for usage).
 
 ## Change accounting
 
@@ -52,14 +59,46 @@ are `{ok:false,error:{code,message}}` on stderr with exit 1 (2 for usage).
 Counts are file-level, matching `git status` semantics. Renames count as
 one entry.
 
+## File-level changes (`files`)
+
+`files` runs `git status --porcelain=v1 -z` so paths are unquoted and
+NUL-delimited — special characters (spaces, quotes, non-ASCII, newlines)
+survive verbatim. Each entry carries:
+
+| Field | Meaning |
+| --- | --- |
+| `path` | Repo-relative path (destination side for renames/copies). |
+| `old_path` | Source path for `R`/`C` entries, else `null`. |
+| `index` / `worktree` | Raw porcelain X/Y status columns. |
+| `kind` | `added`/`modified`/`deleted`/`renamed`/`copied`/`typechange`/`untracked`/`conflicted`/`ignored`. |
+| `staged` / `unstaged` | Whether the index/worktree side differs from its base. |
+| `binary` | From `git diff --numstat` on both sides; `null` for untracked/conflicted/ignored where binary detection is not meaningful. |
+
+`--path` pathspecs filter the status output (`git status -- <path>...`).
+Binary detection is repo-wide (numstat is not pathspec-scoped) but only
+annotates listed files.
+
 ## Diff bounds
 
-`diff` is bounded: default 256 KiB of patch output, configurable via
+`diff` is bounded: default 256 KiB of output, configurable via
 `--max-bytes` or `config.json` `diffMaxBytes`. Output that exceeds the cap
 is truncated with `"truncated": true` in the result — the client must not
 treat truncated output as complete. `GIT_TERMINAL_PROMPT=0` and a hard
 timeout prevent credential prompts or hung remotes from blocking; a
 `timeout` error is returned instead.
+
+Output formats (exactly one per invocation):
+
+- patch (default) — `git diff` unified patch.
+- `--stat` — `git diff --stat` summary.
+- `--name-status` — `git diff --name-status -z`; status letter and paths
+  are NUL-separated so unusual paths are unquoted.
+- `--numstat` — `git diff --numstat -z`; added/deleted counts per path,
+  `-` for binary, NUL-delimited.
+
+`--path <pathspec>` (repeatable) appends `-- <path>...` to the git
+invocation, combining freely with `--staged` and revisions. Revisions
+remain positional argv elements; option-like values are rejected.
 
 ## Metadata projection
 

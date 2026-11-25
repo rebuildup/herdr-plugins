@@ -1,7 +1,7 @@
 # Contract `herdr-plugins.git/v1`
 
 Structured JSON CLI contract for the `rebuildup.git` herdr plugin.
-Stage 1 is read-only: no command mutates the repository or herdr state.
+Currently read-only: no command mutates the repository or herdr state.
 Follows the same conventions as `herdr-plugins.inbox/v1`
 (`docs/contracts/inbox-v1.md`).
 
@@ -18,7 +18,9 @@ Follows the same conventions as `herdr-plugins.inbox/v1`
 ```bash
 cd "$(herdr plugin list --json | jq -r '.result.plugins[] | select(.plugin_id=="rebuildup.git") | .plugin_root')"
 bun run src/cli.ts status <pane_id> [--session NAME] [--socket PATH] [--timeout MS]
-bun run src/cli.ts diff <pane_id> [--staged] [--stat] [--max-bytes N] [rev [rev]]
+bun run src/cli.ts files <pane_id> [--path PATH]... [--session NAME]
+bun run src/cli.ts diff <pane_id> [--staged] [--stat|--name-status|--numstat]
+    [--path PATH]... [--max-bytes N] [rev [rev]]
 bun run src/cli.ts project <pane_id> [--session NAME]
 bun run src/cli.ts capability
 ```
@@ -77,29 +79,82 @@ Error codes (in `error.code` or a structured `error.kind`): `not_a_repo`
 `timeout`, `git_error` (non-zero git exit, message includes stderr),
 `pane_not_found`, `usage`.
 
+## `files`
+
+```json
+{
+  "contract": "herdr-plugins.git/v1",
+  "command": "files",
+  "pane_id": "w1:p1",
+  "repo_root": "/path/to/worktree",
+  "pathspec": ["src/"],
+  "files": [
+    {
+      "path": "src/new name.ts",
+      "old_path": "src/old.ts",
+      "index": "R",
+      "worktree": " ",
+      "kind": "renamed",
+      "staged": true,
+      "unstaged": false,
+      "binary": false
+    }
+  ],
+  "generated_at": "2026-11-25T00:00:00.000Z"
+}
+```
+
+`files` lists every changed path in the pane's repository, parsed from
+`git status --porcelain=v1 -z` (paths are verbatim, never C-quoted).
+`kind` is one of `added`, `modified`, `deleted`, `renamed`, `copied`,
+`typechange`, `untracked`, `conflicted`, `ignored`. `old_path` is set only
+for renames/copies. `binary` is `true`/`false` for tracked changes
+(derived from `git diff --numstat`) and `null` for
+untracked/conflicted/ignored entries.
+
+`--path <pathspec>` (repeatable) limits the listing via
+`git status -- <path>...`. Option-like pathspec values (`-`-prefixed)
+are rejected with a usage error.
+
 ## `diff`
 
-Returns the patch (or stat summary) for the pane's repository.
+Returns the patch (or a machine-readable summary) for the pane's
+repository.
 
 Options:
 
 - `--staged` — diff index vs HEAD instead of worktree vs index.
-- `--stat` — `git diff --stat` summary instead of the patch.
+- `--stat` / `--name-status` / `--numstat` — output format (exactly one;
+  default is the unified patch). `--name-status` and `--numstat` use `-z`
+  NUL-delimited output so unusual paths are unquoted.
+- `--path PATH` — repeatable pathspec filter, passed to git after `--`.
+  Option-like values are rejected.
 - `--max-bytes N` — output cap (default 262144).
 - positional revisions — `diff [--staged] [rev]` or `[revA revB]`; passed
   to `git diff` verbatim after `--` safety is not needed because they are
   argv elements, not shell text. Revisions are validated to reject
-  option-like values (`-`-prefixed) unless after `--`.
+  option-like values (`-`-prefixed); use `--` pathspecs via `--path`
+  instead of revision/path ambiguity.
 
-Result adds:
+Result fields:
 
 ```json
-{ "diff": "...", "stat": null, "truncated": false, "bytes": 1234 }
+{
+  "format": "patch",
+  "output": "…patch text…",
+  "stat_output": null,
+  "name_status_output": null,
+  "numstat_output": null,
+  "paths": ["src/a.ts"],
+  "truncated": false,
+  "bytes": 1234
+}
 ```
 
-`truncated: true` means the patch was cut at the byte cap — clients must
-not treat it as complete. `--stat` output is never truncated in practice
-but the flag still applies.
+Exactly one of `output` (patch), `stat_output`, `name_status_output`, or
+`numstat_output` carries the git output; the others are `null`.
+`truncated: true` means the output was cut at the byte cap — clients must
+not treat it as complete.
 
 ## `project`
 
@@ -122,8 +177,8 @@ the status data remains authoritative.
 {
   "contract": "herdr-plugins.git/v1",
   "plugin": "rebuildup.git",
-  "version": "0.1.0",
-  "commands": ["capability", "status", "diff", "project"],
+  "version": "0.2.0",
+  "commands": ["capability", "status", "files", "diff", "project"],
   "read_only": true,
   "requires": { "git": true, "bun": true },
   "defaults": { "timeoutMs": 10000, "diffMaxBytes": 262144 }

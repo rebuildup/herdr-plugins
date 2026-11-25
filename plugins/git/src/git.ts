@@ -181,6 +181,119 @@ export function parsePorcelain(output: string): ChangeCounts {
   return counts;
 }
 
+export type FileChangeKind =
+  | "added"
+  | "modified"
+  | "deleted"
+  | "renamed"
+  | "copied"
+  | "typechange"
+  | "untracked"
+  | "conflicted"
+  | "ignored";
+
+export interface FileChange {
+  /** Path relative to the repo root (the "to" side for renames/copies). */
+  path: string;
+  /** Source path for renames/copies; null otherwise. */
+  oldPath: string | null;
+  /** Raw porcelain XY columns for clients that need the detail. */
+  index: string;
+  worktree: string;
+  kind: FileChangeKind;
+  staged: boolean;
+  unstaged: boolean;
+  /**
+   * Binary detection from `git diff --numstat`: true/false for tracked
+   * changes, null when not determinable (untracked, conflicted).
+   */
+  binary: boolean | null;
+}
+
+function fileKind(x: string, y: string): FileChangeKind {
+  if (x === "?" && y === "?") return "untracked";
+  if (x === "!" && y === "!") return "ignored";
+  if (x === "U" || y === "U" || (x === "A" && y === "A") || (x === "D" && y === "D")) {
+    return "conflicted";
+  }
+  if (x === "R" || y === "R") return "renamed";
+  if (x === "C" || y === "C") return "copied";
+  if (x === "A" || y === "A") return "added";
+  if (x === "D" || y === "D") return "deleted";
+  if (x === "T" || y === "T") return "typechange";
+  return "modified";
+}
+
+/**
+ * Parse `git status --porcelain=v1 -z` output. With `-z`, paths are
+ * unquoted NUL-terminated fields, so special characters survive verbatim.
+ * Rename/copy records carry the destination path on the XY line and the
+ * source path as the following NUL field.
+ */
+export function parsePorcelainZ(output: string): FileChange[] {
+  const tokens = output.split("\0").filter((t) => t.length > 0);
+  const entries: FileChange[] = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i] as string;
+    if (token.length < 4) continue;
+    const x = token[0] as string;
+    const y = token[1] as string;
+    const path = token.slice(3);
+    let oldPath: string | null = null;
+    if (x === "R" || y === "R" || x === "C" || y === "C") {
+      oldPath = tokens[++i] ?? null;
+    }
+    const kind = fileKind(x, y);
+    const tracked = kind !== "untracked" && kind !== "ignored" && kind !== "conflicted";
+    entries.push({
+      path,
+      oldPath,
+      index: x,
+      worktree: y,
+      kind,
+      staged: tracked && x !== " " && x !== "?" && x !== "!",
+      unstaged: tracked && y !== " " && y !== "?" && y !== "!",
+      binary: null,
+    });
+  }
+  return entries;
+}
+
+/**
+ * Parse `git diff --numstat -z` output into the set of paths reported as
+ * binary (`-` added/deleted counts). Rename records carry an empty inline
+ * path field followed by old and new path tokens.
+ */
+export function parseNumstatZ(output: string): {
+  binary: Set<string>;
+  stats: Map<string, { added: number; deleted: number }>;
+} {
+  const tokens = output.split("\0").filter((t) => t.length > 0);
+  const binary = new Set<string>();
+  const stats = new Map<string, { added: number; deleted: number }>();
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i] as string;
+    const match = token.match(/^(-|\d+)\t(-|\d+)\t([\s\S]*)$/);
+    if (!match) continue;
+    const added = match[1] as string;
+    const deleted = match[2] as string;
+    const inline = match[3] as string;
+    let path = inline;
+    if (inline === "") {
+      // Rename/copy: next two NUL fields are old then new path.
+      i += 2;
+      path = tokens[i] ?? "";
+    }
+    if (path === "") continue;
+    if (added === "-") {
+      binary.add(path);
+    } else {
+      stats.set(path, { added: Number(added), deleted: Number(deleted) });
+    }
+  }
+  return { binary, stats };
+}
+
 export interface BranchInfo {
   name: string;
   detached: boolean;
@@ -254,10 +367,55 @@ export async function collectStatus(
   return { repo, branch, changes: parsePorcelain(porcelain) };
 }
 
+export interface FilesResult {
+  files: FileChange[];
+}
+
+/**
+ * Structured per-file change list for the worktree + index. Binary flags
+ * come from `git diff --numstat` on both sides; untracked/conflicted
+ * entries report `binary: null`.
+ */
+export async function collectFiles(
+  repoRoot: string,
+  request: { pathspec?: string[] | undefined } = {},
+  options: { timeoutMs?: number } = {},
+): Promise<FilesResult> {
+  const args = ["status", "--porcelain=v1", "-z", "--untracked-files=normal"];
+  if (request.pathspec && request.pathspec.length > 0) {
+    args.push("--", ...request.pathspec);
+  }
+  const porcelain = await gitOk(repoRoot, args, options);
+  const files = parsePorcelainZ(porcelain);
+
+  const numstatArgs = (extra: string[]) => ["diff", "--numstat", "-z", ...extra];
+  const [unstaged, staged] = await Promise.all([
+    gitOk(repoRoot, numstatArgs([]), options),
+    gitOk(repoRoot, numstatArgs(["--cached"]), options),
+  ]);
+  const binaryPaths = new Set<string>([
+    ...parseNumstatZ(unstaged).binary,
+    ...parseNumstatZ(staged).binary,
+  ]);
+  for (const file of files) {
+    if (file.kind === "untracked" || file.kind === "conflicted" || file.kind === "ignored") {
+      continue;
+    }
+    file.binary =
+      binaryPaths.has(file.path) || (file.oldPath !== null && binaryPaths.has(file.oldPath));
+  }
+  return { files };
+}
+
+export type DiffFormat = "patch" | "stat" | "name-status" | "numstat";
+
 export interface DiffRequest {
   staged?: boolean | undefined;
   stat?: boolean | undefined;
+  format?: DiffFormat | undefined;
   revisions?: string[] | undefined;
+  /** Pathspec limiting the diff (`git diff -- <path>...`). */
+  paths?: string[] | undefined;
   maxBytes?: number | undefined;
 }
 
@@ -279,11 +437,17 @@ export async function collectDiff(
   options: { timeoutMs?: number } = {},
 ): Promise<DiffResult> {
   const maxBytes = request.maxBytes ?? DIFF_DEFAULT_MAX_BYTES;
+  const format = request.format ?? (request.stat ? "stat" : "patch");
   const args = ["diff", "--no-color", "--no-ext-diff"];
   if (request.staged) args.push("--staged");
-  if (request.stat) args.push("--stat");
+  if (format === "stat") args.push("--stat");
+  else if (format === "name-status") args.push("--name-status", "-z");
+  else if (format === "numstat") args.push("--numstat", "-z");
   if (request.revisions && request.revisions.length > 0) {
     args.push(...request.revisions);
+  }
+  if (request.paths && request.paths.length > 0) {
+    args.push("--", ...request.paths);
   }
   // Stream with a byte cap: spawn, accumulate, kill when over the cap.
   return new Promise((resolve, reject) => {
