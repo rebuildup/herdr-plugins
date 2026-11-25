@@ -1,4 +1,4 @@
-# Contract: `herdr-plugins.mcp/v1` (draft)
+# Contract: `herdr-plugins.mcp/v1` (draft — read surface stable)
 
 Versioned structured interface for the `rebuildup.mcp` plugin — a
 **local stdio MCP server** that exposes herdr sessions and sibling
@@ -7,22 +7,32 @@ Boundary, access levels, session resolution, and the remote/HTTP/OAuth
 upstream gap are fixed by ADR-0025; the upstream inventory is canonized
 in `docs/research/mcp-upstream-inventory.md`.
 
-**Status: draft (T1, issue #135).** The read surface stabilizes in T2
-(#138), the mutation surface in T3 (#139), the event surface in T4
-(#140). Until then, tool names/arguments below are the *planned* v1
-surface; `capability` reports `contract_status` so clients can detect
-what is implemented.
+**Status: draft overall; the read surface is stable as of T2 (#138).**
+The mutation surface lands in T3 (#139), the event surface in T4
+(#140). `capability` (CLI and `herdr_capability` tool) reports
+`contract_status` plus a per-surface `surfaces` map and per-tool
+`status` so clients can detect what is implemented.
 
 ## Transport and lifecycle
 
 - MCP over **stdio** (JSON-RPC 2.0, newline-delimited): `initialize`,
-  `tools/list`, `tools/call`, `resources/list`, `resources/read`,
-  `notifications/*` as the MCP spec revision negotiated at
-  `initialize` requires. stdout is protocol-only; diagnostics go to
-  stderr.
+  `ping`, `tools/list`, `tools/call`, `resources/list` (empty),
+  `resources/read` (not found), `notifications/*` (ignored). The
+  `initialize` handshake negotiates the protocol version from
+  `2024-10-07`, `2024-11-05`, `2025-03-26`, `2025-06-18` (newest
+  preferred; an unsupported request falls back to the newest
+  supported). stdout is protocol-only; diagnostics go to stderr.
 - One server process per MCP client (spawned by the client config,
   e.g. `bun run <plugin_root>/src/cli.ts serve --access-level
-  read-only`). No daemon, no resident process (ADR-0002).
+  read-only --session <name>`). No daemon, no resident process
+  (ADR-0002). The process exits when the client's stdin closes.
+- `tools/call` results carry `structuredContent` (the structured
+  document) plus a `content[0].text` JSON rendering. Tool-level
+  failures (contract error codes) return an `isError: true` result
+  whose `structuredContent`/`text` is
+  `{contract, ok:false, error:{code,message,details?}}`; protocol-level
+  failures (bad JSON, unknown method, missing `params.name`) return
+  standard JSON-RPC errors (-32700/-32600/-32601/-32602).
 - Remote HTTP + OAuth/pairing is **out of v1 scope** — upstream gap
   herdrdev/herdr#6199. No custom public server exists or will exist in
   this plugin.
@@ -73,12 +83,35 @@ the MCP client process. `capability` reports the resolved
 `session{socket, name?, key}` so the client can verify the target.
 Saved-machine (`herdr --machine`) targeting is deferred post-v1.
 
-## Tool surface (planned v1)
+**External clients (the #30 use case):** an MCP client running outside
+herdr has no ambient `HERDR_*` env, so it must select the target
+explicitly in its server config — `--session <name>` (or
+`HERDR_SESSION=<name>` env) for a named session, `--socket <path>`
+(or `HERDR_SOCKET_PATH`) for an explicit socket. There is no
+session-discovery channel in v1; `herdr_capability.resolved_session`
+reports what was actually resolved so the client can verify it.
+Per-plugin root overrides for tests/managed installs:
+`HERDR_MCP_ROOT_<NAME>` (e.g. `HERDR_MCP_ROOT_GIT`).
+
+## Tool surface (v1)
 
 Each entry: MCP tool name · required access level · read-only
-annotation (`readOnlyHint`) · backing implementation. Names are
-snake_case per MCP convention; `t3_*`-style prefixes are not used —
-the server IS the herdr surface.
+annotation (`readOnlyHint`) · backing implementation · status.
+Names are snake_case per MCP convention; `t3_*`-style prefixes are not
+used — the server IS the herdr surface. **Implemented (stable, T2
+#138):** all tools in the Capability/discovery and Plugin contract
+reads tables below. Planned tools remain listed by `tools/list` and
+fail honestly with `unsupported` (or `capability_denied` below their
+access floor) until T3/T4.
+
+Tool results are wrapped as
+`{contract, ok:true, tool, result}` in `structuredContent`; plugin-CLI
+backed tools nest the sibling contract document under `result` and
+report `plugin`/`plugin_contract`/`resolved_via`. Results touching
+herdr objects carry the `identity` block (contract "Identity echo");
+`agent_get`/`agent_read` accept optional `expect_state_seq`,
+`expect_agent_session`, `expect_pane` arguments that refuse mismatches
+with `stale_generation`.
 
 ### Capability / discovery
 
@@ -165,7 +198,8 @@ one JSON document on stdout; errors on stderr, exit 1/2):
 - `mcp capability [--session NAME] [--socket PATH] [--access-level L]`
   → contract/version/access-level/tool-table/plugin-availability JSON.
 - `mcp serve [--session NAME] [--socket PATH] [--access-level L]`
-  → stdio MCP server (T2, #138; T1 returns `not_implemented`).
+  → stdio MCP server (implemented, T2 #138; was `not_implemented`
+  in T1).
 - `mcp help`.
 
 ## State and config
@@ -180,5 +214,8 @@ one JSON document on stdout; errors on stderr, exit 1/2):
 `contract` is `herdr-plugins.mcp/vN`. Within v1 only additive optional
 fields and new tools may appear; renaming/removing tools, changing
 access-level semantics, or altering the error model requires v2.
-Stability is declared per surface as #138/#139/#140 complete; the
-Versioning section is finalized when the read surface stabilizes.
+Stability is declared per surface via `surfaces` in `capability`:
+`read` is **stable** (T2, #138 — protocol methods, read tools,
+identity echo, error model), `mutation` and `events` remain `planned`
+until #139/#140 land. The read surface may still gain additive
+optional arguments; breaking changes to it require v2.

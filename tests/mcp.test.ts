@@ -107,7 +107,11 @@ describe("herdr-plugins.mcp/v1 contract skeleton (T1, #135)", () => {
       expect(doc.negotiated_access_level).toBe("read-only");
       expect(doc.access_levels.levels).toEqual(["read-only", "supervised", "full"]);
       expect(doc.tools.length).toBe(TOOL_TABLE.length);
-      expect(doc.tools.every((t: { status: string }) => t.status === "planned")).toBe(true);
+      const implemented = doc.tools.filter((t: { status: string }) => t.status === "implemented");
+      expect(implemented.length).toBe(14); // T2 read surface (#138)
+      expect(doc.surfaces.read).toBe("stable");
+      expect(Array.isArray(doc.plugins)).toBe(true);
+      expect(doc.session_resolution.resolved_via).toBeDefined();
       expect(doc.session.reachable).toBe(false);
       expect(
         doc.upstream_gaps.some((g: { tracking: string }) => g.tracking === "herdrdev/herdr#6199"),
@@ -123,18 +127,38 @@ describe("herdr-plugins.mcp/v1 contract skeleton (T1, #135)", () => {
     }
   });
 
-  test("serve reports not_implemented honestly (T1 skeleton)", async () => {
+  test("serve starts the stdio MCP server (T2, #138)", async () => {
+    // With no herdr socket reachable the server still starts; protocol
+    // handling is covered by tests/mcp-server.test.ts. Here we only
+    // assert the entrypoint no longer reports not_implemented: send an
+    // initialize and expect a JSON-RPC result on stdout.
     const proc = Bun.spawn(["bun", "run", "plugins/mcp/src/cli.ts", "serve"], {
       cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HERDR_SOCKET_PATH: path.join(tempDir(), "missing.sock"),
+      },
+      stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
     });
-    const [stdout, exitCode] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-    expect(exitCode).toBe(1);
-    const doc = JSON.parse(stdout);
-    expect(doc.ok).toBe(false);
-    expect(doc.error.code).toBe("unsupported");
-    expect(doc.error.details.ticket).toBe("#138");
+    proc.stdin.write(
+      `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } })}\n`,
+    );
+    const reader = proc.stdout.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    while (!buf.includes("\n")) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+    }
+    const response = JSON.parse(buf.split("\n")[0] ?? "");
+    expect(response.id).toBe(1);
+    expect(response.result.serverInfo.name).toBe("rebuildup.mcp");
+    expect(response.result.capabilities.tools).toBeDefined();
+    proc.stdin.end();
+    expect(await proc.exited).toBe(0);
   });
 
   test("invalid --access-level is a usage error", async () => {

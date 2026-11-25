@@ -2,10 +2,10 @@
 
 Scope: local stdio MCP server exposing herdr sessions and sibling
 plugin contracts to outside agents. Contract:
-`herdr-plugins.mcp/v1` (**draft**, `docs/contracts/mcp-v1.md`).
-Boundary ADR: ADR-0025. Upstream inventory:
-`docs/research/mcp-upstream-inventory.md`. Decomposition of #30:
-T1 boundary/contract (#135), T2 stdio core + read tools (#138),
+`herdr-plugins.mcp/v1` (**draft — read surface stable**, T2 #138;
+`docs/contracts/mcp-v1.md`). Boundary ADR: ADR-0025. Upstream
+inventory: `docs/research/mcp-upstream-inventory.md`. Decomposition of
+#30: T1 boundary/contract (#135), T2 stdio core + read tools (#138),
 T3 mutation tools + access enforcement (#139), T4 events + live
 verification (#140).
 
@@ -52,7 +52,7 @@ applied to reused pane ids. See contract "Session resolution".
 | Command | Mutating? | Notes |
 | --- | --- | --- |
 | `capability` | no | Contract/version/access-level/tool-table/plugin-availability discovery; works offline for the static parts, probes the session socket for liveness. |
-| `serve` | no (T1: `not_implemented`) | Stdio MCP server entrypoint; implemented in T2 (#138). |
+| `serve` | no | Stdio MCP server (T2, #138): newline-delimited JSON-RPC `initialize`/`ping`/`tools/list`/`tools/call`/`resources/*`; stdout protocol-only, stderr diagnostics; exits on stdin EOF. |
 | `help` | no | Usage text. |
 
 ## Honest-failure rules (inherited invariants)
@@ -69,11 +69,13 @@ applied to reused pane ids. See contract "Session resolution".
 
 ## Verification plan
 
-- T1 (this ticket): contract/spec/ADR + `capability` output test;
+- T1 (#135): contract/spec/ADR + `capability` output test;
   `validate:fast` green.
-- T2: fake herdr socket + fake plugin CLI contract tests
-  (`initialize`/`tools/list`/`tools/call`, read-only denial);
-  isolated-session live check of ≥1 read tool.
+- T2 (#138): fake herdr socket + fake plugin CLI contract tests
+  (`initialize`/`tools/list`/`tools/call`, access-level denial,
+  stale-generation refusal, `plugin_unavailable`) in
+  `tests/mcp-server.test.ts`; isolated-session live check of ≥1 read
+  tool.
 - T3: mutation gating tests (read-only denial, stale generation,
   reused pane id) + isolated-session prompt→wait→read.
 - T4: filter/reconnect/resync tests + live verification record in
