@@ -4,9 +4,11 @@ Stage 1 scope: read-only Git status/diff for herdr panes, extended in
 v0.2.0 with a structured per-file change list (`files`),
 pathspec-limited and machine-readable diffs, commit history (`log`),
 and merge-base branch comparison (`compare`). Local mutation commands
-(`stage`, `unstage`, `commit`, `branch`, `upstream`) and remote
-operations (`fetch`, `push`, `remote` list) landed in v0.2.0; PR
-integration is #39. Checkpoint integration is Issue #4.
+(`stage`, `unstage`, `commit`, `branch`, `upstream`), remote
+operations (`fetch`, `push`, `remote` list), and the GitHub PR surface
+(`pr list|status|create|view` via the host `gh` CLI) landed in v0.2.0.
+Merge/review/CI-log and non-GitHub forges are later tickets. Checkpoint
+integration is Issue #4.
 
 ## Purpose
 
@@ -48,6 +50,7 @@ only runs read-only `git` commands and projects display metadata.
 | `fetch` | `git fetch [remote] [--prune]`; longer `remoteTimeoutMs` budget. |
 | `push` | `git push [--set-upstream] [--force-with-lease] [remote] [refspec]`; plain `--force` is never exposed. |
 | `remote` | Read-only remote list; URLs are reported with embedded credentials stripped. |
+| `pr` | GitHub PR surface via host `gh`: `list` / `status` / `create` / `view`. |
 | `project` | Compute `status` for a pane and project pane metadata tokens. |
 
 All commands accept `--session`, `--socket`, `--timeout` (overrides
@@ -173,6 +176,35 @@ Rules:
   arguments and are invoked via CLI/agents. `capability` reports
   `read_only: false` plus a `mutation_commands` list.
 
+## Forge: GitHub PR via `gh` (ADR-0008)
+
+`pr <action> <pane_id>` exposes GitHub pull requests through the host's
+`gh` CLI — the plugin never handles tokens and never implements a forge
+client. Repo resolution is `gh repo view` inside the pane's repo root
+(user remotes, `GH_HOST`/GHES, and `gh auth` accounts apply);
+`--repo owner/name` overrides and is validated before any call.
+
+- Preflight: `gh --version` must be ≥ 2.81.0 and `gh auth status` must
+  succeed; failures are structured `gh_missing`/`gh_error`, never empty
+  success payloads.
+- `pr list` — fixed `--json` field set with `--limit` (1–1000),
+  `--state open|closed|merged|all` (default `open`), `--head`.
+- `pr status` — open PR for the pane's current branch (detached HEAD →
+  `detached:true, pr:null`; no PR → `pr:null`).
+- `pr view <number>` — bounded projection: body ≤ 8000 chars
+  (`body_truncated`), last 10 reviews only, ≤ 50 check entries
+  (`checks_truncated`).
+- `pr create` — requires `--title`; body via `--body` or
+  `--body-file PATH`/`-` (stdin) so long bodies stay out of argv.
+  `--draft`/`--base`/`--head` pass through. The branch must already be
+  pushed; gh's interactive push/prompt flow is never driven
+  (`GH_PROMPT_DISABLED=1`, stdin closed immediately).
+- All `gh` calls are argv spawn under `remoteTimeoutMs` (default 60s);
+  error messages echo subcommand words only, never argv content.
+- The plugin exposes PR state but never acts on merge/review gates;
+  merge, reviews, line comments, CI logs, and non-GitHub forges are
+  out of scope for v0.2.0.
+
 ## Metadata projection
 
 `project` reports pane metadata tokens (display-only, herdr-owned
@@ -203,8 +235,12 @@ Unknown keys are ignored; invalid values fall back to defaults.
 ## Non-goals
 
 - No daemon, no hooks that write plugin state, no polling.
-- No PR writes or forge integrations (ticket #39 covers GitHub PR
-  read/create via `gh`).
+- No PR merge/review/CI-log operations and no non-GitHub forge
+  integrations (the `gh`-CLI PR foundation covers list/status/create/
+  view only; upstream `source-control.md`'s wider surface — review
+  comments, reviewers, auto-merge, GitLab/Forgejo/Gitea/Bitbucket/
+  Azure DevOps/GitCafe/Cursor Origin — is tracked in the feature
+  ledger for later trains).
 - No destructive git operations (see Local mutations).
 - No parsing of GitHub remotes beyond what `gh`/git provide, no provider
   integrations.

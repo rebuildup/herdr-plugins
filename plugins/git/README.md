@@ -33,6 +33,9 @@ bun run src/cli.ts fetch <pane_id> [remote] [--prune]
 bun run src/cli.ts push <pane_id> [--set-upstream] [--force-with-lease]
     [remote] [refspec]
 bun run src/cli.ts remote <pane_id>
+bun run src/cli.ts pr list|status|create|view <pane_id> [--repo owner/name]
+    pr create: --title T [--body B | --body-file PATH|-] [--draft]
+        [--base B] [--head B]
 bun run src/cli.ts project <pane_id>
 ```
 
@@ -48,19 +51,22 @@ against its merge-base — defaulting to the branch's upstream — returning
 changed files, stat, ahead/behind, and a bounded patch. Mutation
 commands (`stage`, `unstage`, `commit`, `branch`, `upstream`, `fetch`,
 `push`) apply allow-listed local git operations; `remote` lists
-remotes with credentials stripped from URLs. See ADR-0007. `project`
+remotes with credentials stripped from URLs; `pr` exposes GitHub pull
+requests through the host's `gh` CLI (requires `gh` ≥ 2.81.0 and
+`gh auth login`; see ADR-0007/0008). `project`
 additionally reports `git_branch`, `git_changes`, and `git_ahead_behind`
 pane metadata tokens.
 
 Full contract: `docs/contracts/git-v1.md`. Spec: `docs/specs/git.md`.
-Design: ADR-0006.
+Design: ADR-0006/0007/0008.
 
 ## Notes
 
-- v0.2.0 adds local mutations (stage/commit/branch/upstream) and remote
-  operations (fetch/push/remote list); PR integration is ticket #39. No
-  destructive git operations are exposed (ADR-0007); force push requires
-  the explicit `--force-with-lease` flag.
+- v0.2.0 adds local mutations (stage/commit/branch/upstream), remote
+  operations (fetch/push/remote list), and the GitHub PR foundation
+  (`pr` via `gh`). Merge/review/CI-log and non-GitHub forges are later
+  tickets. No destructive git operations are exposed (ADR-0007); force
+  push requires the explicit `--force-with-lease` flag.
 - Remote herdr hosts: run the CLI on the target host (same rule as
   `rebuildup.inbox`).
 - Optional `config.json` in the plugin config dir:

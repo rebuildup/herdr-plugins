@@ -19,6 +19,15 @@ import {
   sessionSnapshot,
 } from "../../../packages/herdr-client/src/index";
 import {
+  collectPrCreate,
+  collectPrList,
+  collectPrStatus,
+  collectPrView,
+  ensureGh,
+  GhError,
+  resolveForgeRepo,
+} from "./gh";
+import {
   assertSafeGitArg,
   collectBranchCreate,
   collectBranchSwitch,
@@ -37,6 +46,7 @@ import {
   type DiffFormat,
   type DiffRequest,
   GitError,
+  gitOk,
   resolveRepo,
   type StatusReport,
 } from "./git";
@@ -780,6 +790,181 @@ async function cmdRemote(options: CliOptions): Promise<void> {
   }
 }
 
+const PR_VALUE_FLAGS = [
+  "--repo",
+  "--limit",
+  "--state",
+  "--head",
+  "--title",
+  "--body",
+  "--body-file",
+  "--base",
+];
+
+/**
+ * `pr <action> <pane> [args]` — GitHub PR surface via the host `gh` CLI.
+ * Positionals: [action, pane, ...rest]; pane falls back to env/context.
+ */
+async function cmdPr(options: CliOptions): Promise<void> {
+  const config = await loadConfig();
+  const timeoutMs = effectiveRemoteTimeoutMs(options, config);
+  const pos = positionals(options.args, PR_VALUE_FLAGS);
+  const action = pos[0];
+  const paneId = pos[1] ?? process.env.HERDR_PANE_ID ?? invocationContext().focused_pane_id;
+  if (!action || !["list", "status", "create", "view"].includes(action)) {
+    fail("pr requires an action: list | status | create | view", 2);
+  }
+  if (!paneId) {
+    fail("pane id required (argument, HERDR_PANE_ID, or plugin context)", 2);
+  }
+  const rest = pos.slice(2);
+
+  const snapshot = await sessionSnapshot(options);
+  const pane = await findPane(snapshot, paneId);
+  let repoRoot: string;
+  try {
+    repoRoot = (
+      await resolveRepo(paneCwd(pane), { timeoutMs: effectiveTimeoutMs(options, config) })
+    ).root;
+  } catch (err) {
+    if (err instanceof GitError) fail(err.message, 1, err.kind);
+    throw err;
+  }
+
+  try {
+    await ensureGh(repoRoot, { timeoutMs });
+  } catch (err) {
+    if (err instanceof GhError) fail(err.message, 1, err.kind);
+    throw err;
+  }
+
+  const repoFlag = flagValue(options.args, "--repo");
+  if (repoFlag && repoFlag.startsWith("-")) fail("invalid --repo value", 2);
+
+  const forgeBase = {
+    contract: CONTRACT,
+    command: "pr",
+    pane_id: paneId,
+    repo_root: repoRoot,
+    generated_at: new Date().toISOString(),
+  };
+
+  try {
+    const repo = await resolveForgeRepo(repoRoot, { repo: repoFlag }, { timeoutMs });
+    const ghOptions = { timeoutMs };
+
+    if (action === "list") {
+      const stateRaw = flagValue(options.args, "--state") ?? "open";
+      if (!["open", "closed", "merged", "all"].includes(stateRaw)) {
+        fail(`invalid --state: ${stateRaw}`, 2);
+      }
+      const limitRaw = flagValue(options.args, "--limit");
+      let limit: number | undefined;
+      if (limitRaw !== undefined) {
+        limit = Number(limitRaw);
+        if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
+          fail(`invalid --limit: ${limitRaw}`, 2);
+        }
+      }
+      const head = flagValue(options.args, "--head");
+      if (head?.startsWith("-")) fail("invalid --head value", 2);
+      const prs = await collectPrList(
+        repoRoot,
+        {
+          repo,
+          limit,
+          state: stateRaw as "open" | "closed" | "merged" | "all",
+          head,
+        },
+        ghOptions,
+      );
+      emit({ ...forgeBase, action: "list", repo, prs });
+      return;
+    }
+
+    if (action === "status") {
+      const branch = (
+        await gitOk(repoRoot, ["rev-parse", "--abbrev-ref", "HEAD"], ghOptions)
+      ).trim();
+      if (branch === "HEAD") {
+        emit({ ...forgeBase, action: "status", repo, branch, detached: true, pr: null });
+        return;
+      }
+      const pr = await collectPrStatus(repoRoot, { repo, branch }, ghOptions);
+      emit({ ...forgeBase, action: "status", repo, branch, pr });
+      return;
+    }
+
+    if (action === "view") {
+      const number = Number(rest[0]);
+      if (!Number.isInteger(number) || number < 1) {
+        fail("pr view requires a positive PR number", 2);
+      }
+      if (rest.length > 1) fail("pr view accepts at most one PR number", 2);
+      const pr = await collectPrView(repoRoot, { repo, number }, ghOptions);
+      emit({ ...forgeBase, action: "view", repo, pr });
+      return;
+    }
+
+    // action === "create"
+    const title = flagValue(options.args, "--title");
+    if (!title) fail("pr create requires --title", 2);
+    const body = flagValue(options.args, "--body");
+    const bodyFile = flagValue(options.args, "--body-file");
+    if (body !== undefined && bodyFile !== undefined) {
+      fail("--body and --body-file are mutually exclusive", 2);
+    }
+    const base = flagValue(options.args, "--base");
+    const head = flagValue(options.args, "--head");
+    for (const [value, what] of [
+      [base, "base"],
+      [head, "head"],
+    ] as const) {
+      if (value?.startsWith("-")) fail(`invalid --${what} value`, 2);
+    }
+    if (rest.length > 0) fail("pr create takes no positional arguments", 2);
+
+    let bodyText: string | undefined;
+    let effectiveBodyFile = bodyFile;
+    if (bodyFile && bodyFile !== "-") {
+      try {
+        bodyText = await readFile(bodyFile, "utf8");
+        effectiveBodyFile = "-";
+      } catch {
+        fail(`cannot read --body-file: ${bodyFile}`, 2);
+      }
+    } else if (bodyFile === "-") {
+      bodyText = await Bun.stdin.text();
+    }
+
+    const created = await collectPrCreate(
+      repoRoot,
+      {
+        repo,
+        title,
+        body,
+        bodyFile: effectiveBodyFile,
+        draft: hasFlag(options.args, "--draft"),
+        base,
+        head,
+      },
+      { ...ghOptions, bodyText },
+    );
+    emit({
+      ...forgeBase,
+      action: "create",
+      repo,
+      ok: true,
+      url: created.url,
+      number: created.number,
+    });
+  } catch (err) {
+    if (err instanceof GhError) fail(err.message, 1, err.kind);
+    if (err instanceof GitError) fail(err.message, 1, err.kind);
+    throw err;
+  }
+}
+
 async function cmdProject(options: CliOptions): Promise<void> {
   const config = await loadConfig();
   const paneId = await resolvePaneId(options.args);
@@ -864,10 +1049,11 @@ async function cmdCapability(options: CliOptions): Promise<void> {
       "fetch",
       "push",
       "remote",
+      "pr",
       "project",
     ],
     read_only: false,
-    mutation_commands: ["stage", "unstage", "commit", "branch", "upstream", "fetch", "push"],
+    mutation_commands: ["stage", "unstage", "commit", "branch", "upstream", "fetch", "push", "pr"],
     requires: { git: true, bun: true },
     defaults: {
       timeoutMs: config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
@@ -896,6 +1082,9 @@ Usage:
   git fetch <pane_id> [remote] [--prune]
   git push <pane_id> [--set-upstream] [--force-with-lease] [remote] [refspec]
   git remote <pane_id>
+  git pr list|status|create|view <pane_id> [args] [--repo owner/name]
+      pr create: --title T [--body B | --body-file PATH|-] [--draft]
+          [--base B] [--head B]
   git project <pane_id> [--session NAME]
   git capability
 
@@ -932,6 +1121,8 @@ async function main(): Promise<void> {
       return cmdPush(options);
     case "remote":
       return cmdRemote(options);
+    case "pr":
+      return cmdPr(options);
     case "project":
       return cmdProject(options);
     case "capability":

@@ -2,9 +2,10 @@
 
 Structured JSON CLI contract for the `rebuildup.git` herdr plugin.
 Read commands (`status`, `files`, `diff`, `log`, `compare`, `remote`,
-`project`) are side-effect free; mutation commands (`stage`, `unstage`,
-`commit`, `branch`, `upstream`, `fetch`, `push`) change the pane
-repository's index/refs/remotes on the herdr host. Follows the same conventions as `herdr-plugins.inbox/v1`
+`pr list`, `pr status`, `pr view`, `project`) are side-effect free;
+mutation commands (`stage`, `unstage`, `commit`, `branch`, `upstream`,
+`fetch`, `push`, `pr create`) change the pane repository's index/refs/
+remotes or the forge on the herdr host. Follows the same conventions as `herdr-plugins.inbox/v1`
 (`docs/contracts/inbox-v1.md`).
 
 ## Discovery
@@ -37,6 +38,8 @@ bun run src/cli.ts fetch <pane_id> [remote] [--prune]
 bun run src/cli.ts push <pane_id> [--set-upstream] [--force-with-lease]
     [remote] [refspec]
 bun run src/cli.ts remote <pane_id>
+bun run src/cli.ts pr list|status|create|view <pane_id> [args]
+    [--repo owner/name]
 bun run src/cli.ts project <pane_id> [--session NAME]
 bun run src/cli.ts capability
 ```
@@ -279,6 +282,49 @@ the value (`branch create <pane> <name>`). `fetch`/`push` take the pane
 as the first positional followed by at most one (`fetch`) or two
 (`push`) extra positionals.
 
+## Forge: `pr list` / `pr status` / `pr create` / `pr view`
+
+Pull-request surface backed by the host's `gh` CLI (ADR-0008). All
+subcommands share `pr <action> <pane_id>`; the pane resolves the repo
+exactly like other commands, and the forge repo (`owner/name`) comes
+from `gh repo view` inside the repo root — honoring the user's remotes,
+`GH_HOST`, and `gh auth` configuration (github.com and GHES). An
+explicit `--repo owner/name` overrides detection; malformed values are
+rejected before any `gh` call.
+
+- Every `pr` invocation first runs `gh --version` (minimum 2.81.0) and
+  `gh auth status`; a missing binary, old version, or missing
+  authentication is a structured error (`kind: "gh_missing"` or
+  `"gh_error"`), never a fabricated empty result.
+- All `gh` calls are argv spawn with `GH_PROMPT_DISABLED=1`, a hard
+  timeout (`remoteTimeoutMs`, default 60s), and stdin closed
+  immediately — gh can never block on an interactive prompt.
+- `pr list` — `gh pr list --json <fixed fields>` with `--limit`
+  (1–1000), `--state open|closed|merged|all` (default `open`), and
+  `--head <branch>` filters. Result: `{action:"list", repo, prs[]}`.
+- `pr status` — resolves the pane's current branch (`HEAD` detached →
+  `{branch:"HEAD", detached:true, pr:null}`), finds its open PR, and
+  returns the same bounded view as `pr view`. No open PR is
+  `{pr:null}`, not an error.
+- `pr view <number>` — bounded `gh pr view --json` projection: body is
+  truncated at 8000 chars (`body_truncated`), reviews capped at the
+  last 10 (author/state/submittedAt only), `statusCheckRollup` capped
+  at 50 entries (`checks_truncated` when cut).
+- `pr create` — the only forge mutation. Requires `--title`; body via
+  `--body` (inline argv) or `--body-file PATH` / `--body-file -`
+  (stdin) — long bodies never appear in argv. `--draft`, `--base`,
+  `--head` map to the same gh flags. The branch must already be pushed;
+  gh's own push/prompt flow is not driven by the plugin. Success returns
+  `{action:"create", repo, ok:true, url, number}` parsed from gh's
+  output.
+- `pr` appears in `mutation_commands` because `pr create` mutates the
+  forge; `list`/`status`/`view` are read-only. PR state is never used
+  to bypass merge/review gates — the plugin exposes state, it does not
+  act on it. Merge, review comments, CI logs, and non-GitHub forges are
+  out of scope (later tickets).
+- gh error messages echo only the subcommand words, never argv content
+  (titles/bodies may be sensitive).
+
 ## `project`
 
 Computes `status` for the pane and reports metadata tokens via
@@ -304,11 +350,12 @@ the status data remains authoritative.
   "commands": [
     "capability", "status", "files", "diff", "log", "compare",
     "stage", "unstage", "commit", "branch", "upstream", "fetch",
-    "push", "remote", "project"
+    "push", "remote", "pr", "project"
   ],
   "read_only": false,
   "mutation_commands": [
-    "stage", "unstage", "commit", "branch", "upstream", "fetch", "push"
+    "stage", "unstage", "commit", "branch", "upstream", "fetch",
+    "push", "pr"
   ],
   "requires": { "git": true, "bun": true },
   "defaults": {
@@ -323,5 +370,6 @@ the status data remains authoritative.
 
 `herdr-plugins.git/v1` is stable within v0.x. Additive fields may appear;
 clients must ignore unknown fields. Breaking changes bump the contract
-suffix. Stage-2 mutation commands will extend v1 only if they keep the
-read contract intact; otherwise a `v2` contract will be introduced.
+suffix. Mutation and forge (`pr`) commands extend v1 only while every
+read command's output stays intact (ADR-0007, ADR-0008); otherwise a
+`v2` contract will be introduced.
