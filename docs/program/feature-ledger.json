@@ -276,7 +276,7 @@
       "issues": [28],
       "depends_on": ["conversations"],
       "acceptance": "token/input/output/cache、model/host/project 別集計、履歴保持、subscription quota/reset、HTTP quota source 連携、推定 API コストと実請求の区別。欠損をゼロ扱いしない。",
-      "verification": "実現可能性調査済み (#28 コメント): provider 所有 artifact (transcript/quota endpoint) 由来で plugin 化可能。quota endpoint の credential 境界は ADR 要。#5 index 再利用が自然。分解は後続 train で実施。"
+      "verification": "T1 (#90) 実装済み: plugins/usage v0.5.0 + herdr-plugins.usage/v1。conversations index の read-only contract 経由で token 集計 (provider/model/host/project/session/pane breakdown、--from/--to window、event_id dedup、欠損は coverage で明示)。再利用方式は ADR-0013 で確定 (conversations CLI export 消費、state 直読み回避)。残りは T2 (#91 credential/quota ADR)、T3 (#92 cache/HTTP quota/divergence)、T4 (#93 推定コスト/保持/GC)。"
     },
     {
       "id": "text-generation",

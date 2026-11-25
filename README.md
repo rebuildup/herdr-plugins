@@ -19,7 +19,8 @@ clients through one versioned contract.
 | Plugin | ID | Description |
 | --- | --- | --- |
 | [inbox](plugins/inbox/) | `rebuildup.inbox` | Work inbox for agent panes: settle / snooze / restore with persistent user-side organize state, structured CLI, and TUI/CLI parity. |
-| [conversations](plugins/conversations/) | `rebuildup.conversations` | Provider transcript indexer: normalizes claude session transcripts into structured conversation events (turn/user/assistant/tool/usage) — never PTY scraping. |
+| [conversations](plugins/conversations/) | `rebuildup.conversations` | Provider transcript indexer: normalizes claude/codex/opencode session transcripts into structured conversation events (turn/user/assistant/tool/usage) — never PTY scraping. |
+| [usage](plugins/usage/) | `rebuildup.usage` | Token usage aggregation over the conversations index: per provider/model/host/project/session/pane totals with honest missing-data reporting. |
 
 ## Development
 

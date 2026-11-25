@@ -1,0 +1,14 @@
+id = "rebuildup.usage"
+name = "Usage"
+version = "0.5.0"
+min_herdr_version = "0.9.0"
+description = "Token usage aggregation over the rebuildup.conversations normalized index: per provider/model/host/project/session/pane totals with honest missing-data reporting under herdr-plugins.usage/v1."
+platforms = ["linux", "macos", "windows"]
+
+# No build step: the plugin is dependency-free TypeScript executed by Bun
+# (runtime prerequisite, see plugins/usage/README.md).
+#
+# Read-only aggregation: all commands are CLI-invoked; the plugin keeps
+# no durable state of its own (totals are recomputed from the
+# conversations index on every call). No [[actions]] / [[events]] /
+# [[startup]] yet.
