@@ -1,10 +1,11 @@
 # Conversations plugin (`rebuildup.conversations`) — specification
 
-Scope: T1 foundation (#86) + T2 adapters/history (#87, parent #5) —
-provider transcript discovery, normalization into structured events
-(claude JSONL, codex rollout JSONL, opencode SQLite), identity
-binding, staleness detection, and the `history` read API. Contract:
-`herdr-plugins.conversations/v1`
+Scope: T1 foundation (#86) + T2 adapters/history (#87) + T3
+search/paging/references (#88, parent #5) — provider transcript
+discovery, normalization into structured events (claude JSONL, codex
+rollout JSONL, opencode SQLite), identity binding, staleness
+detection, and the `history`/`search`/`usage`/`show` read APIs.
+Contract: `herdr-plugins.conversations/v1`
 (`docs/contracts/conversations-v1.md`). Design: ADR-0012. Upstream
 mechanism reference: T3 Code `apps/server/src/usage/usageTranscriptReader.ts`
 (pinned revision in `docs/program/feature-ledger.json`).
@@ -156,6 +157,86 @@ A missing events file returns `events: []` + `events_present: false`
 with the record's `status`/`error` — never fabricated events. Live
 staleness is computed exactly like `sessions` (best-effort, degrades
 to `live: null`). Full shape: contract `history` section.
+
+## Search (`search`, T3)
+
+`search <query> [--pane PANE] [--session-id REF] [--provider ID]
+[--type TYPE] [--limit N] [--cursor CUR] [--offline]` scans the
+selected sessions' event logs and returns bounded matches.
+
+**Matching policy (v1, binding):** the query is lowercased and
+matched as a **substring** against the lowercased values of the
+searchable payload fields `text`, `tool_name`, `subtype`, `model`.
+No tokenization, stemming, or relevance ranking — v1 favors an
+honest, explainable match (`matched_fields` per result) over fuzzy
+recall. `--type` restricts results to one event type. Filters
+combine as AND; sessions are scanned in record-key order.
+
+**Result shape:** each result carries `session_key`, `event_id`,
+`type`, `timestamp`, `turn_index`, `matched_fields`, and the full
+normalized `event` — enough for consumers to cite or fetch without a
+second lookup.
+
+## Paging cursors (T3)
+
+Two cursor flavors, both opaque to callers:
+
+- `history --cursor` — decimal byte offset into the single session's
+  event log (unchanged from T2).
+- `search`/`usage --cursor` — base64url JSON map of
+  `{session_key: byte_offset}` for logs not yet fully consumed.
+
+Safety argument: file-backed event logs are append-only, so an index
+update between pages only extends the file — offsets stay valid and
+matches neither duplicate nor go missing (contract-tested across an
+`index` append). opencode logs are rewritten atomically on every
+index; a stored offset beyond the current file size restarts that
+session at 0 and reports the key in `page.restarted_sessions`
+(duplicates possible, explicitly flagged — never hidden). A missing
+events file contributes zero matches and surfaces `events_present:
+false` on its `sessions[]` entry.
+
+## Structured references (`show`, T3)
+
+`show <ref> [selectors] [--offline]` resolves stable references
+without PTY guessing:
+
+- bare `<event_id>` — exact match on the stable event id (provider
+  uuid or `<file>:<line>`); unioned with exact `tool_use_id` matches.
+- `tool:<tool_use_id>` — the `tool_call`/`tool_result` pair(s).
+- `turn:<n>` — all events with `turn_index == n`.
+
+Results are capped (200) with `truncated: true` beyond that.
+Approval/user-input granularity is **not** derivable: provider
+transcripts do not record it and `pane.agent_status_changed` is too
+coarse — the same upstream gap as #8, recorded rather than worked
+around.
+
+## Usage read surface (`usage`, T3)
+
+`usage [selectors] [--limit N] [--cursor CUR] [--offline]` pages only
+events carrying provider-reported `usage` — the read surface #28
+consumes.
+Aggregation is explicitly #28's job; this command only selects.
+
+## Stale / missing at read time (T3)
+
+Every read command (`sessions`, `history`, `search`, `usage`,
+`show`) reports, per selected session:
+
+- `stale`/`stale_reason` — T1 generation-binding verdict (live
+  snapshot, best-effort).
+- `transcript_present` — read-time `stat` of `transcript_path`;
+  `false` = provider-side transcript deleted/rotated (session
+  removal, provider retention). Indexed events stay readable; the
+  record's `status` is only updated by `index`.
+- `events_present` — read commands only; `false` = the normalized
+  event log itself is gone (state loss). Reads return empty results
+  plus the record's `status`/`error`, never fabricated events.
+- Selector misses exit 1 with `kind: "session_not_found"` and an
+  `error.hint` pointing at `index`; an empty index returns the same
+  hint on successful empty reads. Reads never mutate state — only
+  `index`/`refresh` write.
 
 ## Identity and staleness
 
