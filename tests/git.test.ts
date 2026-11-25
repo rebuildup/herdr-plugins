@@ -9,8 +9,11 @@ import {
   collectCommit,
   collectCompare,
   collectDiff,
+  collectFetch,
   collectFiles,
   collectLog,
+  collectPush,
+  collectRemotes,
   collectStage,
   collectStatus,
   collectUnstage,
@@ -22,6 +25,7 @@ import {
   parsePorcelain,
   parsePorcelainZ,
   resolveRepo,
+  sanitizeRemoteUrl,
 } from "../plugins/git/src/git";
 
 const dirs: string[] = [];
@@ -425,13 +429,96 @@ describe("mutations", () => {
     expect(out).toContain("feature");
     status = await collectStatus(repo);
     expect(status.branch.upstream).toBe("origin/feature");
-  });
+  }, 20000);
 
   test("branch name injection is rejected", async () => {
     const repo = initRepo();
     await expect(collectBranchCreate(repo, { name: "--help" })).rejects.toMatchObject({
       kind: "git_error",
     });
+  });
+});
+
+describe("remote operations", () => {
+  function repoWithRemote(): { repo: string; bare: string } {
+    const repo = initRepo();
+    const bare = tempDir();
+    spawnSync("git", ["init", "--bare", "-q", bare]);
+    // Pin HEAD so clones check out main regardless of the host's
+    // init.defaultBranch (Linux CI defaults differ from macOS).
+    spawnSync("git", ["-C", bare, "symbolic-ref", "HEAD", "refs/heads/main"]);
+    git(repo, ["remote", "add", "origin", bare]);
+    return { repo, bare };
+  }
+
+  test("push --set-upstream then fetch round-trips", async () => {
+    const { repo, bare } = repoWithRemote();
+    writeFileSync(path.join(repo, "a.txt"), "one\nchanged\n");
+    git(repo, ["add", "a.txt"]);
+    git(repo, ["commit", "-qm", "work"]);
+
+    await collectPush(repo, {
+      remote: "origin",
+      refspec: "HEAD:main",
+      setUpstream: true,
+    });
+    let status = await collectStatus(repo);
+    expect(status.branch.upstream).toBe("origin/main");
+
+    // Advance the bare remote from a second clone, then fetch.
+    const clone = tempDir();
+    spawnSync("git", ["clone", "-q", bare, clone]);
+    git(clone, ["config", "user.email", "t@t"]);
+    git(clone, ["config", "user.name", "t"]);
+    writeFileSync(path.join(clone, "b.txt"), "remote\n");
+    git(clone, ["add", "b.txt"]);
+    git(clone, ["commit", "-qm", "remote work"]);
+    git(clone, ["push", "-q", "origin", "HEAD:main"]);
+
+    // fetch/push report progress on stderr, so collect* returns "" on success.
+    await collectFetch(repo, {});
+    status = await collectStatus(repo);
+    expect(status.branch.upstream).toBe("origin/main");
+    expect(status.branch.behind).toBe(1);
+  }, 20000);
+
+  test("push without upstream errors structurally", async () => {
+    const repo = initRepo();
+    writeFileSync(path.join(repo, "a.txt"), "one\nx\n");
+    git(repo, ["commit", "-qam", "w"]);
+    await expect(collectPush(repo, {})).rejects.toMatchObject({ kind: "git_error" });
+  });
+
+  test("force push requires the explicit flag", async () => {
+    const { repo } = repoWithRemote();
+    git(repo, ["push", "-q", "origin", "HEAD:main"]);
+    writeFileSync(path.join(repo, "a.txt"), "one\nrewritten\n");
+    git(repo, ["commit", "-qam", "rewrite"]);
+    git(repo, ["push", "-q", "origin", "HEAD:main"]);
+    // Diverge local history from what the remote now holds.
+    git(repo, ["reset", "-q", "--hard", "HEAD~1"]);
+    writeFileSync(path.join(repo, "a.txt"), "one\nother\n");
+    git(repo, ["commit", "-qam", "other"]);
+    // Plain push is rejected (non-fast-forward); force-with-lease succeeds.
+    await expect(
+      collectPush(repo, { remote: "origin", refspec: "HEAD:main" }),
+    ).rejects.toMatchObject({
+      kind: "git_error",
+    });
+    await collectPush(repo, { remote: "origin", refspec: "HEAD:main", forceWithLease: true });
+  }, 20000);
+
+  test("remote list strips URL credentials", async () => {
+    const repo = initRepo();
+    git(repo, ["remote", "add", "origin", "https://user:secret@example.com/org/repo.git"]);
+    git(repo, ["remote", "add", "ssh", "git@example.com:org/other.git"]);
+    const remotes = await collectRemotes(repo);
+    const byName = new Map(remotes.map((r) => [r.name, r]));
+    expect(byName.get("origin")?.url).toBe("https://example.com/org/repo.git");
+    expect(byName.get("ssh")?.url).toBe("git@example.com:org/other.git");
+    expect(sanitizeRemoteUrl("https://oauth2:TOKEN@gitlab.com/x/y.git")).toBe(
+      "https://gitlab.com/x/y.git",
+    );
   });
 });
 

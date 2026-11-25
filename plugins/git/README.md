@@ -23,6 +23,16 @@ bun run src/cli.ts log <pane_id> [--limit N] [--skip N] [--all]
     [--first-parent] [--author X] [--grep X] [--since X] [--until X]
     [--path PATH]...
 bun run src/cli.ts compare <pane_id> [base [head]] [--max-bytes N]
+bun run src/cli.ts stage <pane_id> [--all | --path PATH]...
+bun run src/cli.ts unstage <pane_id> [--all | --path PATH]...
+bun run src/cli.ts commit <pane_id> -m MSG [-m MSG]... [--allow-empty]
+bun run src/cli.ts branch create <pane_id> <name> [--switch]
+bun run src/cli.ts branch switch <pane_id> <name>
+bun run src/cli.ts upstream <pane_id> <upstream-ref>
+bun run src/cli.ts fetch <pane_id> [remote] [--prune]
+bun run src/cli.ts push <pane_id> [--set-upstream] [--force-with-lease]
+    [remote] [refspec]
+bun run src/cli.ts remote <pane_id>
 bun run src/cli.ts project <pane_id>
 ```
 
@@ -36,8 +46,9 @@ structured commit history (sha/parents/author/committer/subject) with
 `--limit`/`--skip` paging and `has_more`. `compare` diffs a revision range
 against its merge-base — defaulting to the branch's upstream — returning
 changed files, stat, ahead/behind, and a bounded patch. Mutation
-commands (`stage`, `unstage`, `commit`, `branch`, `upstream`) apply
-allow-listed local git operations; see ADR-0007. `project`
+commands (`stage`, `unstage`, `commit`, `branch`, `upstream`, `fetch`,
+`push`) apply allow-listed local git operations; `remote` lists
+remotes with credentials stripped from URLs. See ADR-0007. `project`
 additionally reports `git_branch`, `git_changes`, and `git_ahead_behind`
 pane metadata tokens.
 
@@ -46,10 +57,11 @@ Design: ADR-0006.
 
 ## Notes
 
-- v0.2.0 adds local mutations (stage/commit/branch/upstream); remote
-  fetch/push and PR integration are later tickets (#38/#39). No
-  destructive git operations are exposed (ADR-0007).
+- v0.2.0 adds local mutations (stage/commit/branch/upstream) and remote
+  operations (fetch/push/remote list); PR integration is ticket #39. No
+  destructive git operations are exposed (ADR-0007); force push requires
+  the explicit `--force-with-lease` flag.
 - Remote herdr hosts: run the CLI on the target host (same rule as
   `rebuildup.inbox`).
 - Optional `config.json` in the plugin config dir:
-  `{"timeoutMs": 10000, "diffMaxBytes": 262144}`.
+  `{"timeoutMs": 10000, "remoteTimeoutMs": 60000, "diffMaxBytes": 262144}`.
