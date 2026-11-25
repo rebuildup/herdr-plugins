@@ -27,6 +27,7 @@ import {
   type CallOptions,
 } from "../../../packages/herdr-client/src/index";
 import { CONTRACT, capabilityPayload } from "./capability";
+import { buildCommandText, commandInfoFor } from "./commands";
 import {
   checkGeneration,
   type GenerationExpectation,
@@ -43,7 +44,7 @@ import {
   type ResumeSessionKind,
 } from "./launch";
 
-const PLUGIN_VERSION = "0.7.0";
+const PLUGIN_VERSION = "0.8.0";
 
 interface CliOptions extends CallOptions {
   command: string;
@@ -279,6 +280,88 @@ async function cmdSend(options: CliOptions): Promise<void> {
     contract: CONTRACT,
     command: "send",
     identity: resolved.identity,
+    waited: wait !== undefined,
+    result,
+    generated_at: now(),
+  });
+}
+
+/**
+ * `command <target> <slash-command> [args...]` — provider slash-command
+ * passthrough. herdr has no structured command API; `agent.prompt`
+ * types the literal `/name args` text (bracketed paste + Enter), so
+ * the command must start the message (T3 Code composer rule) and the
+ * provider TUI decides whether it exists. Same blocked-agent guard as
+ * `send`.
+ */
+async function cmdCommand(options: CliOptions): Promise<void> {
+  const parsed = parseCommandArgs(
+    options.args,
+    new Set([...EXPECT_VALUE_FLAGS, "--wait-until", "--timeout-ms"]),
+  );
+  const target = parsed.positionals[0];
+  const slashCommand = parsed.positionals[1];
+  const commandArgs = parsed.positionals.slice(2);
+  if (!target || slashCommand === undefined) {
+    fail("command requires <target> and <slash-command> (e.g. /model)", 2);
+  }
+
+  let built: ReturnType<typeof buildCommandText>;
+  try {
+    built = buildCommandText(slashCommand as string, commandArgs);
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err), 2);
+  }
+
+  const until = parseStatuses(parsed.multi.get("--wait-until"), "--wait-until");
+  const timeoutMs = parseTimeoutMs(parsed);
+  const wantsWait = parsed.flags.has("--wait") || until !== undefined;
+
+  const resolved = await resolveGuarded(target as string, options, parsed);
+
+  // Same semantics as `send`: herdr rejects agent.prompt on a blocked
+  // agent before any input is sent; never report success.
+  if (resolved.identity.agent_status === "blocked") {
+    fail(
+      `agent is blocked and requires interactive input; agent.prompt would be rejected`,
+      1,
+      "requires_interactive_input",
+      {
+        identity: resolved.identity,
+        agent_status: "blocked",
+        hint: "resolve the interactive prompt in the pane (see `interrupt` for PTY-level keys) or use a structured dialog surface when available",
+      },
+    );
+  }
+
+  const wait =
+    wantsWait || timeoutMs !== undefined
+      ? {
+          ...(until !== undefined ? { until } : {}),
+          ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+        }
+      : undefined;
+
+  let result: unknown;
+  try {
+    result = await agentPrompt(target as string, built.text, wait, options);
+  } catch (err) {
+    if (isAgentRpcError(err)) fail(err.message, 1, err.code);
+    fail(
+      `herdr session unreachable: ${err instanceof Error ? err.message : String(err)}`,
+      1,
+      "session_unreachable",
+    );
+  }
+  emit({
+    contract: CONTRACT,
+    command: "command",
+    identity: resolved.identity,
+    passthrough: "agent.prompt",
+    command_name: `/${built.name}`,
+    text: built.text,
+    provider: commandInfoFor(resolved.identity.agent, built.name),
+    fragile: true,
     waited: wait !== undefined,
     result,
     generated_at: now(),
@@ -689,6 +772,8 @@ Usage: bun run src/cli.ts <command> [args] [--session NAME] [--socket PATH] [--t
 Commands:
   capability                                  Contract/provider/operation discovery (offline)
   send <target> <text...> [--wait] [--wait-until STATUS]... [--timeout-ms MS]
+  command <target> <slash-command> [args...] [--wait] [--wait-until STATUS]... [--timeout-ms MS]
+       (provider slash-command passthrough via agent.prompt; fragile, provider-TUI dependent)
   wait <target> [--until STATUS]... [--timeout-ms MS]
   interrupt <target> [--key KEY]... [--keys k1,k2]   (PTY-level keys; default: esc)
   read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--no-strip-ansi]
@@ -710,6 +795,8 @@ async function main(): Promise<void> {
       return cmdCapability();
     case "send":
       return cmdSend(options);
+    case "command":
+      return cmdCommand(options);
     case "wait":
       return cmdWait(options);
     case "interrupt":

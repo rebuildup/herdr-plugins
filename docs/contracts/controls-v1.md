@@ -1,9 +1,10 @@
 # Contract `herdr-plugins.controls/v1`
 
 Structured JSON CLI contract for the `rebuildup.controls` herdr
-plugin — the agent operation core: send a prompt, wait for an agent
-status, interrupt (PTY-level keys), read terminal scrollback, rename,
-and launch agents with launch-time controls, all over herdr's
+plugin — the agent operation core: send a prompt or provider slash
+command, wait for an agent status, interrupt (PTY-level keys), read
+terminal scrollback, rename, and launch agents with launch-time
+controls, all over herdr's
 `agent.*` socket API. Follows the same conventions as
 `herdr-plugins.conversations/v1` / `herdr-plugins.usage/v1`.
 
@@ -26,6 +27,7 @@ before the operation ran.
 cd <plugin_root>
 bun run src/cli.ts capability
 bun run src/cli.ts send <target> <text...> [--wait] [--wait-until STATUS]... [--timeout-ms MS]
+bun run src/cli.ts command <target> <slash-command> [args...] [--wait] [--wait-until STATUS]... [--timeout-ms MS]
 bun run src/cli.ts wait <target> [--until STATUS]... [--timeout-ms MS]
 bun run src/cli.ts interrupt <target> [--key KEY]... [--keys k1,k2]
 bun run src/cli.ts read <target> [--source SOURCE] [--lines N] [--format text|ansi] [--no-strip-ansi]
@@ -58,12 +60,13 @@ Offline. Reports the contract version, the command list, the
 `agent.*` API mapping per operation (`pty_level` distinguishes
 structured calls from PTY key injection), the per-provider support
 matrix (uniform across herdr-detected agent kinds; provider-specific
-input semantics are not verified), and the known upstream gaps
-(structured interrupt, queue/steer, structured approval/question
+input semantics are not verified), the advisory per-provider
+slash-command table, and the known upstream gaps (structured
+interrupt, queue/steer, structured approval/question
 dialogs, structured history).
 
-`mutation_commands: ["send", "interrupt", "rename", "start"]`; `read`
-and `wait` are non-mutating.
+`mutation_commands: ["send", "command", "interrupt", "rename", "start"]`;
+`read` and `wait` are non-mutating.
 
 ## `send`
 
@@ -83,6 +86,35 @@ with spaces.
 
 Result: `{contract, command:"send", identity, waited, result}` where
 `result` is herdr's `agent.prompt` response verbatim.
+
+## `command`
+
+Provider slash-command passthrough (`/model`, `/clear`, `/compact`,
+`/goal`, …). herdr has no structured command API, so this wraps
+`agent.prompt` with the literal `/name args` text — the same
+bracketed-paste + Enter mechanism as `send`.
+
+- `<slash-command>` must start with `/` and match
+  `/[A-Za-z][A-Za-z0-9_-]*/`; remaining positionals are args joined
+  with spaces (no quoting layer). The built text **always starts with
+  the command** — provider commands only run at message start (T3 Code
+  composer rule).
+- Args must be non-empty and contain no control characters; violations
+  are usage errors (exit 2) before any RPC.
+- `--wait` / `--wait-until` / `--timeout-ms` behave exactly as in
+  `send`; the blocked-agent pre-check and `requires_interactive_input`
+  error are identical.
+- **Fragile by contract.** Whether the provider TUI interprets the
+  text as a command is provider-version dependent and unverified.
+  Results carry `fragile: true`, `passthrough: "agent.prompt"`,
+  `command_name`, the submitted `text`, and a `provider` object
+  `{kind, commands, known_command, note}` looked up from the advisory
+  per-provider table (`capability.providers[].commands`). Unknown
+  commands and providers without table entries are still forwarded —
+  `known_command: false` is a hint, never a gate.
+
+Result: `{contract, command:"command", identity, passthrough,
+command_name, text, provider, fragile, waited, result}`.
 
 ## `wait`
 

@@ -19,6 +19,9 @@ Thin, stateless wrappers over herdr's `agent.*` socket API:
 - `send <target> <text...>` — `agent.prompt`; `--wait`/`--wait-until`/
   `--timeout-ms` observe post-submit status. A `blocked` agent fails
   with `requires_interactive_input` and the prompt is never sent.
+- `command <target> <slash-command> [args...]` — provider slash-command
+  passthrough via `agent.prompt` (literal `/name args` text; fragile,
+  provider-TUI dependent — see `capability.providers[].commands`).
 - `wait <target>` — `agent.wait` until a status set or timeout.
 - `interrupt <target>` — `agent.send_keys` (PTY-level; default `esc`,
   `--key`/`--keys` to customize). Not a structured interrupt.
@@ -50,6 +53,7 @@ generation.
 cd "$(herdr plugin list --json | jq -r '.result.plugins[] | select(.plugin_id=="rebuildup.controls") | .plugin_root')"
 bun run src/cli.ts capability
 bun run src/cli.ts send pane-1 "please continue" --wait-until idle --timeout-ms 60000
+bun run src/cli.ts command pane-1 /compact
 bun run src/cli.ts wait pane-1 --until idle --until done --timeout-ms 30000
 bun run src/cli.ts interrupt pane-1            # sends esc
 bun run src/cli.ts interrupt pane-1 --key ctrl+c
