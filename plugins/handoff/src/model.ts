@@ -213,6 +213,39 @@ export interface ExecutionObservation {
   checked_at: string;
 }
 
+/**
+ * Remote machine the execution targeted (#105). Recorded from the
+ * saved-machine profile + probe — the plugin never guesses reachability.
+ * `session` is the remote herdr session bound to the machine profile;
+ * target pane/workspace ids live in THAT session, not the local one.
+ */
+export interface RemoteExecutionInfo {
+  /** Saved-machine profile id (`herdr machine list --json` `id`). */
+  machine_id: string;
+  label: string;
+  /** SSH target from the profile (host alias / user@host). */
+  target: string;
+  /** Remote herdr session name bound to the profile. */
+  session: string;
+  enabled: boolean;
+  probed_at: string;
+  /** Remote herdr server version reported by `session.snapshot`. */
+  server_version: string | null;
+  /** Remote API protocol reported by `session.snapshot`. */
+  protocol: number | null;
+}
+
+/** Portable bundle written for cross-machine execution (#105). */
+export interface ExecutionBundle {
+  /** `herdr-plugins.handoff/bundle/v1`. */
+  contract: string;
+  /** Absolute path under the plugin state dir (`bundles/<id>.json`). */
+  path: string;
+  refs: number;
+  plugin_state_refs: number;
+  external_refs: number;
+}
+
 export interface HandoffExecution {
   /** When the strategy decision + payload build completed (`ready`). */
   decided_at: string;
@@ -241,6 +274,10 @@ export interface HandoffExecution {
   /** Whether `--cleanup-on-failure` closed a plugin-created pane. */
   cleaned_up: boolean;
   observed: ExecutionObservation | null;
+  /** Present for cross-machine execution (`execute --remote`). */
+  remote?: RemoteExecutionInfo;
+  /** Portable bundle written for cross-machine execution. */
+  bundle?: ExecutionBundle;
 }
 
 export interface HandoffRecord {
@@ -570,6 +607,28 @@ function parseExecution(v: unknown): HandoffExecution {
       agent_status: optNullableString(v.observed.agent_status),
       pane_present: typeof v.observed.pane_present === "boolean" ? v.observed.pane_present : null,
       checked_at: reqString(v.observed.checked_at, "execution.observed.checked_at"),
+    };
+  }
+  if (isObj(v.remote)) {
+    exec.remote = {
+      machine_id: reqString(v.remote.machine_id, "execution.remote.machine_id"),
+      label: reqString(v.remote.label, "execution.remote.label"),
+      target: reqString(v.remote.target, "execution.remote.target"),
+      session: reqString(v.remote.session, "execution.remote.session"),
+      enabled: v.remote.enabled === true,
+      probed_at: reqString(v.remote.probed_at, "execution.remote.probed_at"),
+      server_version: optNullableString(v.remote.server_version),
+      protocol: typeof v.remote.protocol === "number" ? v.remote.protocol : null,
+    };
+  }
+  if (isObj(v.bundle)) {
+    exec.bundle = {
+      contract: reqString(v.bundle.contract, "execution.bundle.contract"),
+      path: reqString(v.bundle.path, "execution.bundle.path"),
+      refs: typeof v.bundle.refs === "number" ? v.bundle.refs : 0,
+      plugin_state_refs:
+        typeof v.bundle.plugin_state_refs === "number" ? v.bundle.plugin_state_refs : 0,
+      external_refs: typeof v.bundle.external_refs === "number" ? v.bundle.external_refs : 0,
     };
   }
   return exec;
