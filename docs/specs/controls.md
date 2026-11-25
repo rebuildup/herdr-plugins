@@ -4,10 +4,11 @@ Scope: agent operation core over herdr's `agent.*` socket API —
 send / command (provider slash passthrough) / wait / interrupt /
 read / rename / start (launch-time
 controls). Contract: `herdr-plugins.controls/v1`
-(`docs/contracts/controls-v1.md`). Design: ADR-0017, ADR-0018.
-Decomposition of #27 Provider Controls/Composer: T1 core (#99),
-T2 launch-time controls (#100), T3 slash passthrough + queue/steer
-verdict (#101); #6 handoff destination control and
+(`docs/contracts/controls-v1.md`). Design: ADR-0017, ADR-0018,
+ADR-0019. Decomposition of #27 Provider Controls/Composer: T1 core
+(#99), T2 launch-time controls (#100), T3 slash passthrough +
+queue/steer verdict (#101), T4 structured-dialog upstream gap +
+contract finalization (#102); #6 handoff destination control and
 #29 textgen generation-pane control are intended consumers of this
 surface.
 
@@ -135,19 +136,52 @@ against herdr 0.9.5 (`herdr api schema` protocol 22 +
   (queued message / steer session concept — alongside the existing
   structured-dialog and `agent_session_path` gaps).
 
+## Structured dialogs — upstream gap verdict (Issue #102 / ADR-0019)
+
+herdr exposes **no structured dialog surface**: no approval/question
+events, no option/answer channel, no attachment or goal-state API,
+no subagent-approval aggregation. `agent.prompt` rejects `blocked`
+agents (`agent_blocked`), and upstream issues document prompt text
+being submitted *as an open dialog's answer* (#6081, #5263; closed
+#2788) — so "type the answer" is not a safe fallback.
+
+- **Upstream request filed**: herdrdev/herdr#6196 (structured dialog
+  events + wait/respond API; attachments as file-path references;
+  subagent aggregation as follow-up scope). Queue/steer is tracked
+  separately as herdrdev/herdr#6197 per the #101 verdict.
+  `agent_session_path` was filed as herdrdev/herdr#6191 and closed
+  upstream NOT_PLANNED — path-kind resume for claude/codex stays
+  unavailable by upstream decision.
+- **Provider-native protocol (ACP) path rejected**: a plugin speaking
+  provider protocols directly would bypass herdr's PTY authority and
+  could not honestly report `agent_status`/`blocked`; it edges toward
+  the forbidden "independent provider execution foundation". Revisit
+  only if upstream sanctions a plugin-facing structured channel.
+- **v1 declares dialogs `unsupported`**: `capability.dialogs` lists
+  `approval`, `question`, `attachments`, `goals`,
+  `subagent_approvals` — all `unsupported` with reasons — plus
+  `interactive_fallback` (`pty_level`: `interrupt` + `read`) as the
+  labeled, fragile PTY path for driving dialogs by hand.
+- **Attachments/goals partial coverage**: file-path references inside
+  prompt text via `send`/`command` are the only v1 route (provider
+  TUI decides; unverified). Goal *state* is unsupported; `/goal`-style
+  commands pass through `command` as fragile text. GUI composer
+  features remain herdr-t3 scope.
+
 ## Upstream gaps (recorded, not worked around)
 
 From the #27 feasibility research (herdr 0.9.5, protocol 22):
 
 1. No structured interrupt API — PTY keys only.
 2. No queued-message / steer session concept (see the #101 verdict
-   above: steer is provider-emergent, queue deferred to upstream).
+   above: steer is provider-emergent, queue deferred to upstream;
+   request filed as herdrdev/herdr#6197).
 3. No structured approval/question events or responses; `blocked`
    agents reject `agent.prompt` (shared root with #8 attention
-   granularity).
+   granularity; request filed as herdrdev/herdr#6196, ADR-0019).
 4. `agent.read` is scrollback; `agent_session_path` is discarded by
-   claude/codex adapters upstream (#89 candidate →
-   herdrdev/herdr#6191), so path-kind resume is unavailable for them.
+   claude/codex adapters upstream (#6191, closed not-planned), so
+   path-kind resume is unavailable for them.
 
 ## Testing
 
@@ -167,4 +201,6 @@ post-launch `agent.wait`, and upstream `agent.start` error codes;
 plus `command` coverage — `/name args` text construction, wait-option
 forwarding, known/unknown provider command reporting, blocked-send
 rejection, usage validation, generation guards, and the capability
-command surface.
+command surface; plus `capability.dialogs` asserting every structured
+dialog is `unsupported` with the `pty_level` interactive fallback
+(ADR-0019).

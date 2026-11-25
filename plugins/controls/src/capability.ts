@@ -24,6 +24,13 @@
  * - `start` launch options are per-provider: model/permission-mode/
  *   resume map to CLI flags only where a verified upstream mapping
  *   exists (ADR-0018); everything else reports `unsupported`.
+ * - Structured dialogs (approval/question/attachments/goals/subagent
+ *   approvals) have no herdr API at all: `blocked` agents reject
+ *   `agent.prompt`, and prompt text typed into an open dialog can be
+ *   submitted as the dialog answer upstream (herdrdev/herdr#6081,
+ *   #5263). v1 declares them `unsupported` and offers PTY-level
+ *   `interrupt`/`read` as the labeled interactive fallback
+ *   (ADR-0019; upstream request herdrdev/herdr#6196).
  */
 
 import { COMMAND_TABLE_NOTE, PROVIDER_COMMANDS } from "./commands";
@@ -71,6 +78,46 @@ const OPERATION_NOTES: Record<string, string> = {
     "Provider slash-command passthrough: agent.prompt submits the literal `/name args` text (bracketed paste + Enter upstream), so the command must start the message. Provider TUI decides whether the command exists — fragile and provider-version dependent; the advisory per-provider table is unverified.",
 };
 
+/**
+ * Structured-dialog surface (Issue #102 / ADR-0019). herdr has no
+ * dialog events or response API, so every entry is `unsupported`;
+ * the table exists so consumers feature-detect instead of probing.
+ * `interactive_fallback` names the sanctioned PTY-level tools.
+ */
+export const DIALOG_CAPABILITIES: Record<
+  string,
+  { status: "unsupported"; reason: string; upstream?: string }
+> = {
+  approval: {
+    status: "unsupported",
+    reason:
+      "No structured approval events or response API; a blocked agent rejects agent.prompt (requires_interactive_input). Resolve dialogs via the PTY interactive fallback or upstream herdrdev/herdr#6196.",
+    upstream: "herdrdev/herdr#6196",
+  },
+  question: {
+    status: "unsupported",
+    reason:
+      "No structured question/option events or answers; same blocked-agent boundary as approval. PTY fallback only until herdrdev/herdr#6196.",
+    upstream: "herdrdev/herdr#6196",
+  },
+  attachments: {
+    status: "unsupported",
+    reason:
+      "No structured attachment channel. File-path references inside prompt text via send/command are the only v1 path; whether the provider attaches anything is provider-TUI dependent and unverified. Binary/image payloads are out of scope.",
+  },
+  goals: {
+    status: "unsupported",
+    reason:
+      "No goal state surface upstream. Provider slash commands (e.g. /goal) pass through `command` as fragile text; goal state tracking is unsupported.",
+  },
+  subagent_approvals: {
+    status: "unsupported",
+    reason:
+      "No aggregation of child/subagent approval prompts onto the parent pane upstream; same gap as approval (herdrdev/herdr#6196 follow-up scope).",
+    upstream: "herdrdev/herdr#6196",
+  },
+};
+
 export interface ProviderCapability {
   id: string;
   status: "supported";
@@ -116,12 +163,20 @@ export function capabilityPayload(pluginVersion: string, generatedAt: string): u
           "Uniform agent.* surface; provider-specific behavior of injected input is not verified by this plugin.",
       }),
     ),
+    dialogs: {
+      ...DIALOG_CAPABILITIES,
+      interactive_fallback: {
+        status: "pty_level",
+        commands: ["interrupt", "read"],
+        note: "PTY key injection + scrollback reads are the labeled fallback for driving open dialogs by hand; fragile and never reported as a structured dialog API (ADR-0019).",
+      },
+    },
     upstream_gaps: [
       "structured interrupt API (interrupt is PTY-level key injection)",
-      "queued message / steer session concept (agent.prompt during a working turn is provider-dependent follow-up behavior, not a herdr guarantee; plugin-side queue deferred — see docs/specs/controls.md)",
-      "structured approval/question dialog events and responses (blocked agents reject agent.prompt)",
+      "queued message / steer session concept (agent.prompt during a working turn is provider-dependent follow-up behavior, not a herdr guarantee; plugin-side queue deferred — herdrdev/herdr#6197, see docs/specs/controls.md)",
+      "structured approval/question dialog events and responses (blocked agents reject agent.prompt; upstream request herdrdev/herdr#6196, ADR-0019)",
       "structured conversation history (agent.read is scrollback; see rebuildup.conversations)",
-      "agent_session_path is not exposed for claude/codex, so path-kind resume is unavailable there; resume uses the reported session id only (herdrdev/herdr#6191)",
+      "agent_session_path is not exposed for claude/codex, so path-kind resume is unavailable there; resume uses the reported session id only (herdrdev/herdr#6191, closed upstream not-planned)",
     ],
     notes: [
       "target accepts a herdr agent target (pane id or agent name); agent.get resolves and validates it before every operation.",
