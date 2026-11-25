@@ -24,11 +24,13 @@ bun run src/cli.ts update <id> [--title T] [--pinned|--unpinned]
     [--archived|--unarchived] [--repo-add PATH]... [--repo-remove PATH]...
 bun run src/cli.ts archive|unarchive|pin|unpin <id>
 bun run src/cli.ts settings get|set|unset <id> [key] [value]
+bun run src/cli.ts scripts list <project|repo> [--repo PATH]
 ```
 
 Registry mutations are explicit-argument CLI invocations (never pane
-actions). t3.json/scripts resolution and script execution arrive in
-#50–#53.
+actions). `scripts list` resolves project script definitions from
+`t3.json` plus settings/env/builtin layers (read-only); script execution
+arrives in #52/#53.
 
 Full contract: `docs/contracts/projects-v1.md`. Spec: `docs/specs/projects.md`.
 Design: ADR-0009.

@@ -19,6 +19,7 @@ import {
   sessionSnapshot,
 } from "../../../packages/herdr-client/src/index";
 import { canonicalRepoRoot, discoverRepos, projectIdFromRoot, repoIndex } from "./model";
+import { BUILTIN_SCRIPTS, type ResolvedScript, resolveScripts, ScriptError } from "./scripts";
 import {
   loadSettings,
   loadState,
@@ -29,6 +30,7 @@ import {
   updateSettings,
   updateState,
 } from "./state";
+import { loadT3ProjectFile, T3JsonError, type T3ProjectFileScript } from "./t3json";
 
 const CONTRACT = "herdr-plugins.projects/v1";
 const PLUGIN_VERSION = "0.1.0";
@@ -36,6 +38,8 @@ const DEFAULT_TIMEOUT_MS = 10_000;
 
 interface PluginConfig {
   timeoutMs?: number | undefined;
+  /** Env-default script list (`scripts list` layer 2); shape validated lazily. */
+  defaultScripts?: unknown;
 }
 
 interface CliOptions extends CallOptions {
@@ -158,6 +162,7 @@ async function loadConfig(): Promise<PluginConfig> {
     return {
       timeoutMs:
         typeof parsed.timeoutMs === "number" && parsed.timeoutMs > 0 ? parsed.timeoutMs : undefined,
+      defaultScripts: parsed.defaultScripts,
     };
   } catch {
     return {};
@@ -506,6 +511,102 @@ async function cmdSettings(options: CliOptions): Promise<void> {
   });
 }
 
+/**
+ * `scripts list <project|repo>` — resolved project script definitions
+ * (read-only). The positional matches a registered project id first;
+ * otherwise it is treated as a repo path resolved via git-core. A repo
+ * path owned by a project still picks up that project's settings
+ * override. `--repo PATH` selects which member repo's t3.json to read
+ * for multi-repo projects (default: first registered repo).
+ */
+async function cmdScriptsList(options: CliOptions): Promise<void> {
+  const config = await loadConfig();
+  const timeoutMs = effectiveTimeoutMs(options, config);
+  const parsed = parseCommandArgs(options.args, new Set(["--repo"]));
+  const target = parsed.positionals[0];
+  if (!target || parsed.positionals.length > 1) {
+    fail("scripts list requires exactly one <project|repo> argument", 2);
+  }
+  const repoOption = parsed.values.get("--repo");
+
+  const state = await loadState();
+  let projectId: string | null = null;
+  let root: string;
+
+  const project = state.projects[target as string];
+  if (project) {
+    projectId = project.id;
+    let memberRoot = project.repos[0]?.root;
+    if (repoOption !== undefined) {
+      const wanted = canonicalRepoRoot(path.resolve(repoOption));
+      memberRoot = project.repos.find((r) => canonicalRepoRoot(r.root) === wanted)?.root;
+      if (memberRoot === undefined) {
+        fail(`repo not registered to project: ${repoOption}`, 1, "repo_not_found", {
+          project_id: projectId,
+          root: repoOption,
+        });
+      }
+    }
+    if (memberRoot === undefined) {
+      fail(`project has no registered repos: ${projectId}`, 1, "no_repos", {
+        project_id: projectId,
+      });
+    }
+    root = memberRoot as string;
+  } else {
+    if (repoOption !== undefined) {
+      fail("--repo requires a project id target, not a repo path", 2);
+    }
+    // Not a project id: treat as a repo path. Non-git/unknown paths
+    // surface the git contract kinds (not_a_repo, bare_repo, ...).
+    const resolved = await resolveRepoPath(target as string, timeoutMs);
+    root = resolved.root;
+    projectId = repoIndex(state).get(canonicalRepoRoot(root)) ?? null;
+  }
+
+  let overrideRaw: string | undefined;
+  if (projectId !== null) {
+    const settings = await loadSettings(projectId);
+    const value = settings["defaultProjectScripts"];
+    overrideRaw = typeof value === "string" ? value : undefined;
+  }
+
+  let t3Scripts: T3ProjectFileScript[] | undefined;
+  try {
+    const t3 = await loadT3ProjectFile(root);
+    t3Scripts = t3?.scripts;
+  } catch (err) {
+    if (err instanceof T3JsonError) {
+      fail(err.message, 1, "t3json_invalid", { path: err.file, reason: err.reason });
+    }
+    throw err;
+  }
+
+  let scripts: ResolvedScript[];
+  try {
+    scripts = resolveScripts({
+      override: overrideRaw,
+      envDefault: config.defaultScripts,
+      t3Scripts,
+      builtin: BUILTIN_SCRIPTS,
+    });
+  } catch (err) {
+    if (err instanceof ScriptError) {
+      fail(err.message, 1, err.reason, { layer: err.layer });
+    }
+    throw err;
+  }
+
+  emit({
+    contract: CONTRACT,
+    command: "scripts list",
+    project_id: projectId,
+    repo_root: root,
+    scripts,
+    generated_at: now(),
+  });
+}
+
 async function cmdCapability(): Promise<void> {
   const config = await loadConfig();
   emit({
@@ -524,6 +625,7 @@ async function cmdCapability(): Promise<void> {
       "pin",
       "unpin",
       "settings",
+      "scripts",
     ],
     read_only: false,
     mutation_commands: [
@@ -554,6 +656,7 @@ Usage:
   projects settings get <id> [key]
   projects settings set <id> <key> <value>
   projects settings unset <id> <key>
+  projects scripts list <project|repo> [--repo PATH]
   projects capability
 `;
 
@@ -580,6 +683,12 @@ async function main(): Promise<void> {
       return flagCommand(options, "unpin", "pinned", false);
     case "settings":
       return cmdSettings(options);
+    case "scripts":
+      if (options.args[0] !== "list") {
+        fail(`unknown scripts subcommand: ${options.args[0] ?? ""}`, 2);
+      }
+      options.args = options.args.slice(1);
+      return cmdScriptsList(options);
     case "capability":
       return cmdCapability();
     case "help":

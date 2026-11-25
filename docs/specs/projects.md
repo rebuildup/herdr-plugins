@@ -36,6 +36,7 @@ membership), and #3 (script execution).
 | `update <id>` | Title/pin/archive plus `--repo-add`/`--repo-remove` membership in one locked write. |
 | `archive`/`unarchive`/`pin`/`unpin <id>` | Non-destructive flag setters; no delete. |
 | `settings get/set/unset` | Per-project override keys under `<stateDir>/settings/`; allow-listed keys only. |
+| `scripts list <project\|repo>` | Resolved script definitions with per-script `source`; read-only. |
 
 All commands accept `--session`/`--socket`/`--timeout`; only `discover`
 needs a live herdr session. Mutations are explicit-argument CLI
@@ -53,9 +54,35 @@ invocations — no manifest actions.
   project-scoped keys relevant to scripts/display. Values are verbatim
   strings; #50 owns typed resolution.
 
+## t3.json and script resolution (#50)
+
+- `plugins/projects/src/t3json.ts` loads `<repoRoot>/t3.json`,
+  mirroring upstream `t3ProjectFile.ts`: `$schema`, `iconPath`,
+  `defaultThreadEnvMode`, `worktreeSubmodules`,
+  `worktreeSparsePatternsPath`, `scripts[]` (max 50). Unknown keys are
+  ignored; malformed JSON/schema violations raise `T3JsonError`
+  (`invalid_json`/`invalid_schema`).
+- `plugins/projects/src/scripts.ts` resolves the effective script list
+  by layer priority: project settings `defaultProjectScripts` override →
+  plugin config `defaultScripts` (env default) → repo `t3.json` →
+  builtin (empty — upstream defines no builtin scripts). The first
+  active layer wins wholesale; explicit empty override/env lists are
+  authoritative while an empty `t3.json` `scripts` falls through
+  (upstream parity). List entries may be definition objects or bare
+  name strings referencing lower-layer definitions; unresolved names
+  fail `unknown_script`.
+- For multi-repo projects `scripts list` reads `t3.json` from the
+  first registered repo by default; `--repo PATH` selects another
+  member (must canonicalize to a member root). A bare repo path not in
+  any project still resolves (env/t3.json layers only, `project_id`
+  null); a path owned by a project picks up that project's override.
+- Trust boundary: repo `t3.json` is trusted because the user
+  registered/operates that repo; commands execute with user privileges.
+  `scripts list` only reads definitions — execution gating is #53's
+  runner concern.
+
 ## Non-goals
 
-- No t3.json parsing or script definitions — #50.
 - No script execution — #52/#53.
 - No worktree/workspace creation — herdr/Worktrunk own lifecycle.
 - No per-session namespacing of the registry.
