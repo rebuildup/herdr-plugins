@@ -36,6 +36,7 @@ import {
   type FetchImpl,
   fetchJson,
 } from "./quota";
+import { gcPluginStateCache, PLUGIN_CACHE_RETENTION_SECONDS } from "./state";
 
 const PLUGIN_ID = "rebuildup.usage";
 
@@ -453,9 +454,13 @@ async function quotaForHub(
   }
 
   const cached = await readHubCache(stateDir, config.id);
-  const fresh = cached !== null && cached.ageSeconds < ttl;
-  if (options.refresh !== true && fresh && cached !== null) {
-    return cachedHubResult(config, endpoint, fetchedAt, ttl, cached, false, null);
+  // Retention bound (T4 / #93): entries past the shared retention
+  // window are never served, even as stale (see quota.ts).
+  const usable =
+    cached !== null && cached.ageSeconds < PLUGIN_CACHE_RETENTION_SECONDS ? cached : null;
+  const fresh = usable !== null && usable.ageSeconds < ttl;
+  if (options.refresh !== true && fresh && usable !== null) {
+    return cachedHubResult(config, endpoint, fetchedAt, ttl, usable, false, null);
   }
 
   const authFiles = await fetchJson(
@@ -468,13 +473,13 @@ async function quotaForHub(
     status: "unauthorized" | "request_failed",
     detail: string,
   ): Promise<QuotaHubResult> => {
-    if (cached !== null) {
+    if (usable !== null) {
       return cachedHubResult(
         config,
         endpoint,
         fetchedAt,
         ttl,
-        cached,
+        usable,
         true,
         `hub request failed (${detail}); serving cached reading`,
       );
@@ -563,6 +568,8 @@ export async function collectQuotaHubs(options: HubOptions = {}): Promise<QuotaH
   const timeoutMs = options.timeoutMs ?? 10_000;
   const ttl = options.cacheTtlSeconds ?? 300;
   const stateDir = options.stateDir ?? pluginDirs(PLUGIN_ID).stateDir;
+  // Retention GC (T4 / #93) — shared with collectQuota; best-effort.
+  await gcPluginStateCache(stateDir);
   const results: QuotaHubResult[] = [];
   for (const config of options.hubs ?? []) {
     if (typeof config.id !== "string" || config.id === "" || typeof config.url !== "string") {

@@ -13,8 +13,8 @@ Prerequisites: herdr ≥ 0.9.0, Bun on `PATH`, and the
 [`rebuildup.conversations`](../conversations/) plugin installed and
 indexed (`conversations index`/`refresh`) — `usage` aggregates its
 normalized event index through the public read-only contract, never
-its state files (ADR-0013). `capability`, `usage`, `quota`, and
-`divergence` work without a reachable herdr session.
+its state files (ADR-0013). `capability`, `usage`, `quota`,
+`divergence`, and `cost` work without a reachable herdr session.
 
 ## What it does
 
@@ -34,7 +34,18 @@ its state files (ADR-0013). `capability`, `usage`, `quota`, and
   `provider_reported_cost_usd` is labeled as provider-reported, not a
   billing amount.
 
-No cost estimation in this version — that lands in #93. Subscription
+T4 (#93) adds `cost`: an **estimated** API-cost figure per model —
+list-price math over a LiteLLM rate table (same upstream T3 Code
+prices from), cached 24h under the plugin state dir. Every payload is
+labeled `estimate: true` with a fixed disclaimer; it is never a bill,
+never blended with `provider_reported_cost_usd`, and unknown models
+report `unpriced`/`null` — never a guessed price. User prices can be
+supplied via config `modelPrices` (USD per million tokens). All
+plugin caches (quota readings, hub readings, the price table) share a
+30-day retention with best-effort GC; referenced entries are never
+collected (ADR-0016).
+
+Subscription
 quota/reset surfacing (`quota`) shipped in #91 behind the ADR-0014
 credential boundary: provider credential artifacts are read in memory
 only to authenticate the providers' own read-only quota endpoints —
@@ -67,12 +78,14 @@ bun run src/cli.ts usage [--pane PANE] [--session-id ID] [--provider ID] \
 bun run src/cli.ts quota [--provider ID] [--refresh] [--timeout MS]
 bun run src/cli.ts divergence [--provider ID] [--from ISO] [--to ISO] \
   [--refresh] [--offline] [<usage selector flags>]
+bun run src/cli.ts cost [--provider ID] [--from ISO] [--to ISO] \
+  [--refresh] [--offline] [<usage selector flags>]
 ```
 
 - `capability` → contract banner, `sources[]` data-source matrix
   (`conversations-index` available/unavailable, `subscription-quota-api`
-  per-provider coverage, declared-unsupported billing slot),
-  aggregation dimensions.
+  per-provider coverage, `cliproxy-api` hubs, `model-pricing` rate
+  table), aggregation dimensions.
 - `usage` → `{totals, breakdowns, cache_tokens, coverage, sessions,
   source, warnings}`. Selectors forward to `conversations usage`; the
   whole export is paged (500 events/page) and aggregated in one call.
@@ -94,6 +107,15 @@ bun run src/cli.ts divergence [--provider ID] [--from ISO] [--to ISO] \
   reconciled), `no_measured_usage`, `quota_unavailable`, `no_data`;
   `window_alignment` notes only whether the `--from`/`--to` span
   matches a reported quota window duration.
+- `cost` → `{cost, totals, breakdowns, coverage, sessions, source,
+  warnings}` where `cost` carries `estimate: true`, the disclaimer,
+  `estimated_cost_usd` (priced models only), `estimate_complete`,
+  `unpriced_models[]`, `provider_reported_cost_usd` (separate figure),
+  `pricing` provenance (`status`/`source`/`fetched_at`/`cache`), and
+  `by_model[]` rows with `estimated_cost_usd` + `cost_source`
+  (`model_priced`/`unpriced`). Pricing source override:
+  `HERDR_USAGE_PRICING_URL` env or `pricingUrl` config; user prices:
+  `modelPrices` config.
 
 The conversations plugin is located via `--conversations-root` /
 `HERDR_USAGE_CONVERSATIONS_ROOT` / `conversationsRoot` config → sibling
@@ -105,4 +127,4 @@ to the standard plugin state location and can be overridden with
 Full contract: `docs/contracts/usage-v1.md`.
 Spec: `docs/specs/usage.md`. Design: ADR-0013 (index reuse),
 ADR-0014 (quota credential boundary), ADR-0015 (hub credential
-boundary).
+boundary), ADR-0016 (cost pricing + retention/GC).

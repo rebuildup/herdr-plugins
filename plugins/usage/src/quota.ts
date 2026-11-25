@@ -24,6 +24,7 @@ import type {
   QuotaWindow,
   QuotaWindowKind,
 } from "./model";
+import { gcPluginStateCache, PLUGIN_CACHE_RETENTION_SECONDS } from "./state";
 
 const PLUGIN_ID = "rebuildup.usage";
 
@@ -791,9 +792,14 @@ async function quotaForProvider(
   }
 
   const cached = await readCache(stateDir, spec.id);
-  const fresh = cached !== null && cached.ageSeconds < ttl;
-  if (options.refresh !== true && fresh && cached !== null) {
-    return cachedResult(spec.id, fetchedAt, ttl, cached, false, null);
+  // Retention bound (T4 / #93): a cache entry older than the shared
+  // retention window is never served, even as stale — GC normally
+  // removes it first, this guard covers a failed/ skipped GC.
+  const usable =
+    cached !== null && cached.ageSeconds < PLUGIN_CACHE_RETENTION_SECONDS ? cached : null;
+  const fresh = usable !== null && usable.ageSeconds < ttl;
+  if (options.refresh !== true && fresh && usable !== null) {
+    return cachedResult(spec.id, fetchedAt, ttl, usable, false, null);
   }
 
   const fetched =
@@ -815,13 +821,13 @@ async function quotaForProvider(
   }
 
   // Endpoint failed: serve the last good reading, explicitly stale,
-  // rather than reporting a fabricated fresh zero.
-  if (cached !== null) {
+  // rather than reporting a fabricated fresh zero — within retention.
+  if (usable !== null) {
     return cachedResult(
       spec.id,
       fetchedAt,
       ttl,
-      cached,
+      usable,
       true,
       `fetch failed (${fetched.detail}); serving cached reading`,
     );
@@ -840,6 +846,10 @@ export async function collectQuota(options: QuotaOptions = {}): Promise<QuotaPro
   const ttl = options.cacheTtlSeconds ?? QUOTA_CACHE_TTL_SECONDS;
   const stateDir = options.stateDir ?? pluginDirs(PLUGIN_ID).stateDir;
   const endpoints = resolveEndpoints(options.endpoints, env);
+
+  // Retention GC (T4 / #93): drop cache entries past the shared
+  // retention window before reading. Best-effort — never fails.
+  await gcPluginStateCache(stateDir);
 
   const requested = options.providers ?? QUOTA_PROVIDERS.map((p) => p.id);
   const results: QuotaProviderResult[] = [];

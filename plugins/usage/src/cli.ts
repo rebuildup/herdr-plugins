@@ -14,17 +14,23 @@
 import path from "node:path";
 import { pluginDirs } from "../../../packages/herdr-client/src/index";
 import { aggregateUsage, buildCacheTokens } from "./aggregate";
+import { computeModelCosts } from "./cost";
 import { buildDivergence } from "./divergence";
 import { collectQuotaHubs, DEFAULT_HUB_KEY_ENV, hubBaseUrl } from "./hub";
 import {
   type BreakdownEntry,
   CONTRACT,
   CONVERSATIONS_CONTRACT,
+  type CostEstimate,
+  type ModelPriceOverride,
+  type PricingInfo,
   type QuotaEndpoints,
   type QuotaHubConfig,
   type SourceOptions,
+  type UsageTotals,
   type UsageWindow,
 } from "./model";
+import { collectPricing, PRICING_CACHE_TTL_SECONDS, PRICING_SOURCE_URL } from "./pricing";
 import { collectQuota, QUOTA_CACHE_TTL_SECONDS, QUOTA_PROVIDERS } from "./quota";
 import {
   type CliCallOptions,
@@ -130,6 +136,10 @@ interface PluginConfig {
   quotaEndpoints?: QuotaEndpoints;
   /** CLIProxyAPI-equivalent quota hubs (T3 / #92, ADR-0015). */
   quotaHubs?: QuotaHubConfig[];
+  /** Estimated-cost pricing (T4 / #93): source override + TTL + user prices. */
+  pricingUrl?: string;
+  pricingCacheTtlSeconds?: number;
+  modelPrices?: Record<string, ModelPriceOverride>;
 }
 
 async function loadConfig(): Promise<PluginConfig> {
@@ -224,7 +234,7 @@ async function cmdCapability(): Promise<void> {
     version: PLUGIN_VERSION,
     read_only: true,
     mutation_commands: [],
-    commands: ["capability", "usage", "quota", "divergence"],
+    commands: ["capability", "usage", "quota", "divergence", "cost"],
     sources: [
       sourceEntry,
       {
@@ -265,6 +275,16 @@ async function cmdCapability(): Promise<void> {
           "shares the quota cache TTL under the plugin state dir; stale readings are flagged, never silently refreshed",
         detail:
           "Hub management keys come from env vars named by config `quotaHubs[].keyEnv`; they are sent only to the configured hub origin and never logged, persisted, cached, or emitted (ADR-0015).",
+      },
+      {
+        id: "model-pricing",
+        kind: "price-table",
+        status: "available",
+        source: PRICING_SOURCE_URL,
+        freshness:
+          "cached under the plugin state dir (default 24h TTL, 30-day retention); stale tables are flagged, never silently trusted",
+        detail:
+          "Estimated API cost only — list-price math over standard rates, never a bill. Unknown models report unpriced, never a guessed price. User overrides via config `modelPrices`.",
       },
     ],
     aggregation: {
@@ -475,6 +495,83 @@ async function cmdQuota(options: CliOptions): Promise<void> {
   });
 }
 
+// --- cost -------------------------------------------------------------------------
+
+/** Fixed disclaimer attached to every `cost` payload (T4 / #93). */
+export const COST_DISCLAIMER =
+  "estimated_cost_usd is a list-price ESTIMATE computed from the model " +
+  "pricing table (LiteLLM snapshot or user modelPrices overrides) over " +
+  "standard token rates. It is not a bill, invoice, or subscription " +
+  "charge: it excludes speed premiums, context-tier repricing, provider " +
+  "discounts, taxes, and quota consumption. provider_reported_cost_usd is " +
+  "a separate provider-reported figure and is never blended in. Models " +
+  "without a rate report unpriced — see cost.unpriced_models.";
+
+/**
+ * Estimated API cost report (T4 / #93). Runs the same aggregation as
+ * `usage`, then prices each `by_model` bucket against the rate table.
+ * The estimate is always labeled (`cost.estimate: true` +
+ * `disclaimer`); an unavailable table degrades to all-unpriced with a
+ * `pricing_unavailable` warning, never an error exit and never a
+ * fabricated zero.
+ */
+async function cmdCost(options: CliOptions): Promise<void> {
+  const config = await loadConfig();
+  const window = parseWindow(options);
+  const report = await buildUsageReport(options, config, window);
+  const call = callOptions(options, config);
+
+  const pricingTtl =
+    typeof config.pricingCacheTtlSeconds === "number" && config.pricingCacheTtlSeconds > 0
+      ? Math.floor(config.pricingCacheTtlSeconds)
+      : PRICING_CACHE_TTL_SECONDS;
+  const pricing = await collectPricing({
+    refresh: options.refresh === true,
+    timeoutMs: call.timeoutMs ?? 10_000,
+    // env > config.json > default (same precedence as quota endpoints)
+    sourceUrl: process.env.HERDR_USAGE_PRICING_URL ?? config.pricingUrl,
+    ttlSeconds: pricingTtl,
+    modelPrices: config.modelPrices,
+  });
+
+  const breakdowns = report.breakdowns as { by_model: BreakdownEntry[] };
+  const totals = report.totals as UsageTotals;
+  const computation = computeModelCosts(breakdowns.by_model, pricing);
+
+  const cost: CostEstimate & { by_model: ReturnType<typeof computeModelCosts>["by_model"] } = {
+    estimate: true,
+    disclaimer: COST_DISCLAIMER,
+    estimated_cost_usd: computation.estimated_cost_usd,
+    estimate_complete: computation.estimate_complete,
+    priced_models: computation.priced_models,
+    unpriced_models: computation.unpriced_models,
+    provider_reported_cost_usd: totals.provider_reported_cost_usd,
+    pricing: pricing.info satisfies PricingInfo,
+    by_model: computation.by_model,
+  };
+
+  const warnings = [...(report.warnings as string[])];
+  if (pricing.info.status === "unavailable") warnings.push("pricing_unavailable");
+  if (pricing.info.status === "stale") warnings.push("pricing_table_stale");
+  if (computation.unpriced_models.length > 0) warnings.push("unpriced_models");
+
+  emit({
+    contract: CONTRACT,
+    command: "cost",
+    window: report.window,
+    filters: report.filters,
+    cost,
+    totals,
+    breakdowns: report.breakdowns,
+    coverage: report.coverage,
+    sessions: report.sessions,
+    source: report.source,
+    warnings,
+    ...(typeof report.hint === "string" ? { hint: report.hint } : {}),
+    generated_at: now(),
+  });
+}
+
 // --- divergence -------------------------------------------------------------------
 
 /**
@@ -566,6 +663,8 @@ async function main(): Promise<void> {
       return cmdUsage(options);
     case "quota":
       return cmdQuota(options);
+    case "cost":
+      return cmdCost(options);
     case "divergence":
       return cmdDivergence(options);
     case "help":
@@ -576,7 +675,7 @@ async function main(): Promise<void> {
         plugin: PLUGIN_ID,
         version: PLUGIN_VERSION,
         usage:
-          "bun run src/cli.ts <capability|usage|quota|divergence> [--pane PANE] [--session-id ID] [--provider ID] [--from ISO] [--to ISO] [--refresh] [--session NAME] [--socket PATH] [--timeout MS] [--offline] [--conversations-root DIR] [--conversations-state-dir DIR]",
+          "bun run src/cli.ts <capability|usage|quota|divergence|cost> [--pane PANE] [--session-id ID] [--provider ID] [--from ISO] [--to ISO] [--refresh] [--session NAME] [--socket PATH] [--timeout MS] [--offline] [--conversations-root DIR] [--conversations-state-dir DIR]",
       });
       return;
     default:
