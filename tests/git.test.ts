@@ -444,6 +444,9 @@ describe("remote operations", () => {
     const repo = initRepo();
     const bare = tempDir();
     spawnSync("git", ["init", "--bare", "-q", bare]);
+    // Pin HEAD so clones check out main regardless of the host's
+    // init.defaultBranch (Linux CI defaults differ from macOS).
+    spawnSync("git", ["-C", bare, "symbolic-ref", "HEAD", "refs/heads/main"]);
     git(repo, ["remote", "add", "origin", bare]);
     return { repo, bare };
   }
