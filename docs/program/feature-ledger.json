@@ -239,7 +239,7 @@
       "issues": [5],
       "depends_on": [],
       "acceptance": "Provider アダプターごとの session 対応付け・履歴正規化 (user/assistant/tool call/tool result/turn event/approval)・検索・ページング・再読込時の重複/欠落を扱う。未対応と欠落を明示し PTY 推測で捏造しない。",
-      "verification": "未着手。herdr agent_session の公開範囲は upstream 確認待ち (#5 依存)。Agent Router との責務境界を遵守。"
+      "verification": "実現可能性調査済み (#5 コメント): provider transcript 正規化 indexer + herdr-plugins.conversations/v1 契約として plugin 化可能。agent_session/cwd/pane_id が対応付けキー。upstream gap 候補: agent_session_path 非公開・attention 粒度 (#8 と同根)。分解は後続 train で実施。"
     },
     {
       "id": "provider-controls-composer",
@@ -276,7 +276,7 @@
       "issues": [28],
       "depends_on": ["conversations"],
       "acceptance": "token/input/output/cache、model/host/project 別集計、履歴保持、subscription quota/reset、HTTP quota source 連携、推定 API コストと実請求の区別。欠損をゼロ扱いしない。",
-      "verification": "未着手。Provider ごとのデータ源・対応範囲・鮮度を明示し実データと照合。"
+      "verification": "実現可能性調査済み (#28 コメント): provider 所有 artifact (transcript/quota endpoint) 由来で plugin 化可能。quota endpoint の credential 境界は ADR 要。#5 index 再利用が自然。分解は後続 train で実施。"
     },
     {
       "id": "text-generation",
