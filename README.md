@@ -21,6 +21,7 @@ clients through one versioned contract.
 | [inbox](plugins/inbox/) | `rebuildup.inbox` | Work inbox for agent panes: settle / snooze / restore with persistent user-side organize state, structured CLI, and TUI/CLI parity. |
 | [conversations](plugins/conversations/) | `rebuildup.conversations` | Provider transcript indexer: normalizes claude/codex/opencode session transcripts into structured conversation events (turn/user/assistant/tool/usage) — never PTY scraping. |
 | [usage](plugins/usage/) | `rebuildup.usage` | Token usage aggregation over the conversations index: per provider/model/host/project/session/pane totals with honest missing-data reporting. |
+| [textgen](plugins/textgen/) | `rebuildup.textgen` | Text generation (`herdr-plugins.textgen/v1`): six tasks over dedicated agent panes or opt-in API generators, with strict input/output boundaries. Generation only — execution stays with the caller. |
 
 ## Development
 

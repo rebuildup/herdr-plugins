@@ -38,6 +38,10 @@
       "name": "@herdr-plugins/projects",
       "version": "0.1.0",
     },
+    "plugins/textgen": {
+      "name": "@herdr-plugins/textgen",
+      "version": "0.6.0",
+    },
     "plugins/usage": {
       "name": "@herdr-plugins/usage",
       "version": "0.5.0",
@@ -75,6 +79,8 @@
     "@herdr-plugins/inbox": ["@herdr-plugins/inbox@workspace:plugins/inbox"],
 
     "@herdr-plugins/projects": ["@herdr-plugins/projects@workspace:plugins/projects"],
+
+    "@herdr-plugins/textgen": ["@herdr-plugins/textgen@workspace:plugins/textgen"],
 
     "@herdr-plugins/usage": ["@herdr-plugins/usage@workspace:plugins/usage"],
 
