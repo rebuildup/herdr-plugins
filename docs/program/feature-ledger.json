@@ -239,7 +239,7 @@
       "issues": [5, 86, 87, 88, 89],
       "depends_on": [],
       "acceptance": "Provider アダプターごとの session 対応付け・履歴正規化 (user/assistant/tool call/tool result/turn event/approval)・検索・ページング・再読込時の重複/欠落を扱う。未対応と欠落を明示し PTY 推測で捏造しない。",
-      "verification": "実現可能性調査済み (#5 コメント): provider transcript 正規化 indexer + herdr-plugins.conversations/v1 契約として plugin 化可能。agent_session/cwd/pane_id が対応付けキー。upstream gap 候補: agent_session_path 非公開・attention 粒度 (#8 と同根)。分解は後続 train で実施。T1 (#86) 実装済み: plugins/conversations + herdr-plugins.conversations/v1 (claude adapter、identity/usage field、stale 検出)。contract/spec/ADR-0012 あり。"
+      "verification": "T1-T3 (#86-#88) 実装済み: plugins/conversations v0.5.0 + herdr-plugins.conversations/v1 確定 (claude/codex/opencode 3 adapter、identity/usage field、stale 検出、history/search/usage/show read API)。contract/spec/ADR-0012 あり。T4 (#89): 契約 v1 stable 化 (versioning 方針を contract に明記)、実データ検証を docs/research/conversations-v1-real-data-verification.md に記録 (実 claude/codex/opencode transcript で index/sessions/history/search/usage/show・増分・stale・transcript_missing を隔離 herdr 0.9.5 session で実機確認)、upstream gap は herdrdev/herdr#6191 として起票済み (agent_session_path 非公開、#4/#6 にも効く additive 要望)。attention 粒度不足は #8 と同根で workaround なし。残差: Linux/Windows 公式導入検証は未実施。"
     },
     {
       "id": "provider-controls-composer",
