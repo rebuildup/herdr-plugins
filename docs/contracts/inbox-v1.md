@@ -87,7 +87,14 @@ not globally unique.
 | `capability` | — | Discovery document (above). |
 
 Global flags (after the command): `--session NAME`, `--socket PATH`,
-`--timeout MS` (per-request timeout, default 10000).
+`--timeout MS` (per-request timeout, default 10000). Global flags also
+accept `--name=value` form.
+
+Option parsing is strict: every `-`-prefixed token must be a flag the
+command documents (`--until`/`--for` on `snooze`, `--until` on `_wake`,
+`--interval` on `watch`); unknown options, `--flag=value` on boolean
+flags, missing flag values, invalid values, and extra positionals are
+usage errors (exit 2). A `--` separator ends option parsing.
 
 `--until` accepts ISO 8601, `+30m`/`+2h`/`+1d`, or bare `30m`. Without
 `--until`, `snooze` reads `defaultSnooze` from the plugin config dir's

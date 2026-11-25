@@ -41,6 +41,22 @@ interface CliOptions extends CallOptions {
   session: string | undefined;
 }
 
+function takeGlobalValue(args: string[], i: number, flag: string): string {
+  const value = args[i + 1];
+  if (value === undefined || value.length === 0 || value.startsWith("-")) {
+    fail(`option ${flag} requires a value`, 2);
+  }
+  return value;
+}
+
+function parseGlobalTimeout(raw: string): number {
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) {
+    fail(`invalid --timeout: ${raw} (expected a positive number of milliseconds)`, 2);
+  }
+  return value;
+}
+
 function parseArgs(argv: string[]): CliOptions {
   const args = [...argv];
   const command = args.shift() ?? "help";
@@ -49,12 +65,22 @@ function parseArgs(argv: string[]): CliOptions {
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i] as string;
     if (arg === "--session") {
-      options.session = args[++i];
+      options.session = takeGlobalValue(args, i, "--session");
+      i += 1;
+    } else if (arg.startsWith("--session=")) {
+      options.session = arg.slice("--session=".length);
+      if (options.session.length === 0) fail("option --session requires a value", 2);
     } else if (arg === "--socket") {
-      options.socketPath = args[++i];
+      options.socketPath = takeGlobalValue(args, i, "--socket");
+      i += 1;
+    } else if (arg.startsWith("--socket=")) {
+      options.socketPath = arg.slice("--socket=".length);
+      if (!options.socketPath) fail("option --socket requires a value", 2);
     } else if (arg === "--timeout") {
-      const value = Number(args[++i]);
-      if (Number.isFinite(value) && value > 0) options.timeoutMs = value;
+      options.timeoutMs = parseGlobalTimeout(takeGlobalValue(args, i, "--timeout"));
+      i += 1;
+    } else if (arg.startsWith("--timeout=")) {
+      options.timeoutMs = parseGlobalTimeout(arg.slice("--timeout=".length));
     } else {
       rest.push(arg);
     }
@@ -81,30 +107,91 @@ function fail(message: string, code = 1): never {
   emitError(message, code);
 }
 
+/**
+ * First value of a flag, in either `--name value` or `--name=value` form.
+ * Tokens after a `--` separator are positional and never match.
+ */
 function flagValue(args: string[], name: string): string | undefined {
-  const index = args.indexOf(name);
-  if (index === -1) return undefined;
-  return args[index + 1];
-}
-
-function positional(args: string[]): string[] {
-  const out: string[] = [];
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i] as string;
+    if (arg === "--") break;
+    if (arg === name) return args[i + 1];
+    if (arg.startsWith(`${name}=`)) return arg.slice(name.length + 1);
+  }
+  return undefined;
+}
+
+type FlagKind = "boolean" | "value";
+
+/**
+ * Strict option check: every `-`-prefixed token before a `--` separator
+ * must be a whitelisted flag for this command (`--name=value` counts as
+ * `--name`). Unknown options, `--flag=value` on boolean flags, and value
+ * flags with a missing/option-like value are usage errors (exit 2).
+ * A lone `-` is a positional, not an option.
+ */
+function validateFlags(args: string[], spec: Record<string, FlagKind>): void {
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i] as string;
+    if (arg === "--") break;
+    if (arg === "-" || !arg.startsWith("-")) continue;
+    const eq = arg.indexOf("=");
+    const name = eq === -1 ? arg : arg.slice(0, eq);
+    const kind = spec[name];
+    if (!kind) fail(`unknown option: ${arg}`, 2);
+    if (kind === "boolean") {
+      if (eq !== -1) fail(`option ${name} does not take a value`, 2);
+      continue;
+    }
+    if (eq !== -1) continue;
+    const next = args[i + 1];
     if (
-      arg === "--until" ||
-      arg === "--for" ||
-      arg === "--session" ||
-      arg === "--socket" ||
-      arg === "--timeout"
+      next === undefined ||
+      next === "--" ||
+      next.startsWith("--") ||
+      (next.length > 1 && next.startsWith("-") && next in spec)
     ) {
+      fail(`option ${name} requires a value`, 2);
+    }
+    i += 1;
+  }
+}
+
+/** Positional args, skipping flag values. Everything after `--` counts. */
+function positionals(args: string[], valueFlags: string[]): string[] {
+  const out: string[] = [];
+  let afterSeparator = false;
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i] as string;
+    if (afterSeparator) {
+      out.push(arg);
+      continue;
+    }
+    if (arg === "--") {
+      afterSeparator = true;
+      continue;
+    }
+    if (valueFlags.includes(arg)) {
       i += 1;
       continue;
     }
-    if (arg.startsWith("--")) continue;
+    if (arg.length > 1 && arg.startsWith("-")) continue;
     out.push(arg);
   }
   return out;
+}
+
+/** More positionals than the command accepts is a usage error. */
+function assertMaxPositionals(
+  args: string[],
+  valueFlags: string[],
+  max: number,
+  usage: string,
+): void {
+  const pos = positionals(args, valueFlags);
+  if (pos.length > max) {
+    fail(`${usage}: unexpected argument ${JSON.stringify(pos[max])}`, 2);
+  }
 }
 
 interface PluginContext {
@@ -122,8 +209,8 @@ function invocationContext(): PluginContext {
   }
 }
 
-async function resolvePaneId(args: string[]): Promise<string> {
-  const positionalArgs = positional(args);
+async function resolvePaneId(args: string[], valueFlags: string[] = []): Promise<string> {
+  const positionalArgs = positionals(args, valueFlags);
   const explicit =
     positionalArgs[0] ?? process.env.HERDR_PANE_ID ?? invocationContext().focused_pane_id;
   if (!explicit) {
@@ -187,6 +274,8 @@ async function projectMetadata(
 }
 
 async function cmdList(options: CliOptions): Promise<void> {
+  validateFlags(options.args, {});
+  assertMaxPositionals(options.args, [], 0, "list");
   const now = new Date();
   const snapshot = await sessionSnapshot(options);
   const state = await loadState();
@@ -216,7 +305,15 @@ async function cmdOrganize(
   options: CliOptions,
   kind: "settle" | "snooze" | "restore",
 ): Promise<void> {
-  const paneId = await resolvePaneId(options.args);
+  const snoozeFlags: Record<string, FlagKind> = { "--until": "value", "--for": "value" };
+  validateFlags(options.args, kind === "snooze" ? snoozeFlags : {});
+  assertMaxPositionals(
+    options.args,
+    kind === "snooze" ? ["--until", "--for"] : [],
+    1,
+    `${kind} <pane_id>`,
+  );
+  const paneId = await resolvePaneId(options.args, kind === "snooze" ? ["--until", "--for"] : []);
   const now = new Date();
   const snapshot = await sessionSnapshot(options);
   const pane = await findPane(snapshot, paneId);
@@ -366,6 +463,8 @@ const WAKE_MAX_SLEEP_MS = 2_000_000_000;
 
 /** Internal `_wake` command: sleep until the deadline, then reconcile once. */
 async function cmdWake(options: CliOptions): Promise<void> {
+  validateFlags(options.args, { "--until": "value" });
+  assertMaxPositionals(options.args, ["--until"], 0, "_wake");
   const untilSpec = flagValue(options.args, "--until");
   if (!untilSpec) fail("_wake requires --until <iso8601>", 2);
   const until = parseUntilSpec(untilSpec, new Date());
@@ -378,6 +477,8 @@ async function cmdWake(options: CliOptions): Promise<void> {
 }
 
 async function cmdReconcile(options: CliOptions): Promise<void> {
+  validateFlags(options.args, {});
+  assertMaxPositionals(options.args, [], 0, "reconcile");
   const result = await reconcileOnce(options);
   emit({ contract: CONTRACT, command: "reconcile", ...result });
 }
@@ -392,8 +493,14 @@ function emitLine(payload: unknown): void {
  * Stops on SIGINT/SIGTERM (exit 0) or unexpected stream end (exit 1).
  */
 async function cmdWatch(options: CliOptions): Promise<void> {
-  const intervalSec = Number(flagValue(options.args, "--interval") ?? "60");
-  const intervalMs = (Number.isFinite(intervalSec) && intervalSec > 0 ? intervalSec : 60) * 1000;
+  validateFlags(options.args, { "--interval": "value" });
+  assertMaxPositionals(options.args, ["--interval"], 0, "watch");
+  const intervalRaw = flagValue(options.args, "--interval");
+  const intervalSec = intervalRaw === undefined ? 60 : Number(intervalRaw);
+  if (!Number.isFinite(intervalSec) || intervalSec <= 0) {
+    fail(`invalid --interval: ${intervalRaw} (expected a positive number of seconds)`, 2);
+  }
+  const intervalMs = intervalSec * 1000;
 
   const subscription = subscribeAgentEvents(options);
   await subscription.started;
@@ -450,6 +557,8 @@ async function cmdWatch(options: CliOptions): Promise<void> {
 }
 
 async function cmdCapability(options: CliOptions): Promise<void> {
+  validateFlags(options.args, {});
+  assertMaxPositionals(options.args, [], 0, "capability");
   emit({
     contract: CONTRACT,
     plugin: PLUGIN_ID,

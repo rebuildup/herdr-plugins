@@ -61,7 +61,18 @@ are network-bound; `diff`/`compare` accept
 `files`/`diff`/`log` accept repeatable `--path <pathspec>` values, passed
 to git after `--`; values starting with `-` are rejected. All output is a
 single JSON document; errors are `{ok:false,error:{code,message}}` on
-stderr with exit 1 (2 for usage).
+stderr.
+
+**Exit-code contract:** `0` success, `1` handled runtime/environment
+failure (git missing/error/timeout, not-a-repo, pane lookup, gh
+auth/transport failures), `2` usage error (`error.code == "usage"`).
+Argument problems — unknown options, missing required arguments,
+conflicting flags, invalid flag values, extra positionals — are always
+exit 2 and are validated before any socket/git/gh access. Option
+parsing is strict: each command whitelists its flags (per-action for
+`pr`), rejects `--flag=value` on boolean flags, supports `--name=value`
+for value flags, honors a `--` end-of-options separator, and validates
+the global `--session`/`--socket`/`--timeout` flags the same way.
 
 ## Change accounting
 

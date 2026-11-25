@@ -48,8 +48,23 @@ bun run src/cli.ts capability
   supplies it.
 - Requires `git` on `PATH` and `bun` (plugin runtime prerequisite).
 - All commands print exactly one JSON document on stdout. Handled errors
-  print `{contract, ok:false, error:{code,message}}` on **stderr** and exit
-  1; usage errors exit 2.
+  print `{contract, ok:false, error:{code,message}}` on **stderr**.
+- **Exit codes:** `0` success; `1` handled runtime/environment failure
+  (`kind` carries `git_error`, `git_missing`, `timeout`, `not_a_repo`,
+  `bare_repo`, `pane_not_found`, `no_pane_cwd`, `gh_missing`, `gh_error`,
+  or `error` for transport/unexpected failures); `2` usage error
+  (`error.code == "usage"`).
+- **Strict option parsing:** every `-`-prefixed token must be a flag the
+  command documents — unknown options are usage errors, never silently
+  ignored. `pr` flags are whitelisted per action (`--state` on
+  `pr create`, `--title` on `pr list`, etc. are usage errors). Boolean
+  flags reject `=value`; value flags accept both `--name value` and
+  `--name=value` (the `=` form is required for values that themselves
+  start with `-`, e.g. `--grep=--foo`). A `--` separator ends option
+  parsing; tokens after it are positional. Extra positionals beyond the
+  documented arity are usage errors. Global flags (`--session`,
+  `--socket`, `--timeout`) accept the same `=` form and are validated
+  (`--timeout` must be a positive number).
 
 ## Target selection
 
@@ -256,9 +271,10 @@ pane's repository on the herdr host. Success payloads share the shape
 
 Rules:
 
-- `stage`/`unstage` require `--all` or ≥1 `--path`; other combinations
-  are usage errors.
-- `commit` requires ≥1 `-m`; `--allow-empty` is explicit-only. Identity
+- `stage`/`unstage` require `--all` or ≥1 `--path`; bare invocation and
+  the `--all` + `--path` combination are usage errors (exit 2).
+- `commit` requires ≥1 non-empty `-m`; `--allow-empty` is explicit-only.
+  Missing `-m` is a usage error (exit 2), not a git failure. Identity
   comes from git config, never fabricated.
 - Branch/upstream/remote/refspec values and pathspecs are argv elements;
   empty or `-`-prefixed values are rejected (usage error, exit 2).
