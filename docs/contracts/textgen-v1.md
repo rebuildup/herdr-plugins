@@ -2,7 +2,8 @@
 
 Text-generation CLI contract for the `rebuildup.textgen` herdr plugin
 (Issue #107, parent #29 T1; git/forge integration #108 T2;
-agent-task guards + next-prompt watch #109 T3; release-0-6-0). Same
+agent-task guards + next-prompt watch #109 T3; contract finalization
++ real-provider verification #110 T4; release-0-6-0). Same
 conventions as the other
 plugin contracts: single JSON document on stdout, diagnostics on
 stderr, exit 0 success / 1 handled error / 2 usage.
@@ -302,3 +303,29 @@ endpoints, model names, provider ids, `gitPluginRoot`, and `keyEnv`
   used only as request headers in-process, and never appear in output,
   errors, state, argv, or logs (ADR-0018).
 - Endpoint policy: `https:` required; `http:` only for loopback.
+
+## Versioning
+
+`herdr-plugins.textgen/v1` is **stable** as of plugin v0.6.0
+(T4/#110): the command surface (`capability`/`generate`/
+`git-context`/`watch-next-prompt`/`config`), the task registry and
+per-task input allowlists/output shapes, provider resolution order
+(`agent:`/`api:`/bare → config default → manifests → known kinds →
+enabled API generators), execution-path semantics (dedicated agent
+pane per ADR-0017, opt-in API generators per ADR-0018, `cli`
+unsupported), pre-execution guards (`requires_opt_in`, manifest
+availability, opt-in quota probe), the git/forge adapter contract,
+the `watch-next-prompt` JSONL event vocabulary, and the error `kind`
+taxonomy are the finalized v1 contract. Additive fields may appear in
+any response or in `capability` (`integrations`, `providers`,
+`guards`, `config`, `warnings`, `git_context`); clients must ignore
+unknown fields.
+
+A breaking change — removing/renaming a command or field, changing an
+error `kind`'s meaning, altering task input allowlists, output shapes
+or limits, provider-resolution order, guard semantics, marker/output
+validation rules, or watch event names — bumps the contract suffix to
+`herdr-plugins.textgen/v2`, shipped alongside v1 for at least one
+release so consumers can migrate; v1 is then frozen, not deleted. The
+plugin keeps no durable organize state, so there is no on-disk schema
+covered by this contract.

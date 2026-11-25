@@ -1,8 +1,9 @@
-# Spec: rebuildup.textgen (Issue #107 T1, #108 T2, #109 T3; parent #29)
+# Spec: rebuildup.textgen (Issue #107 T1, #108 T2, #109 T3, #110 T4; parent #29)
 
-Status: release-0-6-0 candidate. Contract: `herdr-plugins.textgen/v1`
-(`docs/contracts/textgen-v1.md`). Decisions: ADR-0017 (execution path),
-ADR-0018 (API credential boundary).
+Status: release-0-6-0 — `herdr-plugins.textgen/v1` **stable** (Versioning
+section of `docs/contracts/textgen-v1.md`). Decisions: ADR-0017
+(execution path), ADR-0018 (API credential boundary), ADR-0020
+(agent-task guards).
 
 ## Purpose
 
@@ -231,7 +232,35 @@ notification UI stays with the caller (herdr-t3). Only observed
 transitions trigger — statuses are seeded from `session.snapshot` and
 a missed `working` edge never fires.
 
-## Downstream (not this ticket)
+## Finalization and real-provider verification (#110, T4)
 
-- #110 T4: contract finalization, real-provider verification matrix,
-  billing-safeguard confirmation, ledger update.
+Contract `herdr-plugins.textgen/v1` is declared **stable** at plugin
+v0.6.0 (contract Versioning section): command surface, task registry,
+provider resolution order, execution-path semantics, guards, git
+adapter, watch events, and error taxonomy are frozen except for
+additive fields; breaking changes ship as `/v2` alongside v1.
+
+Real-provider verification ran against an isolated herdr session
+(`verify110`, dedicated XDG config/state dirs, ambient `HERDR_*`
+unset): task×provider matrix, billing-safeguard confirmation, and
+residuals are recorded in
+`docs/research/textgen-v1-real-provider-verification.md`. Summary:
+
+- `agent:codex` produced validated results for `thread_title`,
+  `branch_name`, `commit_message`, `review_guide` (opted-in), and
+  `next_prompt`; `--git-pane` end-to-end generation verified.
+- `agent:claude` fails honestly (`output_unmarked`) while its
+  subscription is unusable — same condition as #107.
+- `pr_content` on `agent:codex` consistently fails
+  `output_invalid_json` (provider wraps JSON string values across
+  lines); tracked as rebuildup/herdr-plugins#132, manual fallback
+  unaffected.
+- The api path was verified against a loopback fake endpoint
+  (opt-in gating, credential header, response parsing); no real paid
+  API credentials exist on the verification machine, so live
+  OpenAI/Anthropic calls remain a documented residual.
+- Billing prevention confirmed live: api generators default to
+  `enabled: false` and are unresolvable until `--enable`; the agent
+  path bills to provider subscriptions only; `review_guide` is
+  opt-in gated before any pane spawn; the quota guard is opt-in and
+  soft.
