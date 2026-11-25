@@ -158,9 +158,7 @@ function failUnreachable(
   command: string,
   unreachable: Array<{ repo_root: string; kind: string; message: string }>,
 ): void {
-  const detail = unreachable
-    .map((u) => `${u.repo_root} (${u.kind}: ${u.message})`)
-    .join("; ");
+  const detail = unreachable.map((u) => `${u.repo_root} (${u.kind}: ${u.message})`).join("; ");
   process.stderr.write(
     `${JSON.stringify({
       contract: CONTRACT,
