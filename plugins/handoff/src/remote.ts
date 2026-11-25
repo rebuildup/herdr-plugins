@@ -38,7 +38,12 @@ import type {
   WorkspaceCreatedResult,
 } from "../../../packages/herdr-client/src/index";
 import { pluginDirs } from "../../../packages/herdr-client/src/index";
-import type { HandoffTransport, SurfaceCreateParams } from "./execute";
+import type {
+  HandoffTransport,
+  SurfaceCreateParams,
+  WorktreeCreatedResult,
+  WorktreeCreateParams,
+} from "./execute";
 import type { HandoffRecord, RemoteExecutionInfo } from "./model";
 import { PLUGIN_ID } from "./model";
 
@@ -471,6 +476,25 @@ export function remoteCliTransport(
 
     async paneClose(paneId: string): Promise<unknown> {
       return call(["pane", "close", paneId]);
+    },
+
+    async worktreeCreate(params: WorktreeCreateParams): Promise<WorktreeCreatedResult> {
+      const args = ["worktree", "create"];
+      if (params.cwd !== undefined) args.push("--cwd", params.cwd);
+      if (params.label !== undefined) args.push("--label", params.label);
+      if (params.branch !== undefined) args.push("--branch", params.branch);
+      if (params.base !== undefined) args.push("--base", params.base);
+      if (params.path !== undefined) args.push("--path", params.path);
+      if (params.focus === true) args.push("--focus");
+      else if (params.focus === false) args.push("--no-focus");
+      const result = asRecord(await call(args));
+      return {
+        type: "worktree_created",
+        workspace: result.workspace,
+        tab: result.tab,
+        root_pane: asRecord(result.root_pane) as unknown as PaneInfo,
+        worktree: asRecord(result.worktree),
+      } as unknown as WorktreeCreatedResult;
     },
   };
 }

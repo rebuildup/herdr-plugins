@@ -36,7 +36,7 @@
     },
     "plugins/handoff": {
       "name": "@herdr-plugins/handoff",
-      "version": "0.3.0",
+      "version": "0.6.0",
     },
     "plugins/inbox": {
       "name": "@herdr-plugins/inbox",

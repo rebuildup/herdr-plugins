@@ -1,7 +1,6 @@
 # rebuildup.handoff
 
-Handoff / delegation plugin for herdr (issues #103 T1, #104 T2; parent
-#6).
+Handoff / delegation plugin for herdr (issues #103–#106; parent #6).
 
 Records versioned **handoff records** that bind a source pane/agent
 generation to a **payload of references** — conversation index sessions,
@@ -14,24 +13,34 @@ T2 scope: `execute` runs the same-host handoff — target surface via
 herdr API only (`workspace.create`/`tab.create` + `agent.start` +
 `agent.prompt` payload injection), `native_resume` with
 `portable_context` fallback, `--cleanup-on-failure`, and honest
-`done`/`failed` tracking. Cross-machine handoff is T3 (#105);
-delegation/lineage is T4 (#106).
+`done`/`failed` tracking. T3 (#105) adds cross-machine
+`execute --remote`/`status --remote`/`remote-probe` and the portable
+bundle. T4 (#106) adds delegation lineage (`create --parent`,
+`delegate`, `merge-back`, `handoff_record` refs, `--worktree` targets)
+and the #30/#32 boundaries — v1 is stable at v0.6.0.
 
 ## Contract
 
-`herdr-plugins.handoff/v1` — see `docs/contracts/handoff-v1.md`.
-Internal docs: `docs/specs/handoff.md`, ADR-0017 (Agent Router boundary).
+`herdr-plugins.handoff/v1` (stable) — see
+`docs/contracts/handoff-v1.md`. Internal docs: `docs/specs/handoff.md`,
+ADR-0017/0018/0020/0021 (Agent Router, local/remote execution,
+delegation boundaries).
 
 ## Commands
 
 ```bash
 bun run src/cli.ts create <pane_id> [--strategy S] [--note TEXT] \
-    [--conversation KEY] [--checkpoint ID] [--external VALUE] [--dry-run]
+    [--conversation KEY] [--checkpoint ID] [--handoff ID] [--external VALUE] \
+    [--parent ID --relationship KIND] [--link-note TEXT] [--dry-run]
 bun run src/cli.ts list [--status S] [--limit N]
 bun run src/cli.ts status <handoff-id> [--no-resolve-refs]
 bun run src/cli.ts execute <handoff-id> [--target-pane ID | \
-    --target-workspace ID | --new-workspace] [--provider HINT] \
+    --target-workspace ID | --new-workspace | --worktree] \
+    [--worktree-branch B] [--worktree-base R] [--provider HINT] \
     [--model M] [--wait-ms MS] [--cleanup-on-failure] [--dry-run]
+bun run src/cli.ts delegate <parent-id> [delegate/execute flags]
+bun run src/cli.ts merge-back <child-id> [--task TEXT] [--wait-ms MS] \
+    [--link-note TEXT] [payload flags] [--no-execute] [--dry-run]
 bun run src/cli.ts resume-info [--provider KIND]
 bun run src/cli.ts capability
 ```
@@ -63,3 +72,9 @@ session (the transfer identity carries its own `session_key`).
   mismatch) is reported, never applied.
 - Agent Router routing (dotfiles `script/agent`, `config/agents.toml`)
   is not reimplemented; `provider_hint` is an opaque label (ADR-0017).
+- #30 boundary: handoff stays CLI-only in v1 — whether MCP should
+  expose these commands is #30's decision; this contract is the
+  surface it consumes (ADR-0021).
+- #32 boundary: no scheduled/triggered handoff — automations own
+  automation; a future automation may *invoke* `delegate`/`merge-back`/
+  `execute` through this CLI (ADR-0021).

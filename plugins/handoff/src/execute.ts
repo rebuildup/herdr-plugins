@@ -36,6 +36,8 @@ import {
   type CallOptions,
   type PaneInfo,
   paneClose,
+  request,
+  resolveSocketPath,
   type SessionSnapshot,
   sessionSnapshot,
   type TabCreatedResult,
@@ -84,6 +86,31 @@ export interface SurfaceCreateParams {
 }
 
 /**
+ * Params for herdr `worktree.create` (#106). Maps onto the socket API
+ * `WorktreeCreateParams`; `workspace_id` is only meaningful for
+ * `worktree.open`-style calls and is unused here.
+ */
+export interface WorktreeCreateParams extends SurfaceCreateParams {
+  branch?: string | undefined;
+  base?: string | undefined;
+  path?: string | undefined;
+}
+
+/** `worktree.create` result (`type:"worktree_created"` envelope). */
+export interface WorktreeCreatedResult {
+  type: "worktree_created";
+  workspace: unknown;
+  tab: unknown;
+  root_pane: PaneInfo;
+  worktree: {
+    path?: unknown;
+    branch?: unknown;
+    is_linked_worktree?: unknown;
+    open_workspace_id?: unknown;
+  };
+}
+
+/**
  * Injectable herdr surface. Mirrors the wrappers in
  * packages/herdr-client; tests substitute a fake. The trailing
  * `timeoutMs` on prompt/wait is the *client* request timeout (must
@@ -109,6 +136,12 @@ export interface HandoffTransport {
     timeoutMs?: number,
   ): Promise<unknown>;
   paneClose(paneId: string): Promise<unknown>;
+  /**
+   * herdr `worktree.create` — optional so older/fake transports degrade
+   * honestly (`worktree_unsupported`) instead of pretending. Creates a
+   * git-worktree-backed workspace and returns its root pane.
+   */
+  worktreeCreate?(params: WorktreeCreateParams): Promise<WorktreeCreatedResult>;
 }
 
 /** Server-side `agent.start` startup timeout (upstream: >3000, <=300000). */
@@ -143,6 +176,23 @@ export function herdrTransport(options: CallOptions = {}): HandoffTransport {
           timeoutMs ?? Math.max(options.timeoutMs ?? 0, (params.timeoutMs ?? 0) + CLIENT_MARGIN_MS),
       }),
     paneClose: (paneId) => paneClose(paneId, options),
+    worktreeCreate: async (params) => {
+      const socketPath = options.socketPath ?? resolveSocketPath({ session: options.session });
+      const wire: Record<string, unknown> = {};
+      if (params.cwd !== undefined) wire.cwd = params.cwd;
+      if (params.label !== undefined) wire.label = params.label;
+      if (params.focus !== undefined) wire.focus = params.focus;
+      if (params.branch !== undefined) wire.branch = params.branch;
+      if (params.base !== undefined) wire.base = params.base;
+      if (params.path !== undefined) wire.path = params.path;
+      const result = (await request(socketPath, "worktree.create", wire, options)) as
+        | WorktreeCreatedResult
+        | undefined;
+      if (result === undefined || typeof result !== "object") {
+        throw new HandoffExecError("worktree.create returned no result", "worktree_failed");
+      }
+      return result;
+    },
   };
 }
 
@@ -257,6 +307,8 @@ function describeRef(ref: PayloadRef): string {
     }
     case "checkpoint":
       return `- checkpoint ${ref.plugin}: ${ref.id}`;
+    case "handoff_record":
+      return `- handoff_record ${ref.plugin}: ${ref.id}`;
     case "external": {
       const label = ref.label !== undefined ? ` (${ref.label})` : "";
       return `- external ${ref.target}: ${ref.value}${label}`;
@@ -339,12 +391,17 @@ export function buildHandoffPrompt(
 export type TargetPlan =
   | { kind: "existing_pane"; pane: PaneInfo }
   | { kind: "tab"; workspace_id: string }
-  | { kind: "workspace" };
+  | { kind: "workspace" }
+  | { kind: "worktree" };
 
 export interface ExecuteFlags {
   targetPane?: string | undefined;
   targetWorkspace?: string | undefined;
   newWorkspace?: boolean | undefined;
+  /** Create the target surface as a herdr-managed git worktree (#106). */
+  worktree?: boolean | undefined;
+  worktreeBranch?: string | undefined;
+  worktreeBase?: string | undefined;
   provider?: string | undefined;
   model?: string | undefined;
   cleanupOnFailure?: boolean | undefined;
@@ -391,12 +448,19 @@ export function resolveTargetPlan(
     flags.targetPane !== undefined,
     flags.targetWorkspace !== undefined,
     flags.newWorkspace === true,
+    flags.worktree === true,
   ].filter(Boolean).length;
   if (explicit > 1) {
     throw new HandoffExecError(
-      "choose at most one of --target-pane, --target-workspace, --new-workspace",
+      "choose at most one of --target-pane, --target-workspace, --new-workspace, --worktree",
       "usage",
     );
+  }
+  if (
+    (flags.worktreeBranch !== undefined || flags.worktreeBase !== undefined) &&
+    flags.worktree !== true
+  ) {
+    throw new HandoffExecError("--worktree-branch/--worktree-base require --worktree", "usage");
   }
 
   // Explicit flags fully override the recorded target hints.
@@ -408,6 +472,12 @@ export function resolveTargetPlan(
     flags.targetWorkspace ?? (explicit === 0 ? record.target?.workspace_id : undefined);
   if (workspaceId !== undefined) {
     return { kind: "tab", workspace_id: workspaceId };
+  }
+  if (flags.worktree === true) {
+    // Independent git worktree via herdr `worktree.create` — herdr owns
+    // the checkout; merge-back to the source worktree stays a git/forge
+    // concern (ADR-0021).
+    return { kind: "worktree" };
   }
   // Default (and --new-workspace): a dedicated workspace inheriting the
   // source cwd. A bare provider_hint/note target also lands here.
@@ -496,6 +566,10 @@ function isTimeoutError(err: unknown): boolean {
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
 }
 
 // --- Execute --------------------------------------------------------------------
@@ -648,6 +722,15 @@ export async function executeHandoff(
   // the injected local transport otherwise.
   const execTransport = remote?.transport ?? transport;
 
+  // Worktree targets need a transport that speaks `worktree.create`;
+  // refuse BEFORE the ready transition rather than failing post-mutation.
+  if (plan.kind === "worktree" && execTransport.worktreeCreate === undefined) {
+    throw new HandoffExecError(
+      "transport does not support worktree.create (older herdr or fake transport)",
+      "worktree_unsupported",
+    );
+  }
+
   // --- pending|ready → ready -------------------------------------------------
   const execution: HandoffExecution = {
     decided_at: nowIso(now),
@@ -732,6 +815,46 @@ export async function executeHandoff(
           tab_id: (created.tab as { tab_id?: string }).tab_id ?? null,
           created: true,
         };
+      } else if (plan.kind === "worktree") {
+        if (execTransport.worktreeCreate === undefined) {
+          throw new HandoffExecError("worktree.create unsupported", "worktree_unsupported");
+        }
+        const created = await execTransport.worktreeCreate({
+          cwd: record.transfer.cwd ?? undefined,
+          label: `handoff ${id}`,
+          focus: false,
+          ...(flags.worktreeBranch !== undefined ? { branch: flags.worktreeBranch } : {}),
+          ...(flags.worktreeBase !== undefined ? { base: flags.worktreeBase } : {}),
+        });
+        const wt = asRecord(created.worktree);
+        const wtPath = typeof wt.path === "string" ? wt.path : null;
+        if (wtPath === null) {
+          throw new HandoffExecError(
+            "worktree.create result missing worktree.path",
+            "worktree_failed",
+          );
+        }
+        execution.worktree = {
+          path: wtPath,
+          branch: typeof wt.branch === "string" ? wt.branch : null,
+          is_linked_worktree: wt.is_linked_worktree === true,
+          workspace_id:
+            typeof wt.open_workspace_id === "string"
+              ? wt.open_workspace_id
+              : ((created.workspace as { workspace_id?: string }).workspace_id ?? null),
+        };
+        surface = {
+          pane_id: created.root_pane.pane_id,
+          workspace_id:
+            (created.workspace as { workspace_id?: string }).workspace_id ??
+            (created.root_pane as { workspace_id?: string }).workspace_id ??
+            null,
+          tab_id:
+            (created.tab as { tab_id?: string }).tab_id ??
+            (created.root_pane as { tab_id?: string }).tab_id ??
+            null,
+          created: true,
+        };
       } else {
         const created = await execTransport.workspaceCreate({
           cwd: record.transfer.cwd ?? undefined,
@@ -754,7 +877,10 @@ export async function executeHandoff(
       execution.target = surface;
       await updateState((s) => {
         const r = s.handoffs[id];
-        if (r?.execution) r.execution.target = surface;
+        if (r?.execution) {
+          r.execution.target = surface;
+          if (execution.worktree !== undefined) r.execution.worktree = execution.worktree;
+        }
       });
     }
     const surface = execution.target;
@@ -766,7 +892,9 @@ export async function executeHandoff(
       const modelFlag = resumeInfo(decision.provider_kind).model_flag ?? "--model";
       startArgs.push(modelFlag, flags.model);
     }
-    const agentName = `handoff ${id}`;
+    // herdr agent names must match [a-z][a-z0-9_-]{0,31} — the id is
+    // already `ho-<base36>-<hex>` so `handoff-<id>` stays ≤ 32 chars.
+    const agentName = `handoff-${id}`;
     try {
       await execTransport.agentStart({
         name: agentName,
@@ -799,10 +927,31 @@ export async function executeHandoff(
     execution.agent = agentInfo;
 
     // --- payload injection --------------------------------------------------------
-    try {
-      await execTransport.agentPrompt(surface.pane_id, promptText);
-    } catch (err) {
-      return await fail("prompt", err);
+    // `agent.start` returns on interactive readiness, but herdr's prompt
+    // registry can lag a beat — `agent w9:p1 is not an active named
+    // agent` immediately after a successful start is a transient
+    // server-side race (observed live on herdr 0.9.5). Retry briefly;
+    // every other error fails honestly at step "prompt".
+    const PROMPT_REGISTRY_RETRIES = 10;
+    const PROMPT_REGISTRY_DELAY_MS = 500;
+    let promptErr: unknown = null;
+    for (let attempt = 0; attempt <= PROMPT_REGISTRY_RETRIES; attempt += 1) {
+      try {
+        await execTransport.agentPrompt(surface.pane_id, promptText);
+        promptErr = null;
+        break;
+      } catch (err) {
+        promptErr = err;
+        const msg = errorMessage(err);
+        const transient =
+          /not an active named agent|agent_not_ready/.test(msg) &&
+          attempt < PROMPT_REGISTRY_RETRIES;
+        if (!transient) break;
+        await new Promise((r) => setTimeout(r, PROMPT_REGISTRY_DELAY_MS));
+      }
+    }
+    if (promptErr !== null) {
+      return await fail("prompt", promptErr);
     }
     execution.prompt = {
       delivered_at: nowIso(now),

@@ -7,7 +7,8 @@ model (`docs/internals/context-handoffs.md`,
 `docs/orchestration-v2/thread-lineage-and-context-transfer.md`,
 `provider-switching-and-context.md` @ `9cc4018c`) to standalone herdr
 plugins, simplified for herdr's weaker "thread" concept: the handoff
-record itself is the lineage node (full lineage lands in T4 / #106).
+record itself is the lineage node (T1–T3: #103/#104/#105; lineage +
+worktree + #30/#32 boundaries: T4 / #106 — see ADR-0021).
 
 ## Sources
 
@@ -117,7 +118,8 @@ evict first, then oldest `created_at`.
 
 `create <pane_id>` (snapshot required; `--dry-run` previews),
 `list [--status] [--limit]`, `status <id> [--no-resolve-refs]
-[--no-reconcile]`, `execute <id>`, `resume-info [--provider]`,
+[--no-reconcile]`, `execute <id>`, `delegate <parent-id>`,
+`merge-back <child-id>`, `resume-info [--provider]`,
 `capability`. See `docs/contracts/handoff-v1.md` for the full I/O
 contract.
 
@@ -188,10 +190,60 @@ neither.
   on the remote snapshot; without `--remote` a remote record reports
   `remote_target_requires_flag` — never a local pane-id coincidence.
 
-## Out of scope (v1 / T2+T3)
+## Delegation lineage and worktree handoff (T4, #106)
 
-- Delegation, parent/child lineage, worktree handoff, `#30`/`#32`
-  boundaries (#106).
+Lineage kinds port T3 Code's thread relationships verbatim
+(`fork` / `provider_handoff` / `merge_back` / `subagent_spawn` /
+`subagent_result`) onto the handoff record itself — herdr has no
+durable "thread" object (ADR-0021).
+
+- `record.relationship{kind, parent_id, note?}` — optional lineage
+  link. `parent_id` names the record this one derives from (spawn /
+  fork / provider_handoff) or reports on (`subagent_result` /
+  `merge_back`). Children are **derived** by scanning
+  `relationship.parent_id` — never stored on the parent.
+- `create --parent <id> --relationship <kind> [--link-note <text>]`
+  attaches a link at create time; both flags are required together and
+  the parent must exist in state. `--handoff <id>` adds a
+  `handoff_record` payload ref (self-owned kind, resolved against this
+  plugin's state — no external CLI).
+- `delegate <parent-id>` creates a child record
+  (`subagent_spawn`, parent = the delegating record) whose transfer
+  identity is the delegating agent's pane (the parent record's executed
+  target, falling back to its source pane — resolved live from the
+  snapshot), then runs the unchanged `execute` pipeline. Same-session
+  only: cross-session or remote-executed parents are refused
+  (`other_session` / `unsupported_lineage`); `delegate --remote` is a
+  usage error. `--no-execute` records intent without running.
+- `merge-back <child-id>` creates a result record
+  (`subagent_result`, or `merge_back` for `fork` children) whose
+  transfer identity is the child's pane, and delivers it via
+  `agent.prompt` to the DELEGATING agent's EXISTING pane — resolved
+  through the child's own `parent_id`. `agent.start` is never called
+  on a pane that already runs an agent; no live agent on the parent
+  pane is refused (`parent_agent_missing`). The payload always carries
+  a `handoff_record` ref to the child. Delivery failure step is
+  `prompt`.
+- Result records must not be run through `execute` — the delivery pane
+  already runs the parent agent and `requireUsablePane` refuses busy
+  panes honestly.
+- `execute --worktree [--worktree-branch B] [--worktree-base R]` adds a
+  `worktree` target plan: herdr `worktree.create` through the transport
+  (socket `request` locally; `herdr --machine … worktree create` for
+  `--remote`) yields `{root_pane, worktree}` — a worktree-backed
+  workspace with a root pane, same shape as `workspace.create`.
+  `execution.worktree{path,branch,is_linked_worktree,workspace_id}`
+  records what herdr reported. Mutually exclusive with the other
+  target selectors; transports without `worktree.create` refuse
+  pre-mutation (`worktree_unsupported`). Checkout merge-back to the
+  source worktree is git/forge business — the plugin carries context
+  only.
+- `list` items carry `relationship` + `child_count`; `status` returns a
+  `lineage` block (own relationship, parent id/status, derived
+  children).
+
+## Out of scope (v1 / T2+T3+T4)
+
 - `checkpoint_ref`/`manual` execution (recorded intent only).
 - Event-level payload ref verification; provider-native resume
   capability beyond the seed table (`resume-info`; #100 owns the full

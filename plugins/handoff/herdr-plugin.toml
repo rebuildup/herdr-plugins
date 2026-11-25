@@ -1,6 +1,6 @@
 id = "rebuildup.handoff"
 name = "Handoff"
-version = "0.3.0"
+version = "0.6.0"
 min_herdr_version = "0.9.0"
 description = "Handoff / delegation foundation: versioned handoff records binding a source pane/agent generation to a payload of references (conversations, checkpoints, excerpts) plus a status lifecycle."
 platforms = ["linux", "macos", "windows"]
@@ -10,5 +10,7 @@ platforms = ["linux", "macos", "windows"]
 #
 # No [[actions]] / [[events]] / [[startup]]: the plugin is CLI-only.
 # T1 (#103) shipped the payload contract, state store, and read-side
-# commands; T2 (#104) adds same-host execute/resume-info. Cross-machine
-# handoff is T3 (#105).
+# commands; T2 (#104) adds same-host execute/resume-info; T3 (#105)
+# adds cross-machine execute --remote; T4 (#106) adds delegation
+# lineage (delegate/merge-back), worktree targets, and the #30/#32
+# boundaries (ADR-0021).
