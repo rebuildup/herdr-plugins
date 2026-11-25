@@ -99,13 +99,25 @@ describe("agent identity guard", () => {
     expect(entries.p1?.settled).toBeDefined();
   });
 
-  test("mark without fingerprint falls back to seq comparison", () => {
+  test("mark without fingerprint wakes when an agent session appears", () => {
     const entries = entriesWith({
       settled: { at: NOW.toISOString(), seq: 5 },
     });
     const agents = { p1: agent(5, "done", { agent: "anything", value: "x" }) };
     resolveState(entries, agents, NOW);
+    expect(entries.p1).toBeUndefined();
+  });
+
+  test("mark recorded before agent detection wakes on first seq", () => {
+    const entries = entriesWith({
+      settled: { at: NOW.toISOString(), seq: -1 },
+    });
+    // No agent yet: stays organized.
+    resolveState(entries, {}, NOW);
     expect(entries.p1?.settled).toBeDefined();
+    // Agent appears with seq 1: generation advanced from -1.
+    resolveState(entries, { p1: agent(1, "idle") }, NOW);
+    expect(entries.p1).toBeUndefined();
   });
 });
 
