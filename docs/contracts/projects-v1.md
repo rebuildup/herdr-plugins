@@ -28,6 +28,7 @@ bun run src/cli.ts archive <id> | unarchive <id> | pin <id> | unpin <id>
 bun run src/cli.ts settings get <id> [key]
 bun run src/cli.ts settings set <id> <key> <value>
 bun run src/cli.ts settings unset <id> <key>
+bun run src/cli.ts scripts list <project|repo> [--repo PATH]
 ```
 
 - All commands print exactly one JSON document on stdout. Handled errors
@@ -171,10 +172,86 @@ project-scoped keys relevant to scripts and display. Any other key fails
 accepts arbitrary keys. A corrupt settings file reads as empty
 (overrides are non-authoritative).
 
+## `scripts list <project|repo>`
+
+Read-only resolution of project script definitions (#50). The
+positional argument is matched against registered project ids first;
+otherwise it is treated as a repo path resolved via `resolveRepo`
+(non-git paths surface the git contract kinds). A repo path already
+owned by a project picks up that project's settings override.
+
+`--repo PATH` (project targets only) selects which member repo's
+`t3.json` to read for multi-repo projects; it must canonicalize to a
+registered member root or the command fails `repo_not_found`. Default
+is the project's first registered repo. A project with no repos fails
+`no_repos`.
+
+Response:
+
+```json
+{
+  "contract": "herdr-plugins.projects/v1",
+  "command": "scripts list",
+  "project_id": "my-app",
+  "repo_root": "/abs/repo",
+  "scripts": [
+    {
+      "id": "dev",
+      "name": "Dev server",
+      "command": "bun run dev",
+      "icon": "play",
+      "runOnWorktreeCreate": true,
+      "source": "t3.json"
+    }
+  ],
+  "generated_at": "…"
+}
+```
+
+(`project_id` is `null` for a repo path not owned by any project.
+Optional upstream fields absent from the source layer are omitted from
+the JSON, not nulled.)
+
+Each script carries `source`: `override` | `env-default` | `t3.json` |
+`builtin`. Resolution picks the first active layer wholesale:
+
+1. **override** — the project's `defaultProjectScripts` settings key
+   (a verbatim JSON array of script names or definition objects; an
+   explicit `[]` resolves to zero scripts).
+2. **env-default** — `defaultScripts` in the plugin config dir's
+   `config.json` (same entry shapes).
+3. **t3.json** — `scripts[]` at the repo root (absent or empty `[]`
+   falls through).
+4. **builtin** — compiled-in defaults. Upstream T3 Code defines no
+   builtin project scripts, so this layer is currently empty; it exists
+   so a future set needs no contract change.
+
+String entries are name references resolved against definition entries
+of lower-priority layers (in priority order), then definitions inside
+the selected layer; `source` reports where the *definition* came from.
+An unresolvable name fails `unknown_script`; a malformed layer fails
+`invalid_script_list` (both carry `layer`). A present-but-broken
+`t3.json` fails `t3json_invalid` (carries `path`, `reason`).
+
+`t3.json` parsing mirrors upstream
+`packages/contracts/src/t3ProjectFile.ts`: `$schema`, `iconPath`,
+`defaultThreadEnvMode` (`local`|`worktree`), `worktreeSubmodules`
+(`recursive`|`top-level`|`none`), `worktreeSparsePatternsPath`, and
+`scripts[]` (name/command required; optional icon/runOnWorktreeCreate/
+runOnSettle/stopOnSettle/async/previewUrl/autoOpenPreview; max 50
+entries; paths capped at 512 chars). Unknown keys are ignored;
+malformed JSON or schema violations are structured errors.
+
+**Trust boundary:** a repository's `t3.json` is trusted because the
+user registered or explicitly operates that repository — its script
+commands run with the user's privileges. This command only *lists*
+definitions; execution permission is the runner's concern (#53).
+
 ## Errors
 
 `kind` values mirror the git contract: `git_missing`, `timeout`,
 `git_error`, `not_a_repo`, `bare_repo`, plus `project_not_found`,
 `project_exists`, `repo_already_registered`, `repo_not_found`,
-`invalid_project_id`, `settings_key_not_allowed`. Errors may carry extra
-fields (`project_id`, `key`, `root`).
+`invalid_project_id`, `settings_key_not_allowed`, `t3json_invalid`,
+`invalid_script_list`, `unknown_script`, `no_repos`. Errors may carry
+extra fields (`project_id`, `key`, `root`, `path`, `reason`, `layer`).
