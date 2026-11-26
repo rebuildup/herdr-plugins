@@ -115,27 +115,58 @@ Design: ADR-0006/0007/0008/0030.
 
 ## Interactive TUI
 
-`rebuildup.git` also ships an interactive terminal surface per
-`docs/contracts/tui-v1.md` (issue #238): manifest pane entrypoint `main`
-(`placement = "tab"`) plus the `open` action, which opens the UI for the
-focused pane's repository via `herdr plugin pane open`. The UI covers
-status, changed files with per-file stage/unstage/diff, a paged
-diff viewer, commit history + per-commit show, branch comparison,
-branch operations, fetch/push, and remote listing. The target repo/HEAD
-is pinned at launch and revalidated before every mutation; commit, push,
-bulk stage/unstage, and branch switches require in-TUI confirmation.
-Forge (PR/Issue) workflows stay CLI-only for now (#239).
+`rebuildup.git` also ships interactive terminal surfaces per
+`docs/contracts/tui-v1.md` (issues #238/#239, ADR-0031/0032/0033):
+manifest pane entrypoints `main` (repository status, `placement =
+"tab"`) and `forge` (GitHub PR/issue browser, `placement = "tab"`),
+plus the `open` / `open-forge` actions, which open each UI for the
+focused pane's repository via `plugin.pane.open`.
+
+The `main` UI covers status, changed files with per-file
+stage/unstage/diff, a paged diff viewer, commit history + per-commit
+show, branch comparison, branch operations, fetch/push, and remote
+listing. The target repo/HEAD is pinned at launch and revalidated
+before every mutation; commit, push, bulk stage/unstage, and branch
+switches require in-TUI confirmation.
+
+The `forge` UI covers PR list (state filter), PR-for-branch status,
+PR detail with comments (incl. review-thread reply), reviews, checks,
+and workflow run/job/log browsers, issue list (state + label filters),
+and issue detail. Every mutation is confirm-gated (exact target +
+consequence, Esc cancels), checked against `capability`/
+`mutation_commands` (fail closed when unavailable), and re-validated
+immediately before writing: PR mutations re-read `pr reviews`+`pr
+view` and bind the fresh `head.sha` via `--expect-head` (a moved head
+or `updatedAt` asks before applying), preserving the CLI's
+`stale_head` / `merge_blocked` / `release_boundary` guards; issue
+mutations re-read `issue view` and ask on `updated_at` drift (issues
+have no head sha). `p`/`o` repoint the forge target pane /
+`--repo owner/name` override in-session.
+
+Both UIs consume this plugin's own CLI (`src/cli.ts`) for every read
+and mutation, so the public contract stays the single source of truth.
+Opening performs reads only. Non-TTY stdin degrades to plain-text
+lists; `gh` missing renders an honest unsupported state, never fake
+data.
+
+Opt-in keybinds (user-owned; plugins never write herdr config):
 
 ```toml
-# opt-in keybind (user-owned; plugins never write herdr config)
 [[keys.command]]
 key = "prefix+g"
 type = "plugin_action"
 command = "rebuildup.git.open"
 description = "open git TUI"
+
+[[keys.command]]
+key = "prefix+G"
+type = "plugin_action"
+command = "rebuildup.git.open-forge"
+description = "open git forge TUI"
 ```
 
-For a repo checkout without herdr: `bun run src/tui.ts --cwd <path>`.
+For a repo checkout without herdr: `bun run src/tui.ts --cwd <path>`
+(repo surface) or `bun run src/tui-forge.ts` (forge surface).
 Non-interactive use is unchanged — `src/cli.ts` remains the CLI/MCP/GUI
 contract surface.
 
@@ -159,6 +190,10 @@ contract surface.
   comment|close` via `gh`) and pane↔issue links (`issue link|unlink|
   links`) delegated to `rebuildup.inbox` — inbox owns the link store
   and its staleness/retention rules; this plugin stores no link state.
+  v0.7.0 adds the forge TUI surface (`[[panes]] id="forge"` +
+  `open-forge` action): PR/issue list, detail, review/comment/merge,
+  and issue edit/close flows per `tui-v1.md`, all routed through the
+  plugin CLI with confirm gating and freshness revalidation.
 - Remote herdr hosts: run the CLI on the target host (same rule as
   `rebuildup.inbox`).
 - Optional `config.json` in the plugin config dir:

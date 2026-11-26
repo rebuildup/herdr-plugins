@@ -16,8 +16,8 @@ implement against is [`docs/contracts/tui-v1.md`](../contracts/tui-v1.md).
 | field | meaning |
 | --- | --- |
 | `cli` | `implemented` — contract-covered CLI command exists |
-| `tui_action` | `declared:<id>` — a manifest `[[actions]]` entry exists today (inbox ×9 incl. `open`, git ×6 incl. `open`, checkpoints ×2, projects ×2, automations ×1, conversations ×1, usage ×1, mcp ×1); `none` — no action yet |
-| `interactive_tui` | `implemented:#NNN` — interactive TUI shipped in that ticket (#237 Inbox pilot, #238 Git, #240 Projects, #241 Projects scripts, #242 Checkpoints, #243 Automations, #244 Conversations/Usage, #248 MCP diagnostics); `planned:#NNN` — scheduled in that implementation ticket (#239 Git forge, #232 Controls/Handoff/TextGen, #233 Artifacts/Secrets/Machines); `n/a` — daemon-, agent-, or diagnostic-only surface with no interactive TUI planned |
+| `tui_action` | `declared:<id>` — a manifest `[[actions]]` entry exists today (inbox ×9 incl. `open`, git ×7 incl. `open`/`open-forge`, checkpoints ×2, projects ×2, automations ×1, conversations ×1, usage ×1, mcp ×1); `none` — no action yet |
+| `interactive_tui` | `implemented:#NNN` — interactive TUI shipped in that ticket (#237 Inbox pilot, #238 Git, #239 Git forge, #240 Projects, #241 Projects scripts, #242 Checkpoints, #243 Automations, #244 Conversations/Usage, #248 MCP diagnostics); `planned:#NNN` — scheduled in that implementation ticket (#232 Controls/Handoff/TextGen, #233 Artifacts/Secrets/Machines); `n/a` — daemon-, agent-, or diagnostic-only surface with no interactive TUI planned |
 | `gui` | GUI is owned by herdr-t3 (#7). This repo records consumption intent only — **GUI-done never implies TUI-done** |
 | `real_machine_evidence` | `docs/research/` paths recording live verification; absence means no recorded real-machine run, not necessarily untested |
 | `upstream_gap` | non-null = blocked on herdr/T3Code upstream; never worked around by PTY guessing |
@@ -27,7 +27,7 @@ implement against is [`docs/contracts/tui-v1.md`](../contracts/tui-v1.md).
 | plugin | contract | ticket | commands | declared actions | interactive-TUI plan |
 | --- | --- | --- | --- | --- | --- |
 | rebuildup.inbox | inbox/v1 stable | #230 | 17 | 9 | **implemented #237**: inbox browser + organize verbs + links/transitions + explicit reconcile |
-| rebuildup.git (+forge) | git/v1 stable | #230 | 17 | 6 | **implemented #238**: status/files/diff/log/compare browser + stage/commit/branch/push; PR/issue workflows planned #239 |
+| rebuildup.git (+forge) | git/v1 stable | #230 | 17 | 7 | **implemented #238**: status/files/diff/log/compare browser + stage/commit/branch/push; **implemented #239**: PR/issue forge workflows (pane `forge` + `open-forge`) |
 | rebuildup.projects | projects/v1 stable | #231 | 13 | 2 (`open`, `open-scripts`) | implemented #240 — registry browser + repos membership + settings + scripts/run/stop + worktree info; implemented #241 — dedicated scripts surface (project/repo-path target, run, stop, results, logs) |
 | rebuildup.checkpoints | checkpoints/v1 stable | #231 | 12 | 2 (`create`, `open`) | implemented #242 — list/show/diff/plan + guarded create/save/restore/delete + groups + gc/prune dry-run-first |
 | rebuildup.automations | automations/v1 stable | #231 | 14 | 1 (`open`) | implemented #243 — task list + create/edit forms (schedule/destination) + enable/disable + run-now + runs history + driver diagnostics (schedule install/uninstall/status, tick-now, detached watch; all explicit + confirm-gated) |
