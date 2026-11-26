@@ -3,8 +3,12 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
+  collectPrChecks,
+  collectPrComments,
   collectPrCreate,
   collectPrList,
+  collectPrLogs,
+  collectPrReviews,
   collectPrStatus,
   collectPrView,
   ensureGh,
@@ -23,6 +27,15 @@ const ENV_KEYS = [
   "GH_STUB_REPO",
   "GH_STUB_LIST_JSON",
   "GH_STUB_VIEW_JSON",
+  "GH_STUB_PR_DETAIL_JSON",
+  "GH_STUB_REVIEWS_JSON",
+  "GH_STUB_ISSUE_COMMENTS_JSON",
+  "GH_STUB_LINE_COMMENTS_JSON",
+  "GH_STUB_CHECKS_JSON",
+  "GH_STUB_CHECKS_FAIL",
+  "GH_STUB_RUNS_JSON",
+  "GH_STUB_RUN_VIEW_JSON",
+  "GH_STUB_JOB_LOG",
 ];
 
 function tempDir(): string {
@@ -59,11 +72,36 @@ case "\${1:-}" in
     if [ "\${GH_STUB_AUTH_FAIL:-0}" = "1" ]; then echo "not logged in" >&2; exit 1; fi
     echo "github.com"; exit 0;;
   repo) echo "\${GH_STUB_REPO:-octo/widgets}"; exit 0;;
+  api)
+    case "$*" in
+      *pulls/*/reviews*) cat "\${GH_STUB_REVIEWS_JSON:-/dev/null}";;
+      *issues/*/comments*) cat "\${GH_STUB_ISSUE_COMMENTS_JSON:-/dev/null}";;
+      *pulls/*/comments*) cat "\${GH_STUB_LINE_COMMENTS_JSON:-/dev/null}";;
+      *pulls/*) cat "\${GH_STUB_PR_DETAIL_JSON:-/dev/null}";;
+      *) exit 1;;
+    esac
+    exit 0;;
   pr)
     case "\${2:-}" in
       list) cat "\${GH_STUB_LIST_JSON:-/dev/null}" 2>/dev/null || echo '[]';;
       view) cat "\${GH_STUB_VIEW_JSON:-/dev/null}";;
+      checks)
+        if [ "\${GH_STUB_CHECKS_FAIL:-0}" = "1" ]; then
+          echo "no checks reported on the 'feature' branch" >&2; exit 1
+        fi
+        cat "\${GH_STUB_CHECKS_JSON:-/dev/null}";;
       create) echo "https://github.com/octo/widgets/pull/42";;
+      *) exit 1;;
+    esac
+    exit 0;;
+  run)
+    case "\${2:-}" in
+      list) cat "\${GH_STUB_RUNS_JSON:-/dev/null}";;
+      view)
+        case "$*" in
+          *--log*) cat "\${GH_STUB_JOB_LOG:-/dev/null}";;
+          *) cat "\${GH_STUB_RUN_VIEW_JSON:-/dev/null}";;
+        esac;;
       *) exit 1;;
     esac
     exit 0;;
@@ -259,5 +297,310 @@ describe("pr create", () => {
       resolveForgeRepo(tempDir(), { repo: "bad repo name with spaces!!" }),
     ).rejects.toMatchObject({ kind: "gh_error" });
     expect(stubCalls(logFile)).toEqual([]);
+  });
+});
+
+const PR_DETAIL = {
+  number: 7,
+  head: { ref: "feature/x", sha: "abc123" },
+  base: { ref: "main", sha: "def456" },
+  requested_reviewers: [{ login: "rev1" }, { login: "rev2" }],
+  requested_teams: [{ name: "team-a", slug: "team-a" }],
+};
+
+function writeStubJson(work: string, name: string, value: unknown): string {
+  const file = path.join(work, name);
+  writeFileSync(file, typeof value === "string" ? value : JSON.stringify(value));
+  return file;
+}
+
+describe("pr reviews", () => {
+  test("returns bounded reviews plus review requests and head/base", async () => {
+    const { work, logFile } = installGhStub();
+    setEnv("GH_STUB_PR_DETAIL_JSON", writeStubJson(work, "detail.json", PR_DETAIL));
+    setEnv(
+      "GH_STUB_REVIEWS_JSON",
+      writeStubJson(work, "reviews.json", [
+        {
+          id: 1,
+          user: { login: "alice" },
+          state: "APPROVED",
+          body: "looks good",
+          submitted_at: "2026-01-01T00:00:00Z",
+          commit_id: "abc123",
+          html_url: "https://example.com/r/1",
+        },
+        {
+          id: 2,
+          user: { login: "bob" },
+          state: "CHANGES_REQUESTED",
+          body: "x".repeat(5000),
+          submitted_at: "2026-01-02T00:00:00Z",
+          commit_id: "abc123",
+          html_url: "https://example.com/r/2",
+        },
+      ]),
+    );
+    const out = (await collectPrReviews(tempDir(), { repo: "octo/widgets", number: 7 })) as {
+      head: { ref: string; sha: string };
+      base: { ref: string };
+      reviews: Array<{ author: string; body_truncated?: boolean }>;
+      review_requests: { users: unknown[]; teams: unknown[] };
+      reviews_truncated: boolean;
+    };
+    expect(out.head).toEqual({ ref: "feature/x", sha: "abc123" });
+    expect(out.base.ref).toBe("main");
+    expect(out.reviews).toHaveLength(2);
+    expect(out.reviews[0]).toMatchObject({ author: "alice", state: "APPROVED" });
+    expect(out.reviews[1]?.body_truncated).toBe(true);
+    expect(out.review_requests.users).toEqual(["rev1", "rev2"]);
+    expect(out.review_requests.teams).toEqual(["team-a"]);
+    expect(out.reviews_truncated).toBe(false);
+    const calls = stubCalls(logFile);
+    expect(calls).toContain("api repos/octo/widgets/pulls/7");
+    expect(calls.some((c) => c.includes("pulls/7/reviews?per_page=100"))).toBe(true);
+  });
+
+  test("caps review count at 50 newest and flags truncation", async () => {
+    const { work } = installGhStub();
+    setEnv("GH_STUB_PR_DETAIL_JSON", writeStubJson(work, "detail.json", PR_DETAIL));
+    setEnv(
+      "GH_STUB_REVIEWS_JSON",
+      writeStubJson(
+        work,
+        "reviews.json",
+        Array.from({ length: 60 }, (_, i) => ({
+          id: i,
+          user: { login: `u${i}` },
+          state: "COMMENTED",
+          submitted_at: "t",
+        })),
+      ),
+    );
+    const out = (await collectPrReviews(tempDir(), { repo: "octo/widgets", number: 7 })) as {
+      reviews: Array<{ id: number }>;
+      reviews_truncated: boolean;
+    };
+    expect(out.reviews).toHaveLength(50);
+    expect(out.reviews[0]?.id).toBe(10); // newest 50 of 60
+    expect(out.reviews_truncated).toBe(true);
+  });
+});
+
+describe("pr comments", () => {
+  test("returns issue comments and line comments bounded separately", async () => {
+    const { work, logFile } = installGhStub();
+    setEnv("GH_STUB_PR_DETAIL_JSON", writeStubJson(work, "detail.json", PR_DETAIL));
+    setEnv(
+      "GH_STUB_ISSUE_COMMENTS_JSON",
+      writeStubJson(work, "issue.json", [
+        {
+          id: 11,
+          user: { login: "carol" },
+          body: "pr conversation",
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T01:00:00Z",
+          html_url: "https://example.com/c/11",
+        },
+      ]),
+    );
+    setEnv(
+      "GH_STUB_LINE_COMMENTS_JSON",
+      writeStubJson(work, "line.json", [
+        {
+          id: 22,
+          user: { login: "dave" },
+          path: "src/a.ts",
+          line: 42,
+          original_line: 40,
+          side: "RIGHT",
+          in_reply_to_id: null,
+          body: "nit: rename this",
+          diff_hunk: "@@ -40,6 +40,7 @@",
+          created_at: "2026-01-02T00:00:00Z",
+          updated_at: "2026-01-02T00:00:00Z",
+          html_url: "https://example.com/c/22",
+        },
+      ]),
+    );
+    const out = (await collectPrComments(tempDir(), { repo: "octo/widgets", number: 7 })) as {
+      issue_comments: Array<{ author: string; body: string }>;
+      line_comments: Array<{
+        path: string;
+        line: number;
+        in_reply_to_id: unknown;
+        diff_hunk: string;
+      }>;
+      issue_comments_truncated: boolean;
+      line_comments_truncated: boolean;
+    };
+    expect(out.issue_comments[0]).toMatchObject({ author: "carol", body: "pr conversation" });
+    expect(out.line_comments[0]).toMatchObject({
+      path: "src/a.ts",
+      line: 42,
+      diff_hunk: "@@ -40,6 +40,7 @@",
+    });
+    expect(out.issue_comments_truncated).toBe(false);
+    expect(out.line_comments_truncated).toBe(false);
+    const calls = stubCalls(logFile);
+    expect(calls.some((c) => c.includes("issues/7/comments?per_page=100"))).toBe(true);
+    expect(calls.some((c) => c.includes("pulls/7/comments?per_page=100"))).toBe(true);
+  });
+});
+
+describe("pr checks", () => {
+  test("maps gh pr checks --json fields to bounded snake_case", async () => {
+    const { work, logFile } = installGhStub();
+    setEnv("GH_STUB_PR_DETAIL_JSON", writeStubJson(work, "detail.json", PR_DETAIL));
+    setEnv(
+      "GH_STUB_CHECKS_JSON",
+      writeStubJson(work, "checks.json", [
+        {
+          name: "build",
+          bucket: "pass",
+          state: "SUCCESS",
+          workflow: "CI",
+          link: "https://example.com/check/1",
+          description: "",
+          event: "pull_request",
+          startedAt: "2026-01-01T00:00:00Z",
+          completedAt: "2026-01-01T00:05:00Z",
+        },
+      ]),
+    );
+    const out = (await collectPrChecks(tempDir(), { repo: "octo/widgets", number: 7 })) as {
+      checks: Array<{ name: string; bucket: string; workflow: string; started_at: string }>;
+      checks_truncated: boolean;
+      head: { sha: string };
+    };
+    expect(out.checks[0]).toMatchObject({
+      name: "build",
+      bucket: "pass",
+      workflow: "CI",
+      started_at: "2026-01-01T00:00:00Z",
+    });
+    expect(out.checks_truncated).toBe(false);
+    expect(out.head.sha).toBe("abc123");
+    const call = stubCalls(logFile).find((c) => c.startsWith("pr checks"));
+    expect(call).toContain("--repo octo/widgets");
+    expect(call).toContain("--json");
+  });
+
+  test("'no checks reported' maps to an empty list, not an error", async () => {
+    const { work } = installGhStub();
+    setEnv("GH_STUB_PR_DETAIL_JSON", writeStubJson(work, "detail.json", PR_DETAIL));
+    setEnv("GH_STUB_CHECKS_FAIL", "1");
+    const out = (await collectPrChecks(tempDir(), { repo: "octo/widgets", number: 7 })) as {
+      checks: unknown[];
+    };
+    expect(out.checks).toEqual([]);
+  });
+});
+
+describe("pr logs", () => {
+  test("default mode lists workflow runs for the PR head sha", async () => {
+    const { work, logFile } = installGhStub();
+    setEnv("GH_STUB_PR_DETAIL_JSON", writeStubJson(work, "detail.json", PR_DETAIL));
+    setEnv(
+      "GH_STUB_RUNS_JSON",
+      writeStubJson(work, "runs.json", [
+        {
+          databaseId: 555,
+          name: "CI",
+          workflowName: "ci.yml",
+          status: "completed",
+          conclusion: "success",
+          url: "https://example.com/run/555",
+          headSha: "abc123",
+          createdAt: "2026-01-01T00:00:00Z",
+          event: "pull_request",
+          displayTitle: "feat: x",
+        },
+      ]),
+    );
+    const out = (await collectPrLogs(tempDir(), { repo: "octo/widgets", number: 7 })) as {
+      mode: string;
+      head_sha: string;
+      runs: Array<{ id: number; workflow: string; conclusion: string }>;
+    };
+    expect(out.mode).toBe("runs");
+    expect(out.head_sha).toBe("abc123");
+    expect(out.runs[0]).toMatchObject({ id: 555, workflow: "ci.yml", conclusion: "success" });
+    const call = stubCalls(logFile).find((c) => c.startsWith("run list"));
+    expect(call).toContain("--commit abc123");
+    expect(call).toContain("--repo octo/widgets");
+  });
+
+  test("--run mode returns the run's bounded job list", async () => {
+    const { work } = installGhStub();
+    setEnv("GH_STUB_PR_DETAIL_JSON", writeStubJson(work, "detail.json", PR_DETAIL));
+    setEnv(
+      "GH_STUB_RUN_VIEW_JSON",
+      writeStubJson(work, "run.json", {
+        databaseId: 555,
+        name: "CI",
+        workflowName: "ci.yml",
+        status: "completed",
+        conclusion: "success",
+        url: "https://example.com/run/555",
+        headSha: "abc123",
+        createdAt: "2026-01-01T00:00:00Z",
+        jobs: [
+          {
+            databaseId: 9001,
+            name: "build",
+            status: "completed",
+            conclusion: "success",
+            url: "https://example.com/job/9001",
+            startedAt: "t0",
+            completedAt: "t1",
+            steps: [{ name: "s1" }],
+          },
+        ],
+      }),
+    );
+    const out = (await collectPrLogs(tempDir(), {
+      repo: "octo/widgets",
+      number: 7,
+      runId: "555",
+    })) as {
+      mode: string;
+      run: { id: number; workflow: string };
+      jobs: Array<{ id: number; name: string; conclusion: string }>;
+      jobs_truncated: boolean;
+    };
+    expect(out.mode).toBe("run");
+    expect(out.run).toMatchObject({ id: 555, workflow: "ci.yml" });
+    expect(out.jobs[0]).toMatchObject({ id: 9001, name: "build", conclusion: "success" });
+    expect(out.jobs[0]).not.toHaveProperty("steps");
+    expect(out.jobs_truncated).toBe(false);
+  });
+
+  test("--job mode returns a bounded log tail", async () => {
+    const { work, logFile } = installGhStub();
+    setEnv("GH_STUB_PR_DETAIL_JSON", writeStubJson(work, "detail.json", PR_DETAIL));
+    const logLines = Array.from({ length: 300 }, (_, i) => `line ${i}`);
+    setEnv("GH_STUB_JOB_LOG", writeStubJson(work, "job.log", `${logLines.join("\n")}\n`));
+    const out = (await collectPrLogs(tempDir(), {
+      repo: "octo/widgets",
+      number: 7,
+      jobId: "9001",
+      lines: 10,
+    })) as {
+      mode: string;
+      job_id: string;
+      log: string;
+      truncated: boolean;
+      total_lines: number;
+    };
+    expect(out.mode).toBe("job");
+    expect(out.job_id).toBe("9001");
+    expect(out.truncated).toBe(true);
+    expect(out.total_lines).toBe(301); // trailing newline adds an empty line
+    expect(out.log).toContain("line 299");
+    expect(out.log).not.toContain("line 289\n");
+    const call = stubCalls(logFile).find((c) => c.startsWith("run view"));
+    expect(call).toContain("--job 9001");
+    expect(call).toContain("--log");
   });
 });
