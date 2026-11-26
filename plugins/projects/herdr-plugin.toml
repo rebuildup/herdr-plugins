@@ -1,0 +1,12 @@
+id = "rebuildup.projects"
+name = "Projects"
+version = "0.3.0"
+min_herdr_version = "0.9.0"
+description = "Project registry for herdr panes: multi-repo grouping, pin/archive, settings overrides, and project-defined scripts."
+platforms = ["linux", "macos", "windows"]
+
+# No build step: the plugin is dependency-free TypeScript executed by Bun
+# (runtime prerequisite, see plugins/projects/README.md).
+#
+# No [[actions]] yet: registry commands are session-scoped, not pane-scoped,
+# and mutations require explicit arguments (CLI/agent invocation only).

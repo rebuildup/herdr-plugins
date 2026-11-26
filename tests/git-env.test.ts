@@ -3,8 +3,8 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { ghChildEnv, sanitizedChildEnv } from "../packages/git-core/src/git-env";
 import { collectCommit, collectFiles, collectStatus, resolveRepo } from "../plugins/git/src/git";
-import { ghChildEnv, sanitizedChildEnv } from "../plugins/git/src/git-env";
 
 // ---------------------------------------------------------------------------
 // sanitizedChildEnv unit tests

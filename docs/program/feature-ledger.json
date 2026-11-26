@@ -194,20 +194,20 @@
         "apps/server/src/project/"
       ],
       "classification": "plugin",
-      "issues": [26],
+      "issues": [26, 48, 49, 50, 51, 70],
       "depends_on": ["git-readonly"],
       "acceptance": "project 登録/検索/ピン/アーカイブ、clone/init/publish、環境・defaults/override、複数 repo 発見・明示追加/除外・submodule、repo 別 worktree/差分との関連付け。herdr/Worktrunk lifecycle を再利用。",
-      "verification": "未着手。Issue 内 upstream 参照 docs/user/multi-repo-projects.md は pinned revision 9cc4018c に存在しない (project-settings.md が実体)。"
+      "verification": "release-0-3-0 で #48 registry 骨格・#49 CRUD/pin/archive/settings override・#50 t3.json/scripts 解決・#51 repo membership (repos list/add/remove, repositoryIdentity=remote 正規化, branch/dirty/has_submodules) を実装済み。#69 で監査収束: has_submodules を tri-state (probe 失敗時 null) 化、settings 破損時の wholesale rewrite を spec/contract 明記、remote identity の正規化規則 (host 小文字化+非既定 port 保持・path case 保持・ssh:// scp 誤認修正) を明記。残差は #70 で追跡: clone/init/publish、repo 別 worktree/差分との関連付け (herdr/Worktrunk lifecycle 側の接続点として repos list の has_submodules を提供)。Issue 内 upstream 参照 docs/user/multi-repo-projects.md は pinned revision 9cc4018c に存在しない (project-settings.md が実体)。"
     },
     {
       "id": "project-scripts",
       "title_ja": "Project Scripts: プロジェクト定義コマンドの実行・停止・結果管理",
       "upstream_refs": ["docs/user/project-settings.md", "docs/user/source-control.md"],
       "classification": "plugin",
-      "issues": [3, 26],
+      "issues": [3, 26, 60, 50, 52, 53],
       "depends_on": ["projects-multi-repo"],
       "acceptance": "セットアップ (worktree 作成後含む)・定義済みコマンドの一覧・起動・停止・再実行・exit code/ログ・状態・開発サーバー実行先を扱う。PTY テキストから実行成功を捏造しない。#32 automation と責務分離。",
-      "verification": "未着手。pane.output_matched subscription の実用性検証が前提。"
+      "verification": "#53 (release-0-3-0) で手動 run/stop/results/logs を実装。ADR-0010 の dedicated-pane 方式: workspace.create→pane.send_input→pane.wait_for_output センチネル (__HERDR_DONE_<run-id>__=$?) で exit code を構造化取得。result enum: running|success|failed|stopped|unknown (成功捏造なし)。runs.json は専用 lock+atomic rename、ログは bounded tail。fake-transport 契約テスト + herdr 0.9.5 隔離セッション実機検証済み (success/failed/unknown/stopped・stop 競合)。#66 で run record 所有権 (host+session_key+pane context) 再検証、#67 で shell family 対応 (sh/cmd/powershell)、#68 で scrollback marker 再スキャンによる完了回収を追加。自動トリガー (runOnWorktreeCreate/runOnSettle/stopOnSettle) は上流イベント gap で未実装—#60 で追跡。"
     },
     {
       "id": "checkpoints",
@@ -239,7 +239,7 @@
       "issues": [5],
       "depends_on": [],
       "acceptance": "Provider アダプターごとの session 対応付け・履歴正規化 (user/assistant/tool call/tool result/turn event/approval)・検索・ページング・再読込時の重複/欠落を扱う。未対応と欠落を明示し PTY 推測で捏造しない。",
-      "verification": "未着手。herdr agent_session の公開範囲は upstream 確認待ち (#5 依存)。Agent Router との責務境界を遵守。"
+      "verification": "実現可能性調査済み (#5 コメント): provider transcript 正規化 indexer + herdr-plugins.conversations/v1 契約として plugin 化可能。agent_session/cwd/pane_id が対応付けキー。upstream gap 候補: agent_session_path 非公開・attention 粒度 (#8 と同根)。分解は後続 train で実施。"
     },
     {
       "id": "provider-controls-composer",
@@ -276,7 +276,7 @@
       "issues": [28],
       "depends_on": ["conversations"],
       "acceptance": "token/input/output/cache、model/host/project 別集計、履歴保持、subscription quota/reset、HTTP quota source 連携、推定 API コストと実請求の区別。欠損をゼロ扱いしない。",
-      "verification": "未着手。Provider ごとのデータ源・対応範囲・鮮度を明示し実データと照合。"
+      "verification": "実現可能性調査済み (#28 コメント): provider 所有 artifact (transcript/quota endpoint) 由来で plugin 化可能。quota endpoint の credential 境界は ADR 要。#5 index 再利用が自然。分解は後続 train で実施。"
     },
     {
       "id": "text-generation",

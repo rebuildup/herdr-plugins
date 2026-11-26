@@ -9,7 +9,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { ghChildEnv } from "./git-env";
+import { ghChildEnv } from "../../../packages/git-core/src/git-env";
 
 export type GhErrorKind = "gh_missing" | "timeout" | "gh_error";
 
