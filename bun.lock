@@ -58,6 +58,10 @@
       "name": "@herdr-plugins/projects",
       "version": "0.1.0",
     },
+    "plugins/secrets": {
+      "name": "@herdr-plugins/secrets",
+      "version": "0.1.0",
+    },
     "plugins/textgen": {
       "name": "@herdr-plugins/textgen",
       "version": "0.6.0",
@@ -109,6 +113,8 @@
     "@herdr-plugins/mcp": ["@herdr-plugins/mcp@workspace:plugins/mcp"],
 
     "@herdr-plugins/projects": ["@herdr-plugins/projects@workspace:plugins/projects"],
+
+    "@herdr-plugins/secrets": ["@herdr-plugins/secrets@workspace:plugins/secrets"],
 
     "@herdr-plugins/textgen": ["@herdr-plugins/textgen@workspace:plugins/textgen"],
 
