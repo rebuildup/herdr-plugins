@@ -1,6 +1,6 @@
 /**
  * rebuildup.artifacts CLI — artifact registry contract
- * (`herdr-plugins.artifacts/v1`, DRAFT) for agents and external
+ * (`herdr-plugins.artifacts/v1`, STABLE) for agents and external
  * clients. Single JSON document on stdout; diagnostics on stderr.
  * Exit 0 success, 1 handled error, 2 usage.
  *
@@ -8,7 +8,10 @@
  * registry core: `register` (state_copy default / opt-in path_ref),
  * `list`, `get`, `search`, `delete`; T3 (#142) adds kind-specific
  * validation, richer search filters, and `verify` (integrity
- * re-check). `deliver`/`gc` remain contract_draft until T4 (#143).
+ * re-check); T4 (#143) adds `deliver` (v1 path-in-prompt-text
+ * attachment via agent.prompt/pane.send_text), `gc` (age-based
+ * retention, dry-run), `export` (complete client read surface), and
+ * stabilizes contract `herdr-plugins.artifacts/v1`.
  *
  * Registry commands resolve the live session via `session.snapshot`
  * for host/session/owner identity and owner_stale reporting; an
@@ -42,6 +45,8 @@ import {
 import {
   agentSessionForPane,
   deleteArtifact,
+  deliverArtifact,
+  gcArtifacts,
   getArtifact,
   listArtifacts,
   RegistryError,
@@ -183,7 +188,7 @@ function cmdCapability(): void {
     plugin: PLUGIN_ID,
     version: PLUGIN_VERSION,
     read_only: false,
-    mutation_commands: ["register", "delete"],
+    mutation_commands: ["register", "delete", "deliver", "gc"],
     commands: [...IMPLEMENTED_COMMANDS, ...PLANNED_COMMANDS],
     implemented_commands: [...IMPLEMENTED_COMMANDS],
     planned_commands: [...PLANNED_COMMANDS],
@@ -195,12 +200,15 @@ function cmdCapability(): void {
       path_ref_oversize: "warn",
     },
     notes: [
-      "Contract is DRAFT: T2 (#141) implements register/list/get/search/delete; T3 (#142) adds verify + kind validation + search filters; deliver/gc remain contract_draft until T4 (#143).",
+      "Contract herdr-plugins.artifacts/v1 is STABLE (T4 #143): register/list/get/search/verify/delete/deliver/gc/export are all implemented; additive changes only from here.",
       "Plugin never executes or renders artifact content; render-time sandbox/CSP/network isolation is a herdr-t3 requirement (ADR-0024, docs/contracts/artifacts-v1.md).",
       "state_copy (default) enforces per-kind caps at register; path_ref records oversize as a warning flag and reports vanished targets as missing_ref.",
       "kind validation: html refuses non-.html/.htm path names and non-document leading bytes (upstream HtmlRender rules); image/pdf/file/other report mime_mismatch / extension_mime_mismatch warnings instead of refusing.",
       "verify re-checks payload existence, sha256, size, mime, and metadata consistency; per-artifact status is ok|corrupt|missing (honest report, exit 0).",
-      "Registry commands resolve the live session via session.snapshot; unreachable session fails with session_unreachable.",
+      "deliver sends the artifact's stable absolute path inside agent.prompt (--agent) or pane.send_text (--pane) text; stale panes/agents and missing payloads are refused, upstream RPC codes surface as delivery_failed.rpc_code.",
+      "gc collects only unreferenced records older than --older-than; refs-carrying artifacts are skipped (referenced), --dry-run previews, path_ref external files are never deleted.",
+      "export emits the complete annotated index for client sync (herdr-t3 read surface); metadata + resolved_path only, never payload bytes.",
+      "Registry commands resolve the live session via session.snapshot; unreachable session fails with session_unreachable. gc is pure plugin-state work and needs no session.",
       "v1 attachment delivery is the artifact's stable absolute path inside agent.prompt/pane.send_text text; no structured attachment API exists in herdr protocol 22 (upstream gap candidate, ADR-0024).",
       "SnapShots (OS capture), browser import, and MCP Apps UI are out of plugin scope: herdr-t3/desktop or upstream-blocked on #30 (ADR-0024 section 5).",
     ],
@@ -407,6 +415,95 @@ async function cmdDelete(options: CliOptions): Promise<void> {
   });
 }
 
+async function cmdDeliver(options: CliOptions): Promise<void> {
+  const parsed = parseFlags(options.args, {
+    valued: ["pane", "agent", "note"],
+  });
+  const paneId = flagValue(parsed.flags, "pane");
+  const agentPaneId = flagValue(parsed.flags, "agent");
+  if ((paneId === undefined) === (agentPaneId === undefined)) {
+    usageFail("deliver requires exactly one of --pane PANE or --agent PANE");
+  }
+  const id = parsed.positionals[0];
+  if (id === undefined || parsed.positionals.length !== 1) {
+    usageFail("deliver requires exactly one artifact_id");
+  }
+  const snapshot = await snapshotOrFail(options);
+  const result = await deliverArtifact({
+    artifactId: id,
+    target: {
+      kind: paneId !== undefined ? "pane" : "agent",
+      paneId: (paneId ?? agentPaneId) as string,
+    },
+    note: flagValue(parsed.flags, "note"),
+    snapshot,
+    callOptions: options,
+  });
+  emit({
+    contract: CONTRACT,
+    ok: true,
+    command: "deliver",
+    session: sessionName(snapshot, options),
+    ...result,
+    generated_at: now(),
+  });
+}
+
+async function cmdGc(options: CliOptions): Promise<void> {
+  const parsed = parseFlags(options.args, {
+    valued: ["older-than"],
+    boolean: ["dry-run"],
+  });
+  if (parsed.positionals.length > 0) usageFail(`unexpected argument: ${parsed.positionals[0]}`);
+  const olderThan = flagIso(parsed.flags, "older-than");
+  if (olderThan === undefined) usageFail("gc requires --older-than ISO-8601");
+  // gc is pure plugin-state work: no session.snapshot, works offline.
+  const result = await gcArtifacts({
+    olderThan,
+    dryRun: parsed.flags.get("dry-run") === true,
+  });
+  emit({
+    contract: CONTRACT,
+    ok: true,
+    command: "gc",
+    ...result,
+    generated_at: now(),
+  });
+}
+
+async function cmdExport(options: CliOptions): Promise<void> {
+  const parsed = parseFlags(options.args, {
+    valued: ["kind", "pane", "agent", "created-by", "session", "limit"],
+  });
+  if (parsed.positionals.length > 0) usageFail(`unexpected argument: ${parsed.positionals[0]}`);
+  const snapshot = await snapshotOrFail(options);
+  // Export is the complete client read surface: no default page cap —
+  // --limit N truncates honestly and `complete` reports the truncation.
+  const limit = flagInt(parsed.flags, "limit") ?? 0;
+  const filters = {
+    kind: parseKind(flagValue(parsed.flags, "kind")),
+    paneId: flagValue(parsed.flags, "pane"),
+    agentSession: flagValue(parsed.flags, "agent"),
+    createdBy: parseCreatedBy(flagValue(parsed.flags, "created-by")),
+    session: flagValue(parsed.flags, "session"),
+  };
+  const result = await listArtifacts({ ...filters, limit, snapshot });
+  emit({
+    contract: CONTRACT,
+    ok: true,
+    command: "export",
+    session: sessionName(snapshot, options),
+    artifacts: result.artifacts,
+    total: result.total,
+    returned: result.artifacts.length,
+    complete: result.artifacts.length >= result.total,
+    filters: Object.fromEntries(Object.entries(filters).filter(([, v]) => v !== undefined)),
+    orphans: result.orphans,
+    corrupt: result.corrupt,
+    generated_at: now(),
+  });
+}
+
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
   switch (options.command) {
@@ -421,8 +518,8 @@ async function main(): Promise<void> {
         plugin: PLUGIN_ID,
         version: PLUGIN_VERSION,
         usage:
-          "bun run src/cli.ts <capability|help|register|list|get|search|verify|delete> " +
-          `— planned: ${PLANNED_COMMANDS.join("|")}`,
+          "bun run src/cli.ts <capability|help|register|list|get|search|verify|delete|deliver|gc|export> " +
+          `— planned: ${PLANNED_COMMANDS.join("|") || "none"}`,
       });
       return;
     case "register":
@@ -443,6 +540,15 @@ async function main(): Promise<void> {
     case "delete":
       await cmdDelete(options);
       return;
+    case "deliver":
+      await cmdDeliver(options);
+      return;
+    case "gc":
+      await cmdGc(options);
+      return;
+    case "export":
+      await cmdExport(options);
+      return;
     default:
       if ((PLANNED_COMMANDS as readonly string[]).includes(options.command)) {
         fail(
@@ -458,8 +564,11 @@ async function main(): Promise<void> {
 
 main().catch((err) => {
   if (err instanceof RegistryError) {
+    // `code` is the contract-specific code (artifact_not_found,
+    // target_not_found, missing_ref, delivery_failed, referenced, …);
+    // `kind` is the coarse category. Usage errors carry code "usage".
     const error: Record<string, unknown> = {
-      code: err.code === "usage" ? "usage" : "error",
+      code: err.code,
       message: err.message,
       kind: err.kind,
     };

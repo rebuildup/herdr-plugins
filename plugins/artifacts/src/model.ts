@@ -1,17 +1,18 @@
 /**
  * Shared contract constants and record types for
- * rebuildup.artifacts (`herdr-plugins.artifacts/v1`, DRAFT — ADR-0024).
+ * rebuildup.artifacts (`herdr-plugins.artifacts/v1`, STABLE — ADR-0024).
  *
  * T1 (#136) fixed identity, kinds, storage modes, and size caps; T2
  * (#141) adds the persisted artifact record shape consumed by the
- * registry core (state.ts / registry.ts).
+ * registry core (state.ts / registry.ts); T4 (#143) stabilizes v1 with
+ * deliver/gc/export.
  */
 
 export const PLUGIN_ID = "rebuildup.artifacts";
 export const CONTRACT = "herdr-plugins.artifacts/v1";
-/** Contract maturity: "draft" until T4 (#143) stabilizes v1. */
-export const CONTRACT_STATUS = "draft";
-export const PLUGIN_VERSION = "0.1.0";
+/** Contract maturity: "stable" since T4 (#143) shipped deliver/gc/export. */
+export const CONTRACT_STATUS = "stable";
+export const PLUGIN_VERSION = "0.2.0";
 
 /** Artifact kinds, mirroring upstream T3 attachment kinds. */
 export const ARTIFACT_KINDS = ["html", "image", "pdf", "file", "other"] as const;
@@ -216,10 +217,13 @@ function parseArtifactMeta(value: unknown): ArtifactMeta | undefined {
   return { render: { isolation: "required", policy: "client" } };
 }
 
-/** Planned registry commands not yet implemented (T4 #143). */
-export const PLANNED_COMMANDS = ["deliver", "gc"] as const;
+/**
+ * Commands that exist in the contract but are not implemented in this
+ * revision. Empty since T4 (#143): v1 is stable and complete.
+ */
+export const PLANNED_COMMANDS: readonly string[] = [];
 
-/** Implemented commands in this revision (T1 capability/help + T2 registry core + T3 verify). */
+/** Implemented commands (T1 capability/help + T2 registry + T3 verify + T4 deliver/gc/export). */
 export const IMPLEMENTED_COMMANDS = [
   "capability",
   "help",
@@ -229,4 +233,7 @@ export const IMPLEMENTED_COMMANDS = [
   "search",
   "verify",
   "delete",
+  "deliver",
+  "gc",
+  "export",
 ] as const;

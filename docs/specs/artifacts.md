@@ -2,14 +2,17 @@
 
 Scope: T1 foundation (#136) — upstream inventory confirmation,
 responsibility boundary, storage policy, v1 attachment definition, and
-the draft contract skeleton `herdr-plugins.artifacts/v1`. T2 (#141)
+the contract skeleton `herdr-plugins.artifacts/v1`. T2 (#141)
 implements the registry core: `register`/`list`/`get`/`search`/`delete`
 with identity, traversal guards, size caps, leading-byte MIME sniff,
 sha256, and honest missing/stale reporting. T3 (#142) deepens
 kind-specific validation (upstream `HtmlRender`/`attachmentStore`
 rules), extends search filters, and adds `verify` integrity checks.
-Delivery/integration lands in T4 (#143). Design:
-ADR-0024. Contract: `docs/contracts/artifacts-v1.md` (**draft**).
+T4 (#143) adds `deliver` (v1 path-in-prompt attachment), `gc`
+retention, `export` (client read surface), cross-plugin `refs`
+conventions, live verification, and **stabilizes the contract**.
+Design: ADR-0024. Contract: `docs/contracts/artifacts-v1.md`
+(**stable**).
 
 ## Purpose
 
@@ -152,4 +155,40 @@ convention as `rebuildup.conversations`).
   free-text incl. `refs`), and `verify` (`ok`/`corrupt`/`missing`
   integrity re-check: existence, sha256, size, mime, storage-layout
   and oversize-flag consistency).
-- T4 (#143): `deliver`, `gc` — still `contract_draft`.
+- T4 (#143): `deliver`, `gc`, `export` — contract **stable**.
+
+## Delivery (`deliver`, T4 #143)
+
+`deliver --agent PANE|--pane PANE <artifact_id> [--note TEXT]` sends
+the artifact's stable absolute path inside delivery text:
+`--agent` → `agent.prompt` to the pane's live agent (submits);
+`--pane` → `pane.send_text` (literal text, no Enter). The message is
+`[artifacts] <id> — <kind> artifact "<title>"` + `path:`/`mime:`/
+`size:`/`sha256:` lines (+ optional `note:`). Refusals: stale/unknown
+pane (`target_not_found`), agentless pane for `--agent`
+(`agent_not_found`), missing payload (`missing_ref` — a dead path is
+never delivered), upstream send rejection (`delivery_failed` with
+`rpc_code`, e.g. `agent_blocked`). Delivery writes nothing to the
+index — scrollback is not plugin-owned state.
+
+## Retention (`gc`, T4 #143)
+
+`gc --older-than ISO [--dry-run]` (checkpoints-gc shape; no default
+retention window, offline-capable): expired = `created_at` strictly
+before the bound. Referenced records are skipped (`referenced`),
+`path_ref` externals are never deleted, unparseable `created_at` is
+skipped not guessed, orphan payload dirs are reported not collected.
+
+## Export (`export`, T4 #143)
+
+`export` is the herdr-t3 read surface: the complete annotated index
+(same records/annotations as `list`/`get`) + `orphans`/`corrupt` +
+filter echo, metadata + `resolved_path` only. `--limit N` truncates
+with `complete:false`.
+
+## Cross-plugin references (T4 #143)
+
+`refs[]` uses `<plugin>:<kind>/<id>` (`conversations:session/…`,
+`handoff:record/…`, `checkpoints:entry/…`); consumers MAY point back
+through their own payload refs (additive both directions). `delete`
+and `gc` honor non-empty `refs` via `referenced`/skip — never silent.
