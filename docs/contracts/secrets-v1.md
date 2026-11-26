@@ -61,7 +61,7 @@ in v1 (adding one requires a successor ADR).
   "contract": "herdr-plugins.secrets/v1",
   "command": "capability",
   "plugin": "rebuildup.secrets",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "provider": {
     "name": "infisical",
     "domain": "https://secrets.rebuildup.dev/api",
@@ -172,8 +172,14 @@ bindings) and refuses to overwrite (`config_error`, exit 1).
 stderr carries `{contract, ok:false, error:{code, kind?, message, …}}`.
 `code` is `usage` (exit 2) or `error` (exit 1); `kind` is one of
 `config_error`, `resolution_failed`, `spawn_failed` where applicable.
-Error details never contain secret values — provider stderr is
-truncated to 300 chars and stdout is never echoed.
+Error details never contain secret values — provider stderr/stdout
+are never echoed verbatim. Failure `detail` fields carry only
+classified, sanitized diagnostics (the exit code or signal
+termination); provider output is used internally for status
+classification (`provider_unreachable` / `auth_missing` /
+`provider_error`) but is not transcribed into any emitted envelope.
+`capability`'s `cli.detail` likewise reports only the `--version`
+exit code, never provider output.
 
 ## Non-goals (v1)
 

@@ -52,10 +52,13 @@ function classifyFailure(
   detail: string;
 } {
   const text = stderr.toLowerCase();
-  const detail =
-    (stderr.trim() === ""
-      ? `exit code ${exitCode ?? "signal"}`
-      : stderr.trim().replace(/\s+/g, " ").slice(0, 300)) || `exit code ${exitCode ?? "signal"}`;
+  // Provider stderr is used ONLY to classify the failure — it is never
+  // emitted. A failing provider can echo secret-shaped material
+  // (tokens, values, request dumps) into stderr, and `detail` lands in
+  // public CLI envelopes (issue #209, ADR-0027 §3). Detail therefore
+  // carries only the exit/signal fact; the classification itself is
+  // already expressed by `status`.
+  const detail = exitCode === null ? "terminated by signal" : `exit code ${exitCode}`;
   if (
     /econnrefused|enotfound|eai_again|etimedout|timed? ?out|network|socket hang up|getaddrinfo|dns|502|503|504/i.test(
       text,

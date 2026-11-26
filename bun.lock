@@ -64,7 +64,7 @@
     },
     "plugins/secrets": {
       "name": "@herdr-plugins/secrets",
-      "version": "0.1.0",
+      "version": "0.1.1",
     },
     "plugins/textgen": {
       "name": "@herdr-plugins/textgen",

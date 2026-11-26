@@ -285,9 +285,12 @@ async function detectInfisicalCli(bin: string): Promise<{
     return { available: false, detail: result.error.message };
   }
   if (result.status !== 0) {
+    // Provider stdout/stderr are never echoed: `--version` failure
+    // output is arbitrary provider text that could carry secret-shaped
+    // material into the capability envelope (issue #209).
     return {
       available: false,
-      detail: (result.stderr || result.stdout || `exit ${result.status}`).trim().slice(0, 200),
+      detail: `infisical --version exited with code ${result.status ?? "signal"}`,
     };
   }
   const firstLine = (result.stdout || "").trim().split("\n")[0] ?? "";
