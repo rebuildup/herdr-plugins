@@ -545,6 +545,16 @@ function prListCli(overrides: Record<string, unknown> = {}): CliHandler {
 }
 
 describe("PrListView", () => {
+  test("constructor triggers the initial load (no keypress required)", async () => {
+    const ui = fakeUi();
+    const { calls, fn } = fakeCli(prListCli());
+    const view = new PrListView(makeDeps(fn, ui), () => {});
+    await flush();
+    expect(calls).toContainEqual(["pr", "list", "w1:p9", "--state", "open", "--limit", "50"]);
+    const text = linesText(view.render(100, 20)).join("\n");
+    expect(text).toContain("#42 Add forge TUI");
+  });
+
   test("loads and renders open PRs; enter opens detail", async () => {
     const ui = fakeUi();
     const opened: number[] = [];
@@ -787,6 +797,16 @@ function issueListCli(): CliHandler {
 }
 
 describe("IssueListView", () => {
+  test("constructor triggers the initial load (no keypress required)", async () => {
+    const ui = fakeUi();
+    const { calls, fn } = fakeCli(issueListCli());
+    const view = new IssueListView(makeDeps(fn, ui), () => {});
+    await flush();
+    expect(calls).toContainEqual(["issue", "list", "w1:p9", "--state", "open", "--limit", "50"]);
+    const text = linesText(view.render(100, 20)).join("\n");
+    expect(text).toContain("#7 Forge surface missing");
+  });
+
   test("loads and renders issues; enter opens detail", async () => {
     const ui = fakeUi();
     const opened: number[] = [];

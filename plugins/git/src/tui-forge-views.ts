@@ -523,6 +523,7 @@ export class PrListView implements ScreenView {
       if (n !== null) this.onOpenPr(n);
     };
     this.list.onCancel = () => this.deps.ui.pop();
+    void this.load();
   }
 
   /** (Re)load the PR list. Read-only: `pr list` never mutates. */
@@ -1797,6 +1798,7 @@ export class IssueListView implements ScreenView {
       if (n !== null) this.onOpenIssue(n);
     };
     this.list.onCancel = () => this.deps.ui.pop();
+    void this.load();
   }
 
   async load(): Promise<void> {
