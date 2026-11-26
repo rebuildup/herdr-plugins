@@ -99,6 +99,25 @@ gap and only manual `scripts run` ships — per #53's acceptance rule.
   arbitrary commands; rejected for execution (remains available for a
   future plugin UI pane).
 
+## Amendment (#67): shell-family-portable wrappers
+
+The original wrapper assumed a POSIX shell (`cmd; echo
+"__HERDR_DONE_<id>__=$?"` on one line). #67 generalizes it:
+
+- Injection is now **two `pane.send_input` lines**: the command (or a
+  per-family script-file invocation) then a family-specific marker echo.
+  Separate parsed lines make cmd.exe `%ERRORLEVEL%` correct (single-line
+  `cmd1 & echo %ERRORLEVEL%` expands before `cmd1` runs) and work
+  uniformly for sh/cmd/powershell. Trade-off: a stdin-reading command
+  can consume the queued marker line → bounded wait stays `running`.
+- Shell family is detected per run: `--shell` flag →
+  `pane.process_info` foreground name → host-OS default
+  (`win32`→cmd else sh), recorded on the run record
+  (`shell_family`/`shell_source`). Unsupported shells (`shell_unknown`)
+  and non-shell foregrounds (`not_a_shell`) abort before injection.
+- Marker regex is unchanged (`=(-?\d+)`); only the echo line differs
+  per family. Script files are per-family (`.sh`/`.cmd`/`.ps1`).
+
 ## Consequences
 
 - Script output is visible in a real herdr pane — matches upstream UX
@@ -110,3 +129,17 @@ gap and only manual `scripts run` ships — per #53's acceptance rule.
   creation, no exit-status channel, no ownership token on
   socket-created panes, inconsistent event-name casing
   (`pane_created` vs `pane.agent_status_changed`).
+
+## Addendum (#68): completion recovery mechanism
+
+`events.subscribe` `pane.output_matched` (per-pane match subscriptions)
+was evaluated as an event-driven complement to
+`pane.wait_for_output` and **rejected**: it requires a persistent
+subscription connection that a one-shot CLI cannot hold after exit,
+pushed events are not replayed to late subscribers, and ADR-0002
+forbids a plugin daemon. Instead the completion marker doubles as a
+**durable receipt**: `__HERDR_DONE_<run-id>__=<code>` persists in pane
+scrollback, so `scripts results`/`logs` lazily re-scan it via one
+bounded `pane.read` (`recent_unwrapped`) after ownership
+re-validation — no polling loop, exit code still parsed from marker
+digits only.
