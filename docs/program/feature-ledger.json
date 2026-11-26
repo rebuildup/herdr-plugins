@@ -219,10 +219,10 @@
         "apps/server/src/checkpointing/"
       ],
       "classification": "plugin",
-      "issues": [4],
+      "issues": [4, 72, 73, 74, 75],
       "depends_on": ["#23", "#24", "#26", "#5"],
       "acceptance": "未コミット変更・untracked を含む安全な状態保存/復元。hidden Git refs、ターン完了と checkpoint 確定の分離、turn 固有差分と branch 全体差分の区別、複数 repo 保存・復元、保持/GC を契約化。会話巻き戻しは別能力。",
-      "verification": "未着手。実ターン境界が取得できない場合は手動・作業単位 checkpoint として区別。失敗時退避と複合 revert 拒否を契約テストで保証。"
+      "verification": "T1 (#72) 基盤: temp GIT_INDEX_FILE capture で hidden ref refs/herdr-plugins/checkpoints/<repo-key>/<id> に保存、create/list/show/diff/delete。T2 (#73): plan/restore (pre_restore 必須退避・共有 worktree/session 分離・post-verify、--repo は同一 common dir の別 worktree のみ)。T3 (#74): agent_status working→idle/done で work-unit auto-capture (hook は state mark のみ、CLI が lazy drain)。T4 (#75): save/restore-group で複数 repo を group_id 単位に保存・復元 (repo 集合は --repo 列挙/pane id/session pane cwd の live discovery、部分成功は per-repo status で正直に報告)、gc で repo 別 max-count/max-age retention + pre_restore 保護窓 + dry-run、prune で state 非参照 ref の deleteStaleRefs 相当削除。契約は docs/contracts/checkpoints-v1.md、設計は ADR-0011 (T4 amendment)。shared object store 直書きは v1 の意図的簡略化。#94 で監査収束: gc/prune の ok:false 時 exit 1 + unreachable_repos stderr を追加 (従来 exit 0 で不誠実)、deleteRef を --no-deref に統一、plugin version 0.4.0。herdr 0.9.5 隔離セッションで全 surface 実機検証済み (auto-capture は実 agent の working→done で確認) — docs/research/rc-0-4-0-verification.md、macOS READY。残差: per-message turn boundary・worktree/session lifecycle hook は上流 gap (spec 記録)、ambient HERDR_SOCKET_PATH は #83、ambient GIT_* env 継承は #96、Linux/Windows 公式導入検証は未実施。"
     },
     {
       "id": "conversations",
