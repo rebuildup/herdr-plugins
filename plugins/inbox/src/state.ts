@@ -49,6 +49,29 @@ export interface ArchivedMark extends GenerationMark {}
 
 export interface PinnedMark extends GenerationMark {}
 
+export type LinkKind = "pr" | "issue";
+
+/**
+ * User-declared tracker reference ("this pane is working on repo#n").
+ * Unlike organize marks this is NOT a timed hide: it survives routine
+ * `state_change_seq` advances (status transitions) and is guarded only by
+ * the agent-session fingerprint plus a seq-regression check — see
+ * docs/specs/inbox.md → Explicit tracker links.
+ */
+export interface PaneLink {
+  kind: LinkKind;
+  /** Forge repo path as declared, e.g. "owner/name" (subgroups allowed). */
+  repo: string;
+  number: number;
+  /** Canonical display ref "<repo>#<number>". */
+  ref: string;
+  /** ISO timestamp the link was (re)declared. */
+  at: string;
+  /** state_change_seq observed at link time; regression means identity reuse. */
+  seq: number;
+  agent_session?: AgentSessionRef | null;
+}
+
 export interface InboxEntry {
   pane_id: string;
   workspace_id?: string | undefined;
@@ -62,6 +85,12 @@ export interface InboxEntry {
    * retention pruning like every other organize field.
    */
   order?: number | undefined;
+  /**
+   * User-declared PR/Issue links. Not generation-guarded like organize
+   * marks (see PaneLink); resolved for staleness at read time and dropped
+   * with the entry on `pane.closed`/retention pruning.
+   */
+  links?: PaneLink[] | undefined;
   updated_at: string;
 }
 

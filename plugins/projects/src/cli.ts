@@ -25,6 +25,7 @@ import {
   projectIdFromRoot,
   repoIndex,
 } from "./model";
+import { resolveGitPluginRoot } from "./plugincli";
 import {
   herdrTransport,
   listRuns,
@@ -48,9 +49,10 @@ import {
 } from "./state";
 import { loadT3ProjectFile, T3JsonError, type T3ProjectFileScript } from "./t3json";
 import { drainSettleTriggers, drainWorktreeTriggers, type TriggerDrainReport } from "./triggers";
+import { associateRepoWorktrees, type WorktreeAssociationSkip } from "./worktrees";
 
 const CONTRACT = "herdr-plugins.projects/v1";
-const PLUGIN_VERSION = "0.3.0";
+const PLUGIN_VERSION = "0.4.0";
 const DEFAULT_TIMEOUT_MS = 10_000;
 
 interface PluginConfig {
@@ -595,6 +597,27 @@ async function cmdReposList(options: CliOptions): Promise<void> {
     fail(`project not found: ${id}`, 1, "project_not_found", { project_id: id });
   }
 
+  // Worktree/diff association (#184, ADR-0029): one session snapshot
+  // serves every member; an unreachable socket degrades to honest
+  // per-member `worktrees: null` + `worktrees_error`, never a failure.
+  let snapshot: SessionSnapshot | null = null;
+  try {
+    snapshot = (await sessionSnapshot(options)) as SessionSnapshot;
+  } catch {
+    snapshot = null;
+  }
+  // The git plugin root resolves lazily — only when a pane actually
+  // needs a `status` fetch — and at most once per invocation.
+  let gitRootPromise: ReturnType<typeof resolveGitPluginRoot> | null = null;
+  const resolveGitRoot = (): ReturnType<typeof resolveGitPluginRoot> => {
+    gitRootPromise ??= resolveGitPluginRoot();
+    return gitRootPromise;
+  };
+  // Once the session socket proves unreachable, later members reuse the
+  // same honest error instead of repeating a doomed socket call.
+  let deadSocketError: { reason: string; detail?: string } | null = null;
+  const worktreeSkips: WorktreeAssociationSkip[] = [];
+
   const repos: Record<string, unknown>[] = [];
   const skipped: { root: string; reason: string }[] = [];
   for (const member of (project as Project).repos) {
@@ -605,6 +628,12 @@ async function cmdReposList(options: CliOptions): Promise<void> {
       branch: null,
       dirty: null,
       has_submodules: null,
+      // Read-only advisory from the repo's t3.json (#184 MAY per
+      // ADR-0029 §3): the parsed `worktreeSubmodules` value nothing
+      // consumes yet — display data, not enforcement.
+      worktree_submodules: null,
+      worktrees: null,
+      worktrees_error: null,
     };
     try {
       const live = await inspectRepo(member.root, { timeoutMs });
@@ -615,6 +644,31 @@ async function cmdReposList(options: CliOptions): Promise<void> {
       if (!(err instanceof GitError)) throw err;
       skipped.push({ root: member.root, reason: err.kind });
     }
+    try {
+      entry.worktree_submodules =
+        (await loadT3ProjectFile(member.root))?.worktreeSubmodules ?? null;
+    } catch {
+      // Advisory only: an invalid t3.json never fails `repos list`.
+    }
+    if (deadSocketError !== null) {
+      entry.worktrees_error = deadSocketError;
+    } else {
+      const association = await associateRepoWorktrees(member.root, {
+        call: options,
+        timeoutMs,
+        snapshot,
+        resolveGitRoot,
+      });
+      if (association.ok) {
+        entry.worktrees = association.worktrees;
+        worktreeSkips.push(...association.skipped);
+      } else {
+        entry.worktrees_error = association.error;
+        if (association.error.reason === "session_unreachable") {
+          deadSocketError = association.error;
+        }
+      }
+    }
     repos.push(entry);
   }
   emit({
@@ -623,6 +677,7 @@ async function cmdReposList(options: CliOptions): Promise<void> {
     project_id: (project as Project).id,
     repos,
     skipped,
+    worktrees_skipped: worktreeSkips,
     generated_at: now(),
   });
 }
@@ -1157,7 +1212,9 @@ async function cmdCapability(): Promise<void> {
       git: true,
       bun: true,
       herdr:
-        "session snapshot (discover + trigger drain preflight); pane execution (scripts run/stop/results/logs)",
+        "session snapshot (discover + trigger drain preflight + repos list worktree panes); worktree.list (repos list association, read-only); pane execution (scripts run/stop/results/logs)",
+      git_plugin:
+        "optional sibling rebuildup.git CLI (herdr-plugins.git/v1) for pane-addressed status summaries on open worktrees; absent → status_error plugin_unavailable, pointers still emitted",
     },
     defaults: { timeoutMs: config.timeoutMs ?? DEFAULT_TIMEOUT_MS },
   });

@@ -21,7 +21,14 @@ settle / snooze / pin / archive / manual-ordering / restore organize model.
 - `pin` sorts a pane to the top of the inbox without hiding it.
 - `order` sets a manual rank within the pane's display group
   (`--first`/`--last`/`--before <pane>`/`--after <pane>`).
-- `restore` returns a pane to the inbox and clears all organize state.
+- `list` filters: `--attention`, `--organize settled|snoozed|archived|none`,
+  `--search <text>` (title/cwd/pane_id), `--workspace <id>` — read-side
+  only, never mutate state.
+- `link`/`unlink`/`links` manage user-declared PR/Issue references
+  (`<repo>#<n>`) per pane — explicit associations only, no forge-event
+  auto-linking; stale links never attach to a new agent generation.
+- `restore` returns a pane to the inbox and clears all organize state
+  (declared links are preserved).
 - `list` emits the versioned JSON contract (`herdr-plugins.inbox/v1`) for TUI,
   CLI, agents, and external clients such as herdr-t3 — see
   `docs/contracts/inbox-v1.md`.
@@ -44,6 +51,10 @@ bun run src/cli.ts unpin <pane_id>
 bun run src/cli.ts archive <pane_id>
 bun run src/cli.ts unarchive <pane_id>
 bun run src/cli.ts order <pane_id> --first|--last|--before <pane>|--after <pane>
+bun run src/cli.ts list --attention --organize settled --search <text> --workspace <id>
+bun run src/cli.ts link <pane_id> --pr <owner>/<repo>#<n> [--verify]
+bun run src/cli.ts unlink <pane_id> --issue <owner>/<repo>#<n>
+bun run src/cli.ts links <pane_id>
 bun run src/cli.ts reconcile
 bun run src/cli.ts transitions [--after <seq>] [--limit <n>]
 bun run src/cli.ts watch [--interval SECONDS]

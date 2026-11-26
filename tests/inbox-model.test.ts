@@ -2,10 +2,12 @@ import { describe, expect, test } from "bun:test";
 import type { AgentInfo, PaneInfo } from "../packages/herdr-client/src/snapshot";
 import {
   agentSessionRef,
+  applyInboxFilters,
   archivePane,
   buildInbox,
   computeOrderRanks,
   type InboxItem,
+  linkPane,
   pinPane,
   pruneState,
   resolveEntry,
@@ -13,7 +15,9 @@ import {
   restorePane,
   settlePane,
   snoozePane,
+  toPublicLink,
   unarchivePane,
+  unlinkPane,
   unpinPane,
 } from "../plugins/inbox/src/model";
 import type { AgentSessionRef, InboxEntry } from "../plugins/inbox/src/state";
@@ -390,7 +394,7 @@ describe("manual order", () => {
 
 describe("computeOrderRanks", () => {
   function item(id: string, extra: Partial<InboxItem> = {}): InboxItem {
-    return { pane_id: id, in_inbox: true, attention: false, pinned: false, ...extra };
+    return { pane_id: id, in_inbox: true, attention: false, pinned: false, links: [], ...extra };
   }
 
   test("before/after/first/last produce dense ranks", () => {
@@ -417,6 +421,177 @@ describe("computeOrderRanks", () => {
     expect(computeOrderRanks(siblings, "a", { kind: "before", paneId: "z" })).toHaveProperty(
       "error",
     );
+  });
+});
+
+describe("explicit tracker links", () => {
+  const LINK = { kind: "pr" as const, repo: "owner/repo", number: 42, ref: "owner/repo#42" };
+
+  test("linkPane stores a link surfaced on the inbox item", () => {
+    const entries: Record<string, InboxEntry> = {};
+    linkPane(entries, pane("p1"), agent(3, "working"), LINK, NOW);
+    const items = buildInbox([pane("p1")], { p1: agent(3, "working") }, entries, NOW);
+    expect(items[0]?.links).toEqual([
+      { kind: "pr", repo: "owner/repo", number: 42, ref: "owner/repo#42", at: NOW.toISOString() },
+    ]);
+    // Public view never leaks fingerprint/seq internals.
+    expect(toPublicLink(entries.p1?.links?.[0] as never)).not.toHaveProperty("agent_session");
+  });
+
+  test("links survive routine state_change_seq advances (status transitions)", () => {
+    const session = { agent: "claude", value: "s1" };
+    const entries: Record<string, InboxEntry> = {};
+    linkPane(entries, pane("p1"), agent(3, "working", session), LINK, NOW);
+    // Same session, seq advanced by a status change: link must persist —
+    // unlike organize marks, links are not hide-kinds.
+    const items = buildInbox([pane("p1")], { p1: agent(9, "done", session) }, entries, LATER);
+    expect(items[0]?.links).toHaveLength(1);
+    expect(entries.p1?.links).toHaveLength(1);
+  });
+
+  test("agent_session fingerprint change drops the link (no misapplication)", () => {
+    const entries: Record<string, InboxEntry> = {};
+    linkPane(
+      entries,
+      pane("p1"),
+      agent(3, "working", { agent: "claude", value: "old" }),
+      LINK,
+      NOW,
+    );
+    const agents = { p1: agent(3, "working", { agent: "claude", value: "new" }) };
+    const items = buildInbox([pane("p1")], agents, entries, LATER);
+    expect(items[0]?.links).toEqual([]);
+    expect(entries.p1?.links).toBeUndefined();
+  });
+
+  test("link recorded without fingerprint clears when an agent session appears", () => {
+    const entries: Record<string, InboxEntry> = {};
+    // Plain shell pane (no agent): fingerprint is null.
+    linkPane(entries, pane("p1"), undefined, LINK, NOW);
+    const agents = { p1: agent(1, "working", { agent: "claude", value: "s1" }) };
+    buildInbox([pane("p1")], agents, entries, LATER);
+    expect(entries.p1?.links).toBeUndefined();
+  });
+
+  test("seq regression drops the link (recycled pane/agent identity)", () => {
+    const entries: Record<string, InboxEntry> = {};
+    linkPane(entries, pane("p1"), agent(8, "working"), LINK, NOW);
+    // A fresh agent reporting a lower seq on the same pane id.
+    const items = buildInbox([pane("p1")], { p1: agent(2, "working") }, entries, LATER);
+    expect(items[0]?.links).toEqual([]);
+  });
+
+  test("re-linking the same ref re-stamps the fingerprint (explicit re-validation)", () => {
+    const entries: Record<string, InboxEntry> = {};
+    linkPane(entries, pane("p1"), agent(3, "working", { agent: "a", value: "old" }), LINK, NOW);
+    const later = new Date("2026-01-10T14:00:00Z");
+    linkPane(entries, pane("p1"), agent(3, "working", { agent: "a", value: "new" }), LINK, later);
+    expect(entries.p1?.links).toHaveLength(1);
+    expect(entries.p1?.links?.[0]?.at).toBe(later.toISOString());
+    expect(entries.p1?.links?.[0]?.agent_session?.value).toBe("new");
+  });
+
+  test("unlinkPane removes only the matching link and drops empty entries", () => {
+    const entries: Record<string, InboxEntry> = {};
+    linkPane(entries, pane("p1"), agent(1, "done"), LINK, NOW);
+    linkPane(
+      entries,
+      pane("p1"),
+      agent(1, "done"),
+      { kind: "issue", repo: "owner/repo", number: 7, ref: "owner/repo#7" },
+      NOW,
+    );
+    const removed = unlinkPane(entries, "p1", "pr", "owner/repo", 42, NOW);
+    expect(removed?.ref).toBe("owner/repo#42");
+    expect(entries.p1?.links).toHaveLength(1);
+    expect(unlinkPane(entries, "p1", "issue", "owner/repo", 7, NOW)?.number).toBe(7);
+    expect(entries.p1).toBeUndefined();
+    expect(unlinkPane(entries, "p1", "pr", "owner/repo", 42, NOW)).toBeUndefined();
+  });
+
+  test("links-only entries survive resolveState and retention pruning", () => {
+    const entries: Record<string, InboxEntry> = {};
+    linkPane(entries, pane("p1"), agent(1, "done"), LINK, NOW);
+    resolveState(entries, { p1: agent(1, "done") }, NOW);
+    expect(entries.p1).toBeDefined();
+    const pruned = pruneState(entries, new Set(["p1"]), NOW);
+    expect(pruned).toEqual([]);
+    expect(entries.p1?.links).toHaveLength(1);
+  });
+
+  test("restore preserves declared links while clearing organize state", () => {
+    const entries: Record<string, InboxEntry> = {};
+    linkPane(entries, pane("p1"), agent(1, "done"), LINK, NOW);
+    settlePane(entries, pane("p1"), agent(1, "done"), NOW);
+    restorePane(entries, "p1");
+    expect(entries.p1?.settled).toBeUndefined();
+    expect(entries.p1?.links).toHaveLength(1);
+  });
+
+  test("absent panes keep links and surface them as in_inbox:false items", () => {
+    const entries: Record<string, InboxEntry> = {};
+    linkPane(entries, pane("gone"), agent(1, "done"), LINK, NOW);
+    const items = buildInbox([], {}, entries, NOW);
+    expect(items).toHaveLength(1);
+    expect(items[0]?.pane_id).toBe("gone");
+    expect(items[0]?.in_inbox).toBe(false);
+    expect(items[0]?.links).toHaveLength(1);
+  });
+});
+
+describe("applyInboxFilters", () => {
+  function item(id: string, extra: Partial<InboxItem> = {}): InboxItem {
+    return {
+      pane_id: id,
+      workspace_id: "ws1",
+      title: `task ${id}`,
+      cwd: "/repo/app",
+      in_inbox: true,
+      attention: false,
+      pinned: false,
+      links: [],
+      ...extra,
+    };
+  }
+
+  const items = [
+    item("w1:p1", { attention: true }),
+    item("w1:p2", { organize: { kind: "settled", since: NOW.toISOString() } }),
+    item("w1:p3", { organize: { kind: "archived", since: NOW.toISOString() } }),
+    item("w2:p9", { workspace_id: "ws2", title: "deploy pipeline", cwd: "/other" }),
+  ];
+
+  test("attention filter keeps only attention items", () => {
+    expect(applyInboxFilters(items, { attention: true }).map((i) => i.pane_id)).toEqual(["w1:p1"]);
+  });
+
+  test("organize filter matches kinds; none means no hide-kind", () => {
+    expect(applyInboxFilters(items, { organize: "settled" }).map((i) => i.pane_id)).toEqual([
+      "w1:p2",
+    ]);
+    expect(applyInboxFilters(items, { organize: "archived" }).map((i) => i.pane_id)).toEqual([
+      "w1:p3",
+    ]);
+    expect(
+      applyInboxFilters(items, { organize: "none" })
+        .map((i) => i.pane_id)
+        .sort(),
+    ).toEqual(["w1:p1", "w2:p9"]);
+  });
+
+  test("search is case-insensitive over title/cwd/pane_id", () => {
+    expect(applyInboxFilters(items, { search: "DEPLOY" }).map((i) => i.pane_id)).toEqual(["w2:p9"]);
+    expect(applyInboxFilters(items, { search: "w1:p2" }).map((i) => i.pane_id)).toEqual(["w1:p2"]);
+    expect(applyInboxFilters(items, { search: "/repo/app" })).toHaveLength(3);
+    expect(applyInboxFilters(items, { search: "nomatch" })).toHaveLength(0);
+  });
+
+  test("workspace filter is exact and composes with others", () => {
+    expect(applyInboxFilters(items, { workspace: "ws2" }).map((i) => i.pane_id)).toEqual(["w2:p9"]);
+    expect(
+      applyInboxFilters(items, { workspace: "ws1", organize: "none", attention: true }),
+    ).toHaveLength(1);
+    expect(applyInboxFilters(items, {})).toHaveLength(4);
   });
 });
 

@@ -3,7 +3,7 @@
 Port of T3 Code's thread inbox / settle / snooze / pin / archive / manual
 ordering semantics to standalone herdr plugins, per `rebuildup/herdr-t3`
 issue #173, `docs/design/info-architecture.md` §6.2, and herdr-plugins
-issues #33/#176 (upstream refs `docs/user/thread-sidebar.md`,
+issues #33/#176/#177 (upstream refs `docs/user/thread-sidebar.md`,
 `docs/user/triage.md` @ `9cc4018c`).
 
 ## Sources
@@ -35,6 +35,9 @@ Each entry carries:
   generation-guarded (reordering is meaningless to withhold from a new
   agent generation on the same pane) and is cleared by `restore`,
   `pane.closed`, and retention pruning like every other field.
+- `links` — user-declared tracker references (`pr`/`issue`,
+  `<repo>#<number>`) written by `link`/`unlink`. See "Explicit tracker
+  links" below; they are work associations, not organize state.
 
 `settled`/`snoozed`/`archived` are hide-kinds: they remove the pane from
 the default inbox view (`in_inbox: false`) until resolved. `archived` is
@@ -89,8 +92,60 @@ the primary mechanism.
 Organize entries for panes absent from the session snapshot are retained for
 up to 24h (they may reappear), then pruned by `reconcile`/`watch`. A hard cap
 of 500 entries evicts the oldest `updated_at` first. `pane.closed` event
-hooks delete the entry immediately. Live panes are never pruned — their
-marks expire via resolution instead.
+hooks delete the entry immediately — including declared links. Live panes
+are never pruned — their marks expire via resolution instead. Entries that
+carry only links (no organize state) are retained and pruned by the same
+rules.
+
+## Search and filters
+
+`list` accepts read-side filters that narrow the emitted `items` (and the
+`counts`, which describe the emitted set) without touching state:
+
+- `--attention` — only `attention: true` items.
+- `--organize settled|snoozed|archived|none` — hide-kind match; `none`
+  means no hide-kind mark (pin/order/links do not count).
+- `--search <text>` — case-insensitive substring over `title`, `cwd`,
+  `pane_id`.
+- `--workspace <id>` — exact `workspace_id` match.
+
+Filters compose and apply to the full item set, including hidden items —
+a settled pane is still findable via `--organize settled`. The effective
+filter set is echoed in the output's `filters` field.
+
+## Explicit tracker links
+
+`link <pane> --pr <repo>#<n>` / `--issue <repo>#<n>` records a
+user-declared association between a pane and a known forge item;
+`unlink` removes one; `links <pane>` reads them. Multiple links per pane
+are allowed; re-linking the same `kind+repo+number` re-stamps the identity
+fingerprint (the explicit re-validation path).
+
+Boundary with the git plugin (#174): inbox owns **pane-scoped work
+associations** — "this pane is working on X" — stored in inbox state and
+projected via `list`/`links` for consumers such as herdr-t3's Linked
+items. The git plugin owns **repo-scoped tracker operations** (`pr`/`issue`
+list/view/create/edit/comment) and any forge-side linkage it chooses to
+record. The two never share state: inbox links are declarations, not
+event-derived facts, and carry no tracker metadata beyond the ref.
+
+Links are explicit-only: there is no webhook or forge-event ingestion
+(webhook delivery is an upstream gap, ADR-0026), and PR-update-driven
+attention restore is a separate ticket (#178). `--verify` optionally runs
+`gh <kind> view` at link time; any failure is a `warnings` entry and the
+link is still recorded — verification never blocks an explicit user
+declaration.
+
+Stale discipline mirrors organize marks **minus timed expiry**: a link is
+dropped at read/reconcile time when the pane's `agent_session` fingerprint
+changes or the recorded `state_change_seq` regresses (identity recycled).
+Forward seq advances — routine status transitions — never expire a link,
+because the association describes the work, not a transient status. Links
+on panes absent from the snapshot are tolerated (the fingerprint may be
+temporarily unreportable) and die with the entry on `pane.closed` or
+retention pruning. `restore` preserves links; `unlink` and `pane.closed`
+are the removal paths. A link whose guard went stale is never silently
+re-applied to a new identity — the user re-links explicitly.
 
 ## List ordering
 
@@ -185,7 +240,7 @@ are recorded by reconcile, the `agent_status_changed`/`pane.closed`
 hooks, and retention pruning — never by pin/order (layout hints).
 
 `transitions [--after <seq>] [--limit <n>]` is the read-only drain
-surface (contract `herdr-plugins.inbox/v1`, additive in 0.3.0): it
+surface (contract `herdr-plugins.inbox/v1`, additive in 0.4.0): it
 returns `{session_key, head_seq, oldest_seq, dropped, transitions[]}`
 with `--after` exclusive. Retention caps the log at 500 items per
 session; evicted items increment `dropped` so a consumer can detect a
@@ -211,5 +266,6 @@ with no `--until` uses `defaultSnooze` from the plugin `config.json`.
 - Work groups / side-chat semantics: mapped onto herdr workspace/tab +
   `handoff-v1` lineage in ADR-0029; no `group` field is added to
   organize state, and side-chat presentation is herdr-t3 scope (#7).
-- Remaining #33 scope: inbox search/PR linkage (#177) and PR-update
-  attention return (#178) are tracked as separate tickets.
+- Remaining #33 scope: PR-update attention return (#178) is tracked as a
+  separate ticket; search/filters and explicit PR/Issue links landed in
+  #177.

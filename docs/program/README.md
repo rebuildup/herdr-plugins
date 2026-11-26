@@ -103,7 +103,7 @@ Issue 番号ベースの直列・blocked-by 関係 (release-0-2-0):
 | release-0-6-0 | #27, #6, #29, #99-#110 | `provider-controls-composer`, `handoff-delegation`, `text-generation` | 実装完了・リリース承認待ち。upstream gap は herdrdev/herdr#6196 (dialogs) / #6197 (queue/steer) 起票済み。実機検証: `controls-v1-live-verification.md`, `handoff-v1-live-verification.md`, `handoff-remote-api-verification.md`, `textgen-v1-*-verification.md` |
 | release-0-7-0 | #30, #31, #32, #135-#147 | `mcp-outside-agents`, `artifacts-snapshots`, `automations` | 実装完了・リリース承認待ち。実機検証: `mcp-v1-live-verification.md`, `artifacts-v1-live-verification.md`, `automations-t4-live-verification.md`。automations webhook は upstream gap (ADR-0026、filing deferred) として契約 v1 で確定 |
 | release-0-8-0 | #34, #160, #161, #167 | `secrets-remote-devices` 棚卸し・責務割当 + 残差 `rebuildup.secrets` / `rebuildup.machines` | 実装完了・RC 検証済み (macOS/herdr 0.9.5, `rc-0-8-0-verification.md`, audit 境界違反なし)・リリース承認待ち。upstream-blocked/out-of-scope 残差は台帳 `secrets-remote-devices` の verification に記録 |
-| release-0-9-0 | #33, #176 | `inbox-extensions` T1: pin/unpin/archive/unarchive/order (#8/#9 upstream gap 非依存分) | T1 実装中 (残差: 検索・PR 連動・作業グループ) |
+| release-0-9-0 | #33, #176, #177 | `inbox-extensions` T1+T2: pin/unpin/archive/unarchive/order + 検索/フィルタ + 明示的 PR/Issue リンク | T1/T2 実装済み (残差: PR 更新 attention 復帰 #178。作業グループは ADR-0029 で対応付け済み) |
 | 上流待ち | #8, #9 | `attention-granularity`, `agent-view-namespacing` | upstream Issue 候補 |
 | 責務外 | — | `client-polish-misc`, `execution-runtime` | out-of-scope |
 | 後続検討 | #25 残差 | `forge-non-github` | GitHub 基盤 (#39) 後に Forge 別分解 |

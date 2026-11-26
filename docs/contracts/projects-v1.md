@@ -157,7 +157,8 @@ Response: `{contract, command:"update", project, generated_at}`.
 ## `repos list <project>`
 
 Lists the repos bound to a project — the read side of multi-checkout
-grouping (#51). Each entry carries the stored membership fields plus
+grouping (#51) plus the repo↔worktree/diff read association (#184,
+ADR-0029 §2). Each entry carries the stored membership fields plus
 cheap live git inspection:
 
 ```json
@@ -172,10 +173,50 @@ cheap live git inspection:
       "added_at": "…",
       "branch": "main",
       "dirty": false,
-      "has_submodules": true
+      "has_submodules": true,
+      "worktree_submodules": "recursive",
+      "worktrees": [
+        {
+          "path": "/abs/repo-wt",
+          "branch": "feature",
+          "dirty": false,
+          "has_submodules": false,
+          "is_linked_worktree": true,
+          "is_bare": false,
+          "is_detached": false,
+          "is_prunable": false,
+          "label": "feature",
+          "open_workspace_id": "wKN",
+          "panes": [
+            {
+              "pane_id": "wKN:p1",
+              "workspace_id": "wKN",
+              "cwd": "/abs/repo-wt",
+              "commands": {
+                "status": "status wKN:p1",
+                "diff": "diff wKN:p1",
+                "files": "files wKN:p1",
+                "compare": "compare wKN:p1 <base> <head>"
+              },
+              "status": {
+                "contract": "herdr-plugins.git/v1",
+                "ok": true,
+                "repo_root": "/abs/repo-wt",
+                "branch": "feature",
+                "detached": false,
+                "changes": { "staged": 0, "unstaged": 2, "untracked": 1, "conflicted": 0 }
+              },
+              "status_error": null
+            }
+          ],
+          "panes_unavailable": false
+        }
+      ],
+      "worktrees_error": null
     }
   ],
   "skipped": [{ "root": "/abs/gone", "reason": "git_error" }],
+  "worktrees_skipped": [{ "path": "/abs/foreign-wt", "reason": "not_member_repo" }],
   "generated_at": "…"
 }
 ```
@@ -190,7 +231,47 @@ cheap live git inspection:
 - A repo that is unreachable or no longer a work tree keeps its stored
   fields with `branch`/`dirty`/`has_submodules` = `null` and is also
   reported in `skipped` with a git-contract `reason` — never fabricated.
-- Read-only; unknown project id → `project_not_found`.
+- `worktree_submodules` is a read-only advisory: the repo's `t3.json`
+  `worktreeSubmodules` value (`recursive`|`top-level`|`none`, `null`
+  when absent/unparseable). Nothing consumes it — submodule init on
+  worktree creation is a herdr/Worktrunk-side gap (ADR-0029 §3).
+- `worktrees` is the herdr `worktree.list` association for the member
+  repo (socket method, `cwd` = member root, `trust_repository: false`
+  always — an untrusted-repo failure is reported, never retried with a
+  trust grant). Each entry is verified by `git rev-parse
+  --git-common-dir` equality with the member repo — the authoritative
+  same-repo test covering linked worktrees — then enriched by
+  `inspectRepo` (`branch`/`dirty`/`has_submodules`). Checkouts that
+  fail verification or are gone are reported in `worktrees_skipped`
+  (`no_path`, `worktree_gone`, `not_member_repo`, git kinds), never
+  attributed by guesswork. `worktrees` is `[]` when herdr reports no
+  worktrees.
+- `worktrees_error` is `null` on success; otherwise
+  `{reason, detail?}` — `session_unreachable` (socket connect/timeout),
+  an RPC `code` (e.g. `repo_untrusted`), or `repo_mismatch` (herdr's
+  `source.repo_root` canonicalizes to a different repo than the
+  member). On error `worktrees` is `null` — the association is
+  unavailable, not empty.
+- `open_workspace_id` is herdr's `WorktreeInfo.open_workspace_id`;
+  `panes` resolves it via `session.snapshot` (panes whose
+  `workspace_id` matches). `panes_unavailable: true` marks a stale or
+  unresolvable workspace id — `panes` is then `[]`.
+- `panes[].commands` are pane-addressed `herdr-plugins.git/v1` read
+  invocations (`status`/`diff`/`files`/`compare`) — pointers only. The
+  git contract is pane-addressed, so a worktree with no open workspace
+  has NO diff surface: `panes` is `[]` and no diff fields exist.
+- `panes[].status` is a live compact `status` summary fetched through
+  the sibling `rebuildup.git` plugin's public CLI (ADR-0013 env-pin
+  spawn: `HERDR_PROJECTS_ROOT_GIT` override → sibling `plugins/git` →
+  `herdr plugin list`; child env is scrubbed of all ambient `HERDR_*`).
+  At most 8 status calls per member repo (`MAX_GIT_STATUS_CALLS`);
+  beyond that `status_error.kind = "budget_exceeded"`. Failures are
+  structured in `status_error` (`plugin_unavailable`, the git
+  plugin's own error `kind`, `contract_mismatch`, `spawn_error`) —
+  pointers are still emitted.
+- Read-only; the plugin never creates/removes worktrees, workspaces,
+  or panes (lifecycle stays herdr/Worktrunk). Unknown project id →
+  `project_not_found`.
 
 ## `repos add` / `repos remove <project>`
 
@@ -503,7 +584,7 @@ Settle is plugin-owned organize state (`rebuildup.inbox`), not a herdr
 event, so there is no `[[events]]` manifest hook. Instead, inbox records
 its own organize transitions in a per-session seq log and exposes them
 read-only via `inbox transitions --after <seq>`
-(`herdr-plugins.inbox/v1`, inbox 0.3.0+). Projects drains that log lazily
+(`herdr-plugins.inbox/v1`, inbox 0.4.0+). Projects drains that log lazily
 — same no-daemon discipline as the worktree drain — and consumes only
 `kind:"settled"` transitions (`snoozed`/`restored`/`cleared` are recorded
 by inbox but ignored by projects).
