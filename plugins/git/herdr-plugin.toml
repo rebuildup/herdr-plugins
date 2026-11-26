@@ -8,6 +8,25 @@ platforms = ["linux", "macos", "windows"]
 # No build step: the plugin is dependency-free TypeScript executed by Bun
 # (runtime prerequisite, see plugins/git/README.md).
 
+# Interactive TUI surface (contract docs/contracts/tui-v1.md, issue #238).
+# `main` is the pane entrypoint; `open` is the action that opens it for
+# the origin (focused) pane's repository. Both run via `bun run` with no
+# install step; the UI pins the origin target at launch.
+
+[[panes]]
+id = "main"
+title = "Git: repository"
+platforms = ["linux", "macos", "windows"]
+placement = "tab"
+command = ["bun", "run", "src/tui.ts", "main"]
+
+[[actions]]
+id = "open"
+title = "Git: open UI"
+description = "Open the interactive git TUI for the focused pane's repository."
+contexts = ["pane"]
+command = ["bun", "run", "src/tui.ts", "--open"]
+
 [[actions]]
 id = "status"
 title = "Git: pane status"

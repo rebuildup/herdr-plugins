@@ -329,8 +329,8 @@
           "mutating": false,
           "class": "read",
           "cli": "implemented",
-          "tui_action": "declared:status",
-          "interactive_tui": "planned:#230",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#238",
           "gui": "consumer:herdr-t3 (#7)",
           "real_machine_evidence": [
             "docs/research/git-pr-read-verification.md",
@@ -339,15 +339,15 @@
             "docs/research/git-issue-verification.md"
           ],
           "upstream_gap": null,
-          "notes": "status view per repo/pane"
+          "notes": "status view per repo/pane — TUI surface in Git UI pane (#238)"
         },
         {
           "command": "files",
           "mutating": false,
           "class": "read",
           "cli": "implemented",
-          "tui_action": "declared:files",
-          "interactive_tui": "planned:#230",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#238",
           "gui": "consumer:herdr-t3 (#7)",
           "real_machine_evidence": [
             "docs/research/git-pr-read-verification.md",
@@ -356,15 +356,15 @@
             "docs/research/git-issue-verification.md"
           ],
           "upstream_gap": null,
-          "notes": "changed-file list feeding diff viewer"
+          "notes": "changed-file list feeding diff viewer — TUI surface in Git UI pane (#238)"
         },
         {
           "command": "diff",
           "mutating": false,
           "class": "read",
           "cli": "implemented",
-          "tui_action": "none",
-          "interactive_tui": "planned:#230",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#238",
           "gui": "consumer:herdr-t3 (#7)",
           "real_machine_evidence": [
             "docs/research/git-pr-read-verification.md",
@@ -373,15 +373,15 @@
             "docs/research/git-issue-verification.md"
           ],
           "upstream_gap": null,
-          "notes": "bounded patch view; terminal-friendly already"
+          "notes": "bounded patch view; terminal-friendly already — TUI surface in Git UI pane (#238)"
         },
         {
           "command": "log",
           "mutating": false,
           "class": "read",
           "cli": "implemented",
-          "tui_action": "declared:log",
-          "interactive_tui": "planned:#230",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#238",
           "gui": "consumer:herdr-t3 (#7)",
           "real_machine_evidence": [
             "docs/research/git-pr-read-verification.md",
@@ -390,15 +390,15 @@
             "docs/research/git-issue-verification.md"
           ],
           "upstream_gap": null,
-          "notes": "commit history / compare base"
+          "notes": "commit history / compare base — TUI surface in Git UI pane (#238)"
         },
         {
           "command": "compare",
           "mutating": false,
           "class": "read",
           "cli": "implemented",
-          "tui_action": "declared:compare",
-          "interactive_tui": "planned:#230",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#238",
           "gui": "consumer:herdr-t3 (#7)",
           "real_machine_evidence": [
             "docs/research/git-pr-read-verification.md",
@@ -407,15 +407,15 @@
             "docs/research/git-issue-verification.md"
           ],
           "upstream_gap": null,
-          "notes": "branch comparison"
+          "notes": "branch comparison — TUI surface in Git UI pane (#238)"
         },
         {
           "command": "stage",
           "mutating": true,
           "class": "mutation",
           "cli": "implemented",
-          "tui_action": "none",
-          "interactive_tui": "planned:#230",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#238",
           "gui": "consumer:herdr-t3 (#7)",
           "real_machine_evidence": [
             "docs/research/git-pr-read-verification.md",
@@ -424,15 +424,15 @@
             "docs/research/git-issue-verification.md"
           ],
           "upstream_gap": null,
-          "notes": "per-file stage; needs confirm on bulk"
+          "notes": "per-file stage; needs confirm on bulk — TUI surface in Git UI pane (#238)"
         },
         {
           "command": "unstage",
           "mutating": true,
           "class": "mutation",
           "cli": "implemented",
-          "tui_action": "none",
-          "interactive_tui": "planned:#230",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#238",
           "gui": "consumer:herdr-t3 (#7)",
           "real_machine_evidence": [
             "docs/research/git-pr-read-verification.md",
@@ -441,15 +441,15 @@
             "docs/research/git-issue-verification.md"
           ],
           "upstream_gap": null,
-          "notes": "per-file unstage"
+          "notes": "per-file unstage — TUI surface in Git UI pane (#238)"
         },
         {
           "command": "commit",
           "mutating": true,
           "class": "mutation",
           "cli": "implemented",
-          "tui_action": "none",
-          "interactive_tui": "planned:#230",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#238",
           "gui": "consumer:herdr-t3 (#7)",
           "real_machine_evidence": [
             "docs/research/git-pr-read-verification.md",
@@ -458,15 +458,15 @@
             "docs/research/git-issue-verification.md"
           ],
           "upstream_gap": null,
-          "notes": "commit editor surface; irreversible-ish -> confirm"
+          "notes": "commit editor surface; irreversible-ish -> confirm — TUI surface in Git UI pane (#238)"
         },
         {
           "command": "branch",
           "mutating": true,
           "class": "mutation",
           "cli": "implemented",
-          "tui_action": "none",
-          "interactive_tui": "planned:#230",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#238",
           "gui": "consumer:herdr-t3 (#7)",
           "real_machine_evidence": [
             "docs/research/git-pr-read-verification.md",
@@ -475,15 +475,15 @@
             "docs/research/git-issue-verification.md"
           ],
           "upstream_gap": null,
-          "notes": "branch ops (create/switch/delete guards)"
+          "notes": "branch ops (create/switch/delete guards) — TUI surface in Git UI pane (#238)"
         },
         {
           "command": "upstream",
           "mutating": true,
           "class": "mutation",
           "cli": "implemented",
-          "tui_action": "none",
-          "interactive_tui": "planned:#230",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#238",
           "gui": "consumer:herdr-t3 (#7)",
           "real_machine_evidence": [
             "docs/research/git-pr-read-verification.md",
@@ -492,15 +492,15 @@
             "docs/research/git-issue-verification.md"
           ],
           "upstream_gap": null,
-          "notes": "set/unset upstream"
+          "notes": "set/unset upstream — TUI surface in Git UI pane (#238)"
         },
         {
           "command": "fetch",
           "mutating": true,
           "class": "mutation",
           "cli": "implemented",
-          "tui_action": "none",
-          "interactive_tui": "planned:#230",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#238",
           "gui": "consumer:herdr-t3 (#7)",
           "real_machine_evidence": [
             "docs/research/git-pr-read-verification.md",
@@ -509,15 +509,15 @@
             "docs/research/git-issue-verification.md"
           ],
           "upstream_gap": null,
-          "notes": "fetch remotes"
+          "notes": "fetch remotes — TUI surface in Git UI pane (#238)"
         },
         {
           "command": "push",
           "mutating": true,
           "class": "mutation",
           "cli": "implemented",
-          "tui_action": "none",
-          "interactive_tui": "planned:#230",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#238",
           "gui": "consumer:herdr-t3 (#7)",
           "real_machine_evidence": [
             "docs/research/git-pr-read-verification.md",
@@ -526,15 +526,15 @@
             "docs/research/git-issue-verification.md"
           ],
           "upstream_gap": null,
-          "notes": "push; --force guarded, confirm required"
+          "notes": "push; --force guarded, confirm required — TUI surface in Git UI pane (#238)"
         },
         {
           "command": "remote",
           "mutating": false,
           "class": "read",
           "cli": "implemented",
-          "tui_action": "none",
-          "interactive_tui": "planned:#230",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#238",
           "gui": "consumer:herdr-t3 (#7)",
           "real_machine_evidence": [
             "docs/research/git-pr-read-verification.md",
@@ -543,7 +543,7 @@
             "docs/research/git-issue-verification.md"
           ],
           "upstream_gap": null,
-          "notes": "remote list"
+          "notes": "remote list — TUI surface in Git UI pane (#238)"
         },
         {
           "command": "pr",
@@ -551,7 +551,7 @@
           "class": "mutation",
           "cli": "implemented",
           "tui_action": "none",
-          "interactive_tui": "planned:#230",
+          "interactive_tui": "planned:#239",
           "gui": "consumer:herdr-t3 (#7)",
           "real_machine_evidence": [
             "docs/research/git-pr-read-verification.md",
@@ -560,7 +560,7 @@
             "docs/research/git-issue-verification.md"
           ],
           "upstream_gap": null,
-          "notes": "forge read+write (list/view/create/review/comment/merge) — merge has release-train guard"
+          "notes": "forge read+write (list/view/create/review/comment/merge) — merge has release-train guard — forge surface deferred to #239"
         },
         {
           "command": "issue",
@@ -568,7 +568,7 @@
           "class": "mutation",
           "cli": "implemented",
           "tui_action": "none",
-          "interactive_tui": "planned:#230",
+          "interactive_tui": "planned:#239",
           "gui": "consumer:herdr-t3 (#7)",
           "real_machine_evidence": [
             "docs/research/git-pr-read-verification.md",
@@ -577,7 +577,7 @@
             "docs/research/git-issue-verification.md"
           ],
           "upstream_gap": null,
-          "notes": "forge issue read+write"
+          "notes": "forge issue read+write — forge surface deferred to #239"
         },
         {
           "command": "project",
@@ -585,7 +585,7 @@
           "class": "mutation",
           "cli": "implemented",
           "tui_action": "declared:project",
-          "interactive_tui": "planned:#230",
+          "interactive_tui": "n/a",
           "gui": "consumer:herdr-t3 (#7)",
           "real_machine_evidence": [
             "docs/research/git-pr-read-verification.md",
@@ -594,7 +594,7 @@
             "docs/research/git-issue-verification.md"
           ],
           "upstream_gap": null,
-          "notes": "pane metadata projection refresh; also manifest action 'project'"
+          "notes": "pane metadata projection refresh; agent-facing, no interactive TUI surface"
         },
         {
           "command": "capability",

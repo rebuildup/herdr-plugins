@@ -16,8 +16,8 @@ implement against is [`docs/contracts/tui-v1.md`](../contracts/tui-v1.md).
 | field | meaning |
 | --- | --- |
 | `cli` | `implemented` — contract-covered CLI command exists |
-| `tui_action` | `declared:<id>` — a manifest `[[actions]]` entry exists today (inbox ×9 incl. `open`, git ×5, checkpoints ×1, projects ×1, conversations ×1, usage ×1); `none` — no action yet |
-| `interactive_tui` | `implemented:#NNN` — interactive TUI shipped in that ticket (#237 Inbox pilot, #240 Projects, #244 Conversations/Usage); `planned:#NNN` — scheduled in that implementation ticket (#230 Git/Forge, #231 Projects/Scripts/Checkpoints/Automations, #232 Conversations/Usage/Controls/Handoff/TextGen, #233 Artifacts/Secrets/Machines/MCP diagnostics); `n/a` — daemon-, agent-, or diagnostic-only surface with no interactive TUI planned |
+| `tui_action` | `declared:<id>` — a manifest `[[actions]]` entry exists today (inbox ×9 incl. `open`, git ×6 incl. `open`, checkpoints ×1, projects ×1, conversations ×1, usage ×1); `none` — no action yet |
+| `interactive_tui` | `implemented:#NNN` — interactive TUI shipped in that ticket (#237 Inbox pilot, #238 Git, #240 Projects, #244 Conversations/Usage); `planned:#NNN` — scheduled in that implementation ticket (#239 Git forge, #231 Scripts/Checkpoints/Automations, #232 Controls/Handoff/TextGen, #233 Artifacts/Secrets/Machines/MCP diagnostics); `n/a` — daemon-, agent-, or diagnostic-only surface with no interactive TUI planned |
 | `gui` | GUI is owned by herdr-t3 (#7). This repo records consumption intent only — **GUI-done never implies TUI-done** |
 | `real_machine_evidence` | `docs/research/` paths recording live verification; absence means no recorded real-machine run, not necessarily untested |
 | `upstream_gap` | non-null = blocked on herdr/T3Code upstream; never worked around by PTY guessing |
@@ -27,7 +27,7 @@ implement against is [`docs/contracts/tui-v1.md`](../contracts/tui-v1.md).
 | plugin | contract | ticket | commands | declared actions | interactive-TUI plan |
 | --- | --- | --- | --- | --- | --- |
 | rebuildup.inbox | inbox/v1 stable | #230 | 17 | 9 | **implemented #237**: inbox browser + organize verbs + links/transitions + explicit reconcile |
-| rebuildup.git (+forge) | git/v1 stable | #230 | 17 | 5 | status/files/diff/log/compare browser + stage/commit/branch/push + PR/issue workflows |
+| rebuildup.git (+forge) | git/v1 stable | #230 | 17 | 6 | **implemented #238**: status/files/diff/log/compare browser + stage/commit/branch/push; PR/issue workflows planned #239 |
 | rebuildup.projects | projects/v1 stable | #231 | 13 | 1 (`open`) | implemented #240 — registry browser + repos membership + settings + scripts/run/stop + worktree info |
 | rebuildup.checkpoints | checkpoints/v1 stable | #231 | 12 | 1 | list/show/diff/plan + guarded restore/delete/gc |
 | rebuildup.automations | automations/v1 stable | #231 | 14 | 0 | task CRUD + schedule + runs + driver diagnostics |
@@ -69,6 +69,27 @@ vendored copy. Live evidence:
 `verify237`; pane open via entrypoint and via `open` action, `?`/`f`/`s`/
 `r`/`q` keys, confirm-gated settle→restore round-trip, clean exit,
 focus return).
+
+## Git TUI surface (#238)
+
+`rebuildup.git` ships its interactive surface per `tui-v1.md`: manifest
+`[[panes]]` entrypoint `main` (`placement = "tab"`) plus an `open` action
+that runs `herdr plugin pane open` via `HERDR_BIN_PATH` and returns
+promptly. The UI (`plugins/git/src/tui.ts` + `src/tui/{model,repo,app}.ts`)
+covers status, changed-file selection with per-file stage/unstage/diff,
+a paged path-scoped diff viewer (worktree/staged/HEAD scopes), log +
+per-commit show, compare vs upstream, branch list/switch/create/set
+upstream, remote list, fetch, and push (with `--set-upstream` flow when
+no upstream exists). Target identity is pinned at launch
+(`HERDR_PLUGIN_CONTEXT_JSON`/`HERDR_TUI_TARGET_*` → pane cwd → repo root
+→ HEAD sha); every mutation revalidates pane→repo-root and HEAD sha and
+aborts with a stale-target state on drift. Commit/push/bulk stage and
+branch switch are confirm-gated; detached HEAD, unborn branch, missing
+upstream/remotes, and not-a-repo render honest states. Forge
+(PR/Issue) surfaces are excluded — #239. Verified by
+`tests/git-tui.test.ts` (32 tests) plus a `script(1)` PTY smoke of
+`--cwd` launch → files → diff → exit; real-herdr pane-open verification
+uses the isolated-session harness only.
 
 ## Implementation notes
 
