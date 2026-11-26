@@ -28,6 +28,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import path from "node:path";
 import {
   DetailView,
+  displayWidth,
   type KeyBinding,
   type KeyEvent,
   type Line,
@@ -416,7 +417,12 @@ export class InboxView implements ScreenView {
             { text: title, style },
           ];
           // right-align pane id + status when space allows
-          const used = prefix.length + badgeText.length + title.length + right.length + 2;
+          const used =
+            displayWidth(prefix) +
+            displayWidth(badgeText) +
+            displayWidth(title) +
+            displayWidth(right) +
+            2;
           if (used < w) {
             line.push({ text: " ".repeat(w - used) });
             line.push({ text: `${item.pane_id}${right}`, style: { dim: true } });
@@ -658,6 +664,7 @@ class InboxBrowser {
 
   private async mutateSnooze(item: ModelInboxItem): Promise<void> {
     const spec = await this.app.prompt("Snooze until — +30m / +2h / +1d or ISO-8601", {
+      value: "+30m",
       placeholder: "+30m",
     });
     if (spec === null) {
@@ -709,9 +716,9 @@ class InboxBrowser {
   private async mutateLink(item: ModelInboxItem): Promise<void> {
     const input = await this.app.prompt(
       "Link tracker — pr <owner>/<repo>#<n>  or  issue <owner>/<repo>#<n>",
-      { placeholder: "pr rebuildup/herdr-plugins#237" },
+      { placeholder: "pr owner/repo#123" },
     );
-    if (input === null) {
+    if (input === null || input.trim() === "") {
       this.updateStatus("cancelled");
       return;
     }
@@ -737,7 +744,7 @@ class InboxBrowser {
     const input = await this.app.prompt(`Unlink — ${hint}`, {
       placeholder: item.links[0]?.ref ?? "",
     });
-    if (input === null) {
+    if (input === null || input.trim() === "") {
       this.updateStatus("cancelled");
       return;
     }
