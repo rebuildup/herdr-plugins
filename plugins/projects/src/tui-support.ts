@@ -120,7 +120,10 @@ export function formatTargetLabel(target: PinnedTarget): string {
  * workspace-scale browser, multi-instance safe, and pane-backed so
  * `plugin.pane.focus/close` keep working.
  */
-export function buildPaneOpenParams(target: PinnedTarget): Record<string, unknown> {
+export function buildPaneOpenParams(
+  target: PinnedTarget,
+  entrypoint = "main",
+): Record<string, unknown> {
   const env: Record<string, string> = {};
   if (target.workspaceId !== null) env.HERDR_TUI_WORKSPACE_ID = target.workspaceId;
   if (target.tabId !== null) env.HERDR_TUI_TAB_ID = target.tabId;
@@ -129,7 +132,7 @@ export function buildPaneOpenParams(target: PinnedTarget): Record<string, unknow
 
   const params: Record<string, unknown> = {
     plugin_id: PLUGIN_ID,
-    entrypoint: "main",
+    entrypoint,
     placement: "tab",
     env,
   };

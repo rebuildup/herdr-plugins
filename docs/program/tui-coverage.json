@@ -775,15 +775,15 @@
           "mutating": true,
           "class": "mutation",
           "cli": "implemented",
-          "tui_action": "declared:open",
-          "interactive_tui": "implemented:#240",
+          "tui_action": "declared:open-scripts",
+          "interactive_tui": "implemented:#240,#241",
           "gui": "consumer:herdr-t3 (#7)",
           "real_machine_evidence": [
             "docs/research/projects-180-live-verification.md",
             "docs/research/projects-184-live-verification.md"
           ],
           "upstream_gap": null,
-          "notes": "project-defined scripts run/stop/tick + list"
+          "notes": "project-defined scripts run/stop/tick + list; dedicated scripts TUI (#241): project/repo-path target, run, stop, results, logs"
         },
         {
           "command": "repos",

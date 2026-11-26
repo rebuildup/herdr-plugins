@@ -79,8 +79,10 @@ The plugin ships a tab-placed pane entrypoint plus an `open` action
 
 ```toml
 # herdr-plugin.toml (already declared)
-[[panes]] id = "main"  placement = "tab"  command = ["bun","run","src/tui.ts","main"]
-[[actions]] id = "open" contexts = ["pane","workspace"]  command = ["bun","run","src/tui.ts","open"]
+[[panes]] id = "main"     placement = "tab"  command = ["bun","run","src/tui.ts","main"]
+[[panes]] id = "scripts"  placement = "tab"  command = ["bun","run","src/tui-scripts.ts","main"]
+[[actions]] id = "open"         contexts = ["pane","workspace"]  command = ["bun","run","src/tui.ts","open"]
+[[actions]] id = "open-scripts" contexts = ["pane","workspace"]  command = ["bun","run","src/tui-scripts.ts","open"]
 ```
 
 - `open` pins the origin context (workspace/tab/focused pane/cwd) once
@@ -104,6 +106,33 @@ The plugin ships a tab-placed pane entrypoint plus an `open` action
 - Non-TTY stdin degrades to a plain-text project list; the non-
   interactive CLI is unchanged.
 
+### Scripts surface (#241)
+
+A second tab-placed entrypoint (`[[panes]] id = "scripts"`, action
+`rebuildup.projects.open-scripts`) opens a script-first browser:
+
+- Target picker: any registered project (multi-repo projects get an
+  explicit repo pick), a bare **repo path** (works for repos outside the
+  registry — e.g. a WSL dev-server checkout), or the unfiltered runs
+  list. Repo-path targets resolve `project_id` lazily from
+  `scripts list`, so `run` works whenever the repo belongs to a project
+  and is honestly disabled otherwise (`scripts run` requires `<project>`).
+- Per-target script list (`/` filter): `x` runs the selected script —
+  gated by `capability`/`mutation_commands`, confirm dialog shows
+  project/script/command/repo, and `--repo` is always passed explicitly.
+- `R` opens results (`scripts results [project]`, narrowed client-side
+  to the pinned repo); selecting a run shows its record with `s` stop
+  (active runs only, danger-confirm, CLI re-validates pane ownership)
+  and `l` logs (`scripts logs <run-id>`, bounded tail, paged).
+- Active runs render `running`/`stopping`/`stop_unconfirmed` verbatim
+  with a note that the durable scrollback marker may finalize the
+  result on the next read; `unknown` is shown honestly — never guessed.
+- Reads never mutate implicitly: `results`/`logs` (which lazily
+  reconcile run records) run only on explicit keys.
+- Non-TTY: `bun run src/tui-scripts.ts main [project|repo]` prints a
+  plain `scripts list` for the target (or a registry overview without
+  one) — the GUI-less path for dev-server operation.
+
 Opt-in keybind (user-owned; plugins never write herdr config):
 
 ```toml
@@ -112,4 +141,12 @@ key = "prefix+P"
 type = "plugin_action"
 command = "rebuildup.projects.open"
 description = "open projects TUI"
+```
+
+```toml
+[[keys.command]]
+key = "prefix+S"
+type = "plugin_action"
+command = "rebuildup.projects.open-scripts"
+description = "open projects scripts TUI"
 ```
