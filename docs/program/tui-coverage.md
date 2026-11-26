@@ -16,8 +16,8 @@ implement against is [`docs/contracts/tui-v1.md`](../contracts/tui-v1.md).
 | field | meaning |
 | --- | --- |
 | `cli` | `implemented` — contract-covered CLI command exists |
-| `tui_action` | `declared:<id>` — a manifest `[[actions]]` entry exists today (inbox ×9 incl. `open`, git ×6 incl. `open`, checkpoints ×1, projects ×1, automations ×1, conversations ×1, usage ×1); `none` — no action yet |
-| `interactive_tui` | `implemented:#NNN` — interactive TUI shipped in that ticket (#237 Inbox pilot, #238 Git, #240 Projects, #243 Automations, #244 Conversations/Usage); `planned:#NNN` — scheduled in that implementation ticket (#239 Git forge, #231 Scripts/Checkpoints, #232 Controls/Handoff/TextGen, #233 Artifacts/Secrets/Machines/MCP diagnostics); `n/a` — daemon-, agent-, or diagnostic-only surface with no interactive TUI planned |
+| `tui_action` | `declared:<id>` — a manifest `[[actions]]` entry exists today (inbox ×9 incl. `open`, git ×6 incl. `open`, checkpoints ×1, projects ×1, automations ×1, conversations ×1, usage ×1, mcp ×1); `none` — no action yet |
+| `interactive_tui` | `implemented:#NNN` — interactive TUI shipped in that ticket (#237 Inbox pilot, #238 Git, #240 Projects, #243 Automations, #244 Conversations/Usage, #248 MCP diagnostics); `planned:#NNN` — scheduled in that implementation ticket (#239 Git forge, #231 Scripts/Checkpoints, #232 Controls/Handoff/TextGen, #233 Artifacts/Secrets/Machines); `n/a` — daemon-, agent-, or diagnostic-only surface with no interactive TUI planned |
 | `gui` | GUI is owned by herdr-t3 (#7). This repo records consumption intent only — **GUI-done never implies TUI-done** |
 | `real_machine_evidence` | `docs/research/` paths recording live verification; absence means no recorded real-machine run, not necessarily untested |
 | `upstream_gap` | non-null = blocked on herdr/T3Code upstream; never worked around by PTY guessing |
@@ -39,7 +39,7 @@ implement against is [`docs/contracts/tui-v1.md`](../contracts/tui-v1.md).
 | rebuildup.artifacts | artifacts/v1 stable | #233 | 10 | 0 | list/search/get/verify + register/delete/deliver/gc |
 | rebuildup.secrets | secrets/v1 stable | #233 | 5 | 0 | metadata-only resolve + explicit run/inject + config |
 | rebuildup.machines | machines/v1 draft | #233 | 3 | 0 | inventory table + probe; lifecycle stays `herdr machine` |
-| rebuildup.mcp | mcp/v1 stable | #233 | 3 CLI + 24 tools | 0 | diagnostics only — the stdio server is NOT screen-ified |
+| rebuildup.mcp | mcp/v1 stable | #233 | 3 CLI + 24 tools | 1 (`open`) | implemented #248 — diagnostics only (capability/access/tools/plugins); the stdio server is NOT screen-ified |
 
 ## Foundation row (#236)
 
