@@ -1,0 +1,13 @@
+id = "rebuildup.machines"
+name = "Machines"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Remote machines inventory: read-only list/probe/capability over herdr saved machines — reachability, remote herdr version/protocol, and plugin surface via the ADR-0020 SavedSshApiBridge path. Machine lifecycle stays with the herdr CLI; no credential handling (herdr-plugins.machines/v1)."
+platforms = ["linux", "macos", "windows"]
+
+# No build step: the plugin is dependency-free TypeScript executed by Bun
+# (runtime prerequisite, see plugins/machines/README.md).
+#
+# No [[actions]] / [[events]] / [[startup]]: the plugin is CLI-only.
+# Issue #161 (parent #34, ADR-0028): read-only inventory/probe only —
+# machine add/remove/enable/disable is never reimplemented.
