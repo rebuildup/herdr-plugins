@@ -13,7 +13,8 @@
 
 import { reportPaneMetadata, sessionSnapshot } from "../../../packages/herdr-client/src/index";
 import { resolveEntry } from "./model";
-import { sessionEntries, sessionKeyFor, updateState } from "./state";
+import { removeWatchLink, sessionEntries, sessionKeyFor, updateState } from "./state";
+import { appendClearedTransitions, appendTransition } from "./transitions";
 
 interface EventEnvelope {
   event?: string;
@@ -55,7 +56,31 @@ async function main(): Promise<void> {
   if (name === "pane.closed") {
     await updateState((state) => {
       const entries = state.sessions[sessionKey];
+      const entry = entries?.[paneId];
+      // Record the organize clear before dropping the entry — the pane is
+      // gone, so only the stored workspace id survives as context.
+      const hadHideKind =
+        entry !== undefined &&
+        (entry.settled !== undefined ||
+          entry.snoozed !== undefined ||
+          entry.archived !== undefined);
       if (entries) delete entries[paneId];
+      // Drop every watch baseline for the closed pane: its declared links
+      // died with the entry, so no poll baseline may outlive them (#178).
+      const paneWatch = state.watch?.[sessionKey]?.[paneId];
+      if (paneWatch) {
+        for (const ref of Object.keys(paneWatch)) {
+          removeWatchLink(state, sessionKey, paneId, ref);
+        }
+      }
+      if (hadHideKind) {
+        appendTransition(state, sessionKey, {
+          kind: "cleared",
+          paneId,
+          ctx: { workspaceId: entry?.workspace_id, at: new Date().toISOString() },
+          cause: "pane_closed",
+        });
+      }
     });
     return;
   }
@@ -66,29 +91,46 @@ async function main(): Promise<void> {
   const agent = snapshot.agents?.[paneId];
 
   const now = new Date();
+  const pane = (snapshot.panes ?? []).find((p) => p.pane_id === paneId);
   const outcome = await updateState(async (state) => {
     const entries = sessionEntries(state, sessionKey);
     const entry = entries[paneId];
     if (!entry) return null;
     const result = resolveEntry(entry, agent, now);
-    if (!entry.settled && !entry.snoozed) {
+    const hasState =
+      entry.settled !== undefined ||
+      entry.snoozed !== undefined ||
+      entry.archived !== undefined ||
+      entry.pinned !== undefined ||
+      entry.order !== undefined ||
+      (entry.links?.length ?? 0) > 0;
+    if (!hasState) {
       delete entries[paneId];
     }
     entry.updated_at = now.toISOString();
-    return result;
+    // Organize-transition log (#182): hide-kind clears resolved by this
+    // hook are real organize mutations and must be recorded. Pin clears
+    // are layout hints and are not transitions.
+    const hideClears = result.clearedMarks.filter((m) => m.field !== "pinned");
+    if (hideClears.length > 0) {
+      appendClearedTransitions(state, sessionKey, paneId, hideClears, {
+        pane,
+        agent,
+        workspaceId: entry.workspace_id,
+        at: now.toISOString(),
+      });
+    }
+    return { ...result, pinned: entry.pinned !== undefined };
   });
 
   if (!outcome) return;
 
   // Refresh the pane's inbox metadata token to match resolved organize state.
-  const tokens: Record<string, string | null> = {};
-  if (outcome.organize) {
-    tokens.inbox_state = outcome.organize.kind;
-    tokens.inbox_snoozed_until = outcome.organize.until ?? null;
-  } else {
-    tokens.inbox_state = null;
-    tokens.inbox_snoozed_until = null;
-  }
+  const tokens: Record<string, string | null> = {
+    inbox_state: outcome.organize?.kind ?? null,
+    inbox_snoozed_until: outcome.organize?.until ?? null,
+    inbox_pinned: outcome.pinned ? "true" : null,
+  };
   try {
     await reportPaneMetadata(paneId, tokens, { mutation: true });
   } catch (err) {

@@ -40,6 +40,7 @@ import {
   ACTIVE_RUN_RESULTS,
   loadRuns,
   type RunResult,
+  type RunTrigger,
   readRunLog,
   runsDir as runsDirPath,
   type ScriptRun,
@@ -740,6 +741,11 @@ export interface StartRunInput {
   repoRoot: string;
   remote: string | null;
   /**
+   * Run origin (#180). Defaults to `{kind:"manual"}`; the trigger drain
+   * passes `{kind:"worktree.created", worktree_path, event_received_at}`.
+   */
+  trigger?: RunTrigger;
+  /**
    * `--shell` override: `auto` (default) detects via `pane.process_info`
    * with a host-OS fallback; `sh`/`cmd`/`powershell` force the family.
    */
@@ -831,6 +837,7 @@ export async function startRun(input: StartRunInput, deps: RunnerDeps): Promise<
     stop_requested_at: null,
     log_path: null,
     error: null,
+    trigger: input.trigger ?? { kind: "manual" },
   };
 
   // Persist BEFORE injecting: a crash after this point still leaves an

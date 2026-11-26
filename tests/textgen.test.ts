@@ -245,6 +245,82 @@ describe("output validation", () => {
       expect((err as TextgenError).code).toBe("output_empty");
     }
   });
+
+  // Issue #186 / #132: provider agents (observed: codex) emit JSON string
+  // values with literal newlines inside the string, wrapped across
+  // terminal lines. Strict parse fails; the tolerant second pass escapes
+  // raw control chars inside string literals only.
+  test("pr_content: tolerates literal newlines inside JSON string values", () => {
+    // Exact shape observed from agent:codex in #110 verification.
+    const codexStyle =
+      '{"title":"Pull request summary pending","body":"## Summary\\n\\nProvide a diff or commit list to summarize the change\n' +
+      '  and its notable behavior.\\n\\n## Verification\\n\\nNo test results were provided."}';
+    expect(validateGeneratedOutput(pr, codexStyle)).toEqual({
+      title: "Pull request summary pending",
+      body: "## Summary\n\nProvide a diff or commit list to summarize the change\n  and its notable behavior.\n\n## Verification\n\nNo test results were provided.",
+    });
+    // literal tab inside a string value is escaped the same way
+    // (\t is a legitimate output char; a raw \r is not — it still fails
+    // honestly via output_control_chars below)
+    const withTab = '{"title":"T","body":"a\tb"}';
+    expect(validateGeneratedOutput(pr, withTab)).toEqual({ title: "T", body: "a\tb" });
+    try {
+      validateGeneratedOutput(pr, '{"title":"T","body":"a\rb"}');
+      expect.unreachable();
+    } catch (err) {
+      expect((err as TextgenError).code).toBe("output_control_chars");
+    }
+    // pretty-printed JSON (legal whitespace outside strings) still works
+    const pretty = '{\n  "title": "T",\n  "body": "B"\n}';
+    expect(validateGeneratedOutput(pr, pretty)).toEqual({ title: "T", body: "B" });
+  });
+
+  test("pr_content: tolerant path never repairs broken JSON", () => {
+    const cases: [string, string][] = [
+      // truncated mid-string: no closing brace
+      ['{"title":"T","body":"never closed', "output_invalid_json"],
+      // unbalanced: extra closing brace is trailing content
+      ['{"title":"T","body":"B"}}', "output_invalid_json"],
+      // multiple top-level objects
+      ['{"title":"T","body":"B"}\n{"title":"X","body":"Y"}', "output_invalid_json"],
+      // raw newline splitting a bare token (outside any string literal)
+      ['{"title":"T","body":tru\ne}', "output_invalid_json"],
+      // non-JSON prose that happens to start with {
+      ["{this is not json at all", "output_invalid_json"],
+      // trailing prose after an otherwise valid object stays an error
+      ['{"title":"T","body":"B","extra":1}\ntrailing prose', "output_invalid_json"],
+    ];
+    for (const [raw, code] of cases) {
+      try {
+        validateGeneratedOutput(pr, raw);
+        expect.unreachable(`expected ${code} for ${JSON.stringify(raw)}`);
+      } catch (err) {
+        expect((err as TextgenError).code).toBe(code);
+      }
+    }
+  });
+
+  test("text_list: tolerates literal newlines inside JSON string array", () => {
+    const wrapped = '["feat: add thing\n  continued line","second"]';
+    expect(validateGeneratedOutput(commit, wrapped)).toEqual([
+      "feat: add thing\n  continued line",
+      "second",
+    ]);
+    // negative: truncated array still fails honestly
+    try {
+      validateGeneratedOutput(commit, '["a","b"');
+      expect.unreachable();
+    } catch (err) {
+      expect((err as TextgenError).code).toBe("output_invalid_json");
+    }
+    // negative: multiple arrays / trailing content
+    try {
+      validateGeneratedOutput(commit, '["a"]\n["b"]');
+      expect.unreachable();
+    } catch (err) {
+      expect((err as TextgenError).code).toBe("output_invalid_json");
+    }
+  });
 });
 
 describe("markers", () => {

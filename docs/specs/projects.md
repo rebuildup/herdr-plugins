@@ -43,15 +43,18 @@ Foundation delivered by #49 (CRUD/overrides), #50 (t3.json/scripts),
 | `scripts list <project\|repo>` | Resolved script definitions with per-script `source`; read-only. |
 | `scripts run <project> <name> [--repo PATH] [--shell auto\|sh\|cmd\|powershell]` | Execute a script in a dedicated herdr pane; waits for the completion marker up to `runTimeoutMs`. |
 | `scripts stop <run-id\|project>` | ctrl+c + close the recorded pane of running run(s); only plugin-owned pane ids. |
-| `scripts results [project]` | Run records newest-first; active records lazily reconciled (ownership + scrollback marker re-scan). |
+| `scripts results [project]` | Run records newest-first; active records lazily reconciled (ownership re-validation + scrollback marker re-scan). |
 | `scripts logs <run-id>` | Bounded stored/captured log tail; also recovers completion via the scrollback marker re-scan. |
-| `repos list <project>` | Member repos with live `branch`/`dirty`/`has_submodules`; unreachable members reported in `skipped`. |
+| `scripts tick` | Explicit lazy drain of pending `worktree.created` trigger marks (also runs implicitly atop `scripts run|stop|results|logs`). |
+| `repos list <project>` | Member repos with live `branch`/`dirty`/`has_submodules`, `worktree_submodules` advisory, and the `worktrees[]` herdr association (path/branch/dirty + pane-addressed git pointers); unreachable members reported in `skipped`, association failures in per-entry `worktrees_error` + top-level `worktrees_skipped`. |
 | `repos add <project> --path DIR` | Add a repo/checkout to a project; same code path and errors as `update --repo-add`. |
 | `repos remove <project> --path DIR` | Drop membership (live or stale path); same code path as `update --repo-remove`. |
 
 All commands accept `--session`/`--socket`/`--timeout`; `discover` and
 the `scripts run|stop|results|logs` family need a reachable herdr
-session socket (the rest work offline). Mutations are explicit-argument
+session socket. `repos list` uses the socket opportunistically for
+the worktree association — unreachable degrades to `worktrees: null`
++ `worktrees_error`, never a failure. Mutations are explicit-argument
 CLI invocations — no manifest actions.
 
 ## Mutation rules
@@ -89,12 +92,49 @@ CLI invocations — no manifest actions.
   `has_submodules` is tri-state: `true`/`false` from `submodule status`
   output, `null` when the probe exits non-zero or fails (unknown —
   never a guessed `false`; branch/dirty still report). It feeds the
-  upstream `worktreeSubmodules` connection point. Unreachable members
-  keep stored fields with null live values plus a `skipped` entry;
-  nothing is fabricated.
+  upstream `worktreeSubmodules` connection point — parsed but not
+  consumed: neither herdr `worktree create` nor Worktrunk has a
+  submodule-init path today (upstream gap, ADR-0029). Unreachable
+  members keep stored fields with null live values plus a `skipped`
+  entry; nothing is fabricated.
 - #26 acceptance: same-name repos (distinct roots → distinct
   identities), non-git roots (`not_a_repo`), and external folders are
   never absorbed into a project — covered by contract tests.
+
+## Repo ↔ worktree/diff association (#184, ADR-0029 §2)
+
+`repos list` additionally reports, per member repo, the worktrees herdr
+knows for that repository — a read-only reference surface. Worktree
+creation/removal stays with herdr/`wt` (Worktrunk); the plugin never
+opens panes or workspaces itself.
+
+- Source: socket method `worktree.list` with `cwd` = member root and
+  `trust_repository: false` (an untrusted-repo RPC error is reported in
+  `worktrees_error`, never retried with a trust grant). The response's
+  `source.repo_root` is canonicalized and cross-checked against the
+  member root — a mismatch yields `worktrees_error.reason =
+  "repo_mismatch"`.
+- Same-repo proof: each candidate checkout's
+  `git rev-parse --git-common-dir` must equal the member repo's common
+  dir (the same primitive #180 triggers use in reverse). Non-matching
+  checkouts land in `worktrees_skipped` (`not_member_repo`), gone paths
+  in `worktree_gone`, non-git/bare in the git kinds — nothing is
+  attributed by guesswork.
+- Liveness reuses `inspectRepo` (`branch`/`dirty`/`has_submodules`).
+- Diff surface is pane-addressed only (`herdr-plugins.git/v1`):
+  `open_workspace_id` resolves to `session.snapshot` panes; each pane
+  gets `commands` pointers (`status`/`diff`/`files`/`compare`) plus a
+  compact live `status` summary fetched via the sibling git plugin's
+  public CLI (ADR-0013 env-pin spawn, ambient `HERDR_*` scrubbed,
+  ≤8 calls per member repo). A worktree with no open workspace — or a
+  stale `open_workspace_id` (`panes_unavailable: true`) — reports
+  path/branch/dirty only; no diff data is fabricated.
+- `worktrees_error` covers association-level failure
+  (`session_unreachable`, RPC codes, `repo_mismatch`); per-checkout
+  failures go to `worktrees_skipped`. Offline `repos list` still
+  returns stored/live git fields with `worktrees: null`.
+- `worktree_submodules` is the advisory `t3.json` value (ADR-0029 §3
+  MAY) — display data only; no consumer enforces submodule init today.
 
 ## t3.json and script resolution (#50)
 
@@ -216,17 +256,59 @@ CLI invocations — no manifest actions.
 - Concurrency: unlimited runs; `run_id = run-<ts36>-<rand6>`; stop and
   results address only recorded pane ids (herdr socket panes carry no
   ownership token — client-side discipline per ADR-0010).
-- **Auto triggers gap:** `runOnWorktreeCreate`/`runOnSettle`/
-  `stopOnSettle` are listed but not executed — no faithful herdr event
-  mapping exists (upstream gap, follow-up Issue). Scheduled/event
-  execution belongs to #32 automations.
-- `mutation_commands` += `scripts run`, `scripts stop`.
+- `mutation_commands` += `scripts run`, `scripts stop`, `scripts tick`.
+
+## Auto trigger: runOnWorktreeCreate (#180)
+
+- Manifest `[[events]] on="worktree.created"` → `src/hook.ts` appends a
+  `PendingTriggerMark` to `state.json.pending_triggers` (cap 200,
+  oldest-dropped counted; identical event+session+path marks collapse).
+  The hook does no socket/git/script work — ADR-0002, same shape as
+  automations #146 / checkpoints auto-capture.
+- Lazy drain on the next `scripts tick|run|stop|results|logs` call
+  (`list`/`capability`/`help` never drain): worktree path →
+  `resolveRepo` → `git-common-dir` → non-archived `repos[]` membership
+  → #50 layered script resolution on the EVENT worktree root →
+  `runOnWorktreeCreate` scripts only → unchanged ADR-0010 `startRun`
+  against the mark's recorded session socket.
+- Skips are reported in the payload's `triggers` block
+  (`repo_not_registered`, `ambiguous_project`, `worktree_gone`, git
+  kinds, `t3json_invalid`/`invalid_script_list`/`unknown_script`,
+  `no_run_on_worktree_create_scripts`, `session_unreachable`,
+  `run_start_failed`) — never silent, never guessed. Unreachable
+  session sockets keep marks pending; consumed marks cannot double-fire
+  across concurrent drains.
+- `ScriptRun.trigger` records `{kind:"manual"|"worktree.created",
+  worktree_path?, event_received_at?}` (additive; manual runs get
+  `kind:"manual"`).
+- `runOnSettle`/`stopOnSettle` shipped per ADR-0029 (#181 design, #182
+  implementation): inbox-v1 records a per-session organize-transition
+  log exposed read-only via `transitions --after <seq>`; projects
+  lazy-drains it via the ADR-0013 public-CLI pattern (sibling checkout /
+  `herdr plugin list` / `--inbox-root` or `inboxRoot` override, env-pinned
+  child) on the same `scripts tick|run|stop|results|logs` checkpoints.
+  Only `kind:"settled"` is consumed; a per-session `settle_cursors` seq
+  cursor advances after each batch, `transition_seq` run-record dedupe
+  absorbs replays, and settle→restore pairs collapse to
+  `settle_superseded`. `runOnSettle` fires through the unchanged
+  ADR-0010 runner on the settled pane's worktree root;
+  `stopOnSettle` stops only `running` runs on the SAME canonical
+  worktree root whose re-resolved script carries the flag.
+  Drain-side fires/stops are herdr mutations: `worktree.created` marks
+  execute on their recorded session socket, and settle fires/stops
+  require a mutation-grade invocation target (#83 rule) — without one
+  they are reported `target_required` and the settle cursor holds.
 
 ## Non-goals
 
-- No worktree/workspace creation for projects themselves — herdr/
-  Worktrunk own lifecycle (script runs do create dedicated execution
-  workspaces per ADR-0010).
-- No auto triggers (`runOnWorktreeCreate`/`runOnSettle`/`stopOnSettle`)
-  — upstream gap, manual run/stop only this release.
+- No project clone/init/publish operations — `git`/`gh` own transport
+  and credentials; the plugin records registry membership only
+  (ADR-0029, #185 closed unimplemented).
+- Repo↔worktree/diff association is read-only (#184): `worktree.list`
+  + git-common-dir identity + pane-addressed git-v1 pointers; no
+  worktree/workspace creation (herdr/Worktrunk own lifecycle; script
+  runs do create dedicated execution workspaces per ADR-0010).
+- `runOnSettle`/`stopOnSettle` ship via the inbox organize-transition
+  surface + lazy drain per ADR-0029 (#182, shipped); `runOnWorktreeCreate`
+  shipped via the `worktree.created` hook + lazy drain (#180).
 - No per-session namespacing of the registry.

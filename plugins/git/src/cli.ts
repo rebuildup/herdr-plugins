@@ -26,13 +26,30 @@ import {
   TargetResolutionError,
 } from "../../../packages/herdr-client/src/index";
 import {
+  collectIssueCreate,
+  collectIssueList,
+  collectIssueView,
+  collectPrChecks,
+  collectPrComments,
   collectPrCreate,
   collectPrList,
+  collectPrLogs,
+  collectPrReviews,
   collectPrStatus,
   collectPrView,
   ensureGh,
   GhError,
+  isValidHeadSha,
+  mergePr,
+  type PrLineComment,
+  type PrReviewEvent,
   resolveForgeRepo,
+  submitIssueComment,
+  submitPrComment,
+  submitPrReply,
+  submitPrReview,
+  updateIssue,
+  updatePrReviewers,
 } from "./gh";
 import {
   assertSafeGitArg,
@@ -57,10 +74,11 @@ import {
   resolveRepo,
   type StatusReport,
 } from "./git";
+import { INBOX_PLUGIN_ID, resolveInboxPluginRoot, runInboxCli } from "./inbox";
 
 const CONTRACT = "herdr-plugins.git/v1";
 const PLUGIN_ID = "rebuildup.git";
-const PLUGIN_VERSION = "0.2.0";
+const PLUGIN_VERSION = "0.6.0";
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_REMOTE_TIMEOUT_MS = 60_000;
 const DEFAULT_DIFF_MAX_BYTES = 256 * 1024;
@@ -69,6 +87,8 @@ interface PluginConfig {
   timeoutMs?: number | undefined;
   remoteTimeoutMs?: number | undefined;
   diffMaxBytes?: number | undefined;
+  /** Explicit rebuildup.inbox plugin root for `issue link|unlink|links`. */
+  inboxPluginRoot?: string | undefined;
 }
 
 interface CliOptions extends CallOptions {
@@ -299,6 +319,10 @@ async function loadConfig(): Promise<PluginConfig> {
       diffMaxBytes:
         typeof parsed.diffMaxBytes === "number" && parsed.diffMaxBytes > 0
           ? parsed.diffMaxBytes
+          : undefined,
+      inboxPluginRoot:
+        typeof parsed.inboxPluginRoot === "string" && parsed.inboxPluginRoot !== ""
+          ? parsed.inboxPluginRoot
           : undefined,
     };
   } catch {
@@ -986,7 +1010,55 @@ const PR_VALUE_FLAGS = [
   "--body",
   "--body-file",
   "--base",
+  "--run",
+  "--job",
+  "--lines",
+  "--expect-head",
+  "--comments-file",
+  "--add-reviewer",
+  "--remove-reviewer",
 ];
+
+interface PrBodyInput {
+  /** Inline `--body` value. */
+  body: string | undefined;
+  /** `"--body-file -"` effective value: `-` when the body is piped. */
+  bodyFile: string | undefined;
+  /** Body text resolved from `--body-file` (file contents or stdin). */
+  bodyText: string | undefined;
+}
+
+/**
+ * Shared `--body`/`--body-file` resolution for `pr create` and the forge
+ * mutations: the flags are mutually exclusive, `-` reads stdin, and real
+ * file paths are read into memory so the text can be piped to `gh` (or
+ * folded into an `gh api --input -` payload) instead of riding in argv.
+ */
+async function resolvePrBody(args: string[]): Promise<PrBodyInput> {
+  const body = flagValue(args, "--body");
+  const bodyFile = flagValue(args, "--body-file");
+  if (body !== undefined && bodyFile !== undefined) {
+    fail("--body and --body-file are mutually exclusive", 2);
+  }
+  let bodyText: string | undefined;
+  let effectiveBodyFile = bodyFile;
+  if (bodyFile && bodyFile !== "-") {
+    try {
+      bodyText = await readFile(bodyFile, "utf8");
+      effectiveBodyFile = "-";
+    } catch {
+      fail(`cannot read --body-file: ${bodyFile}`, 2);
+    }
+  } else if (bodyFile === "-") {
+    bodyText = await Bun.stdin.text();
+  }
+  return { body, bodyFile: effectiveBodyFile, bodyText };
+}
+
+/** Effective body text for `gh api` payloads (file/stdin already resolved). */
+function prBodyText(input: PrBodyInput): string | undefined {
+  return input.body ?? input.bodyText;
+}
 
 /**
  * Per-action option whitelist for `pr`. Flags are only valid on the
@@ -1011,6 +1083,52 @@ const PR_FLAG_SPECS: Record<string, Record<string, FlagKind>> = {
     "--head": "value",
     "--draft": "boolean",
   },
+  reviews: { "--repo": "value" },
+  comments: { "--repo": "value" },
+  checks: { "--repo": "value" },
+  logs: {
+    "--repo": "value",
+    "--run": "value",
+    "--job": "value",
+    "--lines": "value",
+  },
+  review: {
+    "--repo": "value",
+    "--expect-head": "value",
+    "--approve": "boolean",
+    "--request-changes": "boolean",
+    "--comment": "boolean",
+    "--body": "value",
+    "--body-file": "value",
+    "--comments-file": "value",
+  },
+  comment: {
+    "--repo": "value",
+    "--expect-head": "value",
+    "--body": "value",
+    "--body-file": "value",
+  },
+  reply: {
+    "--repo": "value",
+    "--expect-head": "value",
+    "--body": "value",
+    "--body-file": "value",
+  },
+  reviewers: {
+    "--repo": "value",
+    "--expect-head": "value",
+    "--add-reviewer": "value",
+    "--remove-reviewer": "value",
+  },
+  merge: {
+    "--repo": "value",
+    "--expect-head": "value",
+    "--squash": "boolean",
+    "--merge": "boolean",
+    "--rebase": "boolean",
+    "--auto": "boolean",
+    "--disable-auto": "boolean",
+  },
 };
 
 /**
@@ -1025,14 +1143,19 @@ async function cmdPr(options: CliOptions): Promise<void> {
   const pos = positionals(options.args, PR_VALUE_FLAGS);
   const action = pos[0];
   if (!action || !(action in PR_FLAG_SPECS)) {
-    fail("pr requires an action: list | status | create | view", 2);
+    fail(
+      "pr requires an action: list | status | create | view | reviews | comments | checks | logs | review | comment | reply | reviewers | merge",
+      2,
+    );
   }
   const spec = PR_FLAG_SPECS[action] as Record<string, FlagKind>;
   validateFlags(options.args, spec);
-  // `pr create` mutates the forge: it needs an explicit or consistent
-  // ambient target, never the implicit default socket. Read actions keep
-  // the read-side resolution.
-  if (action === "create") options.mutation = true;
+  // Forge-mutating actions (`create`, `review`, `comment`, `reply`,
+  // `reviewers`) need an explicit or consistent ambient target, never the
+  // implicit default socket. Read actions keep the read-side resolution.
+  if (["create", "review", "comment", "reply", "reviewers", "merge"].includes(action)) {
+    options.mutation = true;
+  }
   const identity = ambientIdentity();
   const explicitPane = pos[1];
   const paneId = explicitPane ?? identity.paneId;
@@ -1169,38 +1292,274 @@ async function cmdPr(options: CliOptions): Promise<void> {
       return;
     }
 
-    // action === "create" — argument validation already ran above.
-    const title = flagValue(options.args, "--title") as string;
-    const body = flagValue(options.args, "--body");
-    const bodyFile = flagValue(options.args, "--body-file");
+    // Read-only review/check/log surface (Issue #171). All share the
+    // `pr <action> <pane> <number>` shape; `logs` adds --run/--job/--lines.
+    if (["reviews", "comments", "checks", "logs"].includes(action)) {
+      const number = Number(rest[0]);
+      if (!Number.isInteger(number) || number < 1) {
+        fail(`pr ${action} requires a positive PR number`, 2);
+      }
+      if (rest.length > 1) fail(`pr ${action} accepts at most one PR number`, 2);
+
+      if (action === "reviews") {
+        const data = await collectPrReviews(repoRoot, { repo, number }, ghOptions);
+        emit({ ...forgeBase, action: "reviews", repo, ...data });
+        return;
+      }
+      if (action === "comments") {
+        const data = await collectPrComments(repoRoot, { repo, number }, ghOptions);
+        emit({ ...forgeBase, action: "comments", repo, ...data });
+        return;
+      }
+      if (action === "checks") {
+        const data = await collectPrChecks(repoRoot, { repo, number }, ghOptions);
+        emit({ ...forgeBase, action: "checks", repo, ...data });
+        return;
+      }
+
+      // action === "logs"
+      const runRaw = flagValue(options.args, "--run");
+      const jobRaw = flagValue(options.args, "--job");
+      const linesRaw = flagValue(options.args, "--lines");
+      for (const [raw, what] of [
+        [runRaw, "--run"],
+        [jobRaw, "--job"],
+      ] as const) {
+        if (raw !== undefined && !/^\d+$/.test(raw)) {
+          fail(`invalid ${what}: ${raw} (positive integer required)`, 2);
+        }
+      }
+      if (runRaw !== undefined && jobRaw !== undefined) {
+        fail("--run and --job are mutually exclusive", 2);
+      }
+      let lines: number | undefined;
+      if (linesRaw !== undefined) {
+        lines = Number(linesRaw);
+        if (!Number.isInteger(lines) || lines < 1 || lines > 2000) {
+          fail(`invalid --lines: ${linesRaw}`, 2);
+        }
+        if (jobRaw === undefined) fail("--lines requires --job", 2);
+      }
+      const data = await collectPrLogs(
+        repoRoot,
+        {
+          repo,
+          number,
+          runId: runRaw,
+          jobId: jobRaw,
+          lines,
+        },
+        ghOptions,
+      );
+      emit({ ...forgeBase, action: "logs", repo, ...data });
+      return;
+    }
+
+    // Forge mutations (Issue #172): review / comment / reply / reviewers.
+    // Every mutation requires --expect-head <full sha> — the mandatory
+    // stale-head guard re-fetches the PR head immediately before writing
+    // and refuses with kind "stale_head" when it moved. These are explicit
+    // user/agent invocations only; no automation path exists (the
+    // github-delivery release-approval boundary is never bypassed).
+    if (["review", "comment", "reply", "reviewers"].includes(action)) {
+      const number = Number(rest[0]);
+      if (!Number.isInteger(number) || number < 1) {
+        fail(`pr ${action} requires a positive PR number`, 2);
+      }
+      const expectHeadRaw = flagValue(options.args, "--expect-head");
+      if (!expectHeadRaw || !isValidHeadSha(expectHeadRaw)) {
+        fail(
+          `pr ${action} requires --expect-head <full head sha> (head.sha from a prior pr read)`,
+          2,
+        );
+      }
+      const expectHead = expectHeadRaw;
+
+      if (action === "review") {
+        if (rest.length > 1) fail("pr review accepts at most one PR number", 2);
+        const events = (
+          [
+            ["--approve", "APPROVE"],
+            ["--request-changes", "REQUEST_CHANGES"],
+            ["--comment", "COMMENT"],
+          ] as const
+        )
+          .filter(([flag]) => hasFlag(options.args, flag))
+          .map(([, event]) => event);
+        if (events.length !== 1) {
+          fail("pr review requires exactly one of --approve, --request-changes, --comment", 2);
+        }
+        const commentsFile = flagValue(options.args, "--comments-file");
+        const bodyInput = await resolvePrBody(options.args);
+        if (commentsFile === "-" && bodyInput.bodyFile === "-") {
+          fail("--body-file - and --comments-file - cannot both read stdin", 2);
+        }
+        let comments: PrLineComment[] | undefined;
+        if (commentsFile !== undefined) {
+          let raw: string;
+          if (commentsFile === "-") {
+            raw = await Bun.stdin.text();
+          } else {
+            try {
+              raw = await readFile(commentsFile, "utf8");
+            } catch {
+              fail(`cannot read --comments-file: ${commentsFile}`, 2);
+            }
+          }
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(raw);
+          } catch {
+            fail("--comments-file is not valid JSON", 2);
+          }
+          if (!Array.isArray(parsed)) {
+            fail("--comments-file must contain a JSON array of line comments", 2);
+          }
+          comments = parsed as PrLineComment[];
+        }
+        const data = await submitPrReview(
+          repoRoot,
+          {
+            repo,
+            number,
+            expectHead,
+            event: events[0] as PrReviewEvent,
+            body: prBodyText(bodyInput),
+            comments,
+          },
+          ghOptions,
+        );
+        emit({ ...forgeBase, action: "review", repo, ok: true, ...data });
+        return;
+      }
+
+      if (action === "comment") {
+        if (rest.length > 1) fail("pr comment accepts at most one PR number", 2);
+        const bodyInput = await resolvePrBody(options.args);
+        const body = prBodyText(bodyInput);
+        if (body === undefined || body.trim().length === 0) {
+          fail("pr comment requires --body or --body-file", 2);
+        }
+        const data = await submitPrComment(repoRoot, { repo, number, expectHead, body }, ghOptions);
+        emit({ ...forgeBase, action: "comment", repo, ok: true, ...data });
+        return;
+      }
+
+      if (action === "reply") {
+        if (rest.length !== 2) {
+          fail("pr reply requires a PR number and a review-comment id", 2);
+        }
+        const commentId = Number(rest[1]);
+        if (!Number.isInteger(commentId) || commentId < 1) {
+          fail("pr reply requires a positive review-comment id", 2);
+        }
+        const bodyInput = await resolvePrBody(options.args);
+        const body = prBodyText(bodyInput);
+        if (body === undefined || body.trim().length === 0) {
+          fail("pr reply requires --body or --body-file", 2);
+        }
+        const data = await submitPrReply(
+          repoRoot,
+          { repo, number, expectHead, commentId, body },
+          ghOptions,
+        );
+        emit({ ...forgeBase, action: "reply", repo, ok: true, ...data });
+        return;
+      }
+
+      // action === "reviewers"
+      if (rest.length > 1) fail("pr reviewers accepts at most one PR number", 2);
+      const splitLogins = (flag: string): string[] =>
+        flagValues(options.args, flag)
+          .flatMap((value) => value.split(","))
+          .map((login) => login.trim())
+          .filter((login) => login.length > 0);
+      const add = splitLogins("--add-reviewer");
+      const remove = splitLogins("--remove-reviewer");
+      if (add.length === 0 && remove.length === 0) {
+        fail("pr reviewers requires --add-reviewer and/or --remove-reviewer", 2);
+      }
+      const data = await updatePrReviewers(
+        repoRoot,
+        { repo, number, expectHead, add, remove },
+        ghOptions,
+      );
+      emit({ ...forgeBase, action: "reviewers", repo, ok: true, ...data });
+      return;
+    }
+
+    // `pr merge` (Issue #173): immediate merge, auto-merge enable, or
+    // auto-merge disable. Same mandatory --expect-head guard plus a
+    // mergeStateStatus/reviewDecision/isDraft re-verification immediately
+    // before the write; release-train head branches are hard-refused
+    // (github-delivery boundary, ADR-0030).
+    if (action === "merge") {
+      const number = Number(rest[0]);
+      if (!Number.isInteger(number) || number < 1) {
+        fail("pr merge requires a positive PR number", 2);
+      }
+      if (rest.length > 1) fail("pr merge accepts at most one PR number", 2);
+      const expectHeadRaw = flagValue(options.args, "--expect-head");
+      if (!expectHeadRaw || !isValidHeadSha(expectHeadRaw)) {
+        fail("pr merge requires --expect-head <full head sha> (head.sha from a prior pr read)", 2);
+      }
+      const methods = (
+        [
+          ["--squash", "squash"],
+          ["--merge", "merge"],
+          ["--rebase", "rebase"],
+        ] as const
+      )
+        .filter(([flag]) => hasFlag(options.args, flag))
+        .map(([, method]) => method);
+      if (methods.length > 1) {
+        fail("pr merge accepts at most one of --squash, --merge, --rebase", 2);
+      }
+      const method = methods[0] as "merge" | "squash" | "rebase" | undefined;
+      const auto = hasFlag(options.args, "--auto");
+      const disableAuto = hasFlag(options.args, "--disable-auto");
+      if (auto && disableAuto) fail("--auto and --disable-auto are mutually exclusive", 2);
+      if (auto && method === undefined) {
+        fail("pr merge --auto requires --squash, --merge, or --rebase", 2);
+      }
+      if (disableAuto && method !== undefined) {
+        fail("merge method flags are not valid with --disable-auto", 2);
+      }
+      const data = await mergePr(
+        repoRoot,
+        {
+          repo,
+          number,
+          expectHead: expectHeadRaw,
+          method,
+          auto: auto || undefined,
+          disableAuto: disableAuto || undefined,
+        },
+        ghOptions,
+      );
+      emit({ ...forgeBase, action: "merge", repo, ok: true, ...data });
+      return;
+    }
+
+    // action === "create"
+    const title = flagValue(options.args, "--title");
+    if (!title) fail("pr create requires --title", 2);
+    const bodyInput = await resolvePrBody(options.args);
     const base = flagValue(options.args, "--base");
     const head = flagValue(options.args, "--head");
-
-    let bodyText: string | undefined;
-    let effectiveBodyFile = bodyFile;
-    if (bodyFile && bodyFile !== "-") {
-      try {
-        bodyText = await readFile(bodyFile, "utf8");
-        effectiveBodyFile = "-";
-      } catch {
-        fail(`cannot read --body-file: ${bodyFile}`, 2);
-      }
-    } else if (bodyFile === "-") {
-      bodyText = await Bun.stdin.text();
-    }
 
     const created = await collectPrCreate(
       repoRoot,
       {
         repo,
         title,
-        body,
-        bodyFile: effectiveBodyFile,
+        body: bodyInput.body,
+        bodyFile: bodyInput.bodyFile,
         draft: hasFlag(options.args, "--draft"),
         base,
         head,
       },
-      { ...ghOptions, bodyText },
+      { ...ghOptions, bodyText: bodyInput.bodyText },
     );
     emit({
       ...forgeBase,
@@ -1210,6 +1569,451 @@ async function cmdPr(options: CliOptions): Promise<void> {
       url: created.url,
       number: created.number,
     });
+  } catch (err) {
+    if (err instanceof GhError) fail(err.message, 1, err.kind);
+    if (err instanceof GitError) fail(err.message, 1, err.kind);
+    throw err;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// `issue` — GitHub issue surface (Issue #174) plus pane↔issue links.
+//
+// Forge actions (`list|view|create|edit|comment|close`) share the `pr`
+// pane→repo resolution and `--repo` override. Mutations set
+// `options.mutation = true` before any target resolution so they fail
+// closed without an explicit/consistent target. Issues have no head sha,
+// so there is no `--expect-head` analog — the mutation gate plus explicit
+// invocation is the guard (documented in git-v1.md).
+//
+// `link|unlink|links` are pane-scoped tracker associations owned by
+// rebuildup.inbox (inbox-v1 link/unlink/links). They delegate to the
+// inbox plugin's public CLI (ADR-0013 sibling pattern) — the git plugin
+// keeps no link state of its own.
+// ---------------------------------------------------------------------------
+
+const ISSUE_VALUE_FLAGS = [
+  "--repo",
+  "--limit",
+  "--state",
+  "--label",
+  "--assignee",
+  "--author",
+  "--title",
+  "--body",
+  "--body-file",
+  "--add-label",
+  "--remove-label",
+  "--add-assignee",
+  "--remove-assignee",
+  "--reason",
+];
+
+const ISSUE_FLAG_SPECS: Record<string, Record<string, FlagKind>> = {
+  list: {
+    "--repo": "value",
+    "--limit": "value",
+    "--state": "value",
+    "--label": "value",
+    "--assignee": "value",
+    "--author": "value",
+  },
+  view: { "--repo": "value" },
+  create: {
+    "--repo": "value",
+    "--title": "value",
+    "--body": "value",
+    "--body-file": "value",
+    "--label": "value",
+    "--assignee": "value",
+  },
+  edit: {
+    "--repo": "value",
+    "--title": "value",
+    "--body": "value",
+    "--body-file": "value",
+    "--add-label": "value",
+    "--remove-label": "value",
+    "--add-assignee": "value",
+    "--remove-assignee": "value",
+    "--state": "value",
+  },
+  comment: { "--repo": "value", "--body": "value", "--body-file": "value" },
+  close: { "--repo": "value", "--reason": "value" },
+  link: { "--verify": "boolean" },
+  unlink: {},
+  links: {},
+};
+
+/** Actions that write forge state or plugin (inbox) state. */
+const ISSUE_MUTATION_ACTIONS = new Set(["create", "edit", "comment", "close", "link", "unlink"]);
+
+/** Same `<owner>/<repo>#<n>` grammar as inbox-v1 tracker refs. */
+const TRACKER_REF_PATTERN =
+  /^([A-Za-z0-9][A-Za-z0-9_.-]*(?:\/[A-Za-z0-9][A-Za-z0-9_.-]*)+)#([1-9][0-9]*)$/;
+
+function parseIssueTrackerRef(spec: string): { repo: string; number: number } {
+  const match = TRACKER_REF_PATTERN.exec(spec);
+  if (!match) {
+    fail(`invalid issue ref (expected <owner>/<repo>#<number>): ${spec}`, 2);
+  }
+  return { repo: match[1] as string, number: Number(match[2]) };
+}
+
+/** Comma-split + trim a repeatable value flag into items. */
+function flagItems(args: string[], flag: string): string[] {
+  return flagValues(args, flag)
+    .flatMap((value) => value.split(","))
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
+/** Reject option-like label/assignee values before they reach gh argv. */
+function assertForgeItems(items: string[], flag: string): void {
+  for (const item of items) {
+    if (item.startsWith("-")) {
+      fail(`invalid ${flag} value (option-like rejected): ${item}`, 2);
+    }
+  }
+}
+
+function positiveIssueNumber(action: string, rest: string[]): number {
+  const number = Number(rest[0]);
+  if (!Number.isInteger(number) || number < 1) {
+    fail(`issue ${action} requires a positive issue number`, 2);
+  }
+  if (rest.length > 1) fail(`issue ${action} accepts at most one issue number`, 2);
+  return number;
+}
+
+/**
+ * `issue link|unlink|links` — delegate to rebuildup.inbox's public CLI.
+ * The pane↔issue association lives in inbox plugin state only; this
+ * surface re-wraps the inbox JSON under the git contract and propagates
+ * its errors (target gating, pane lookup, staleness rules) unchanged.
+ */
+async function cmdIssueLink(
+  options: CliOptions,
+  config: PluginConfig,
+  action: "link" | "unlink" | "links",
+  paneId: string,
+  rest: string[],
+): Promise<void> {
+  const inboxArgs: string[] = [];
+  if (action === "links") {
+    inboxArgs.push("links", paneId);
+  } else {
+    const { repo, number } = parseIssueTrackerRef(rest[0] as string);
+    inboxArgs.push(action, paneId, "--issue", `${repo}#${number}`);
+    if (action === "link" && hasFlag(options.args, "--verify")) {
+      inboxArgs.push("--verify");
+    }
+  }
+
+  const resolution = await resolveInboxPluginRoot(config.inboxPluginRoot);
+  if (!resolution.ok) {
+    fail(`inbox plugin unavailable: ${resolution.error}`, 1, "inbox_unavailable");
+  }
+  const result = await runInboxCli(resolution.root, inboxArgs, {
+    session: options.session,
+    socketPath: options.socketPath,
+    timeoutMs: effectiveTimeoutMs(options, config),
+  });
+  if (result.status !== 0) {
+    const message = result.error?.message ?? result.stderr.trim() ?? "";
+    if (result.status === 2 || result.error?.code === "usage") {
+      fail(message || `inbox ${action} usage error`, 2);
+    }
+    const kind =
+      result.error?.code && result.error.code !== "error" ? result.error.code : "inbox_error";
+    fail(message || `inbox ${action} failed (exit ${result.status})`, 1, kind);
+  }
+
+  const data = result.json ?? {};
+  const payload: Record<string, unknown> = {
+    contract: CONTRACT,
+    command: "issue",
+    action,
+    pane_id: paneId,
+    delegated: INBOX_PLUGIN_ID,
+    ok: true,
+    generated_at: new Date().toISOString(),
+  };
+  if (data.link !== undefined) payload.link = data.link;
+  if (data.removed !== undefined) payload.removed = data.removed;
+  if (Array.isArray(data.links)) payload.links = data.links;
+  if (Array.isArray(data.warnings)) payload.warnings = data.warnings;
+  emit(payload);
+}
+
+/**
+ * `issue <action> <pane_id> [args]` — GitHub issue surface via `gh`,
+ * plus pane link delegation to rebuildup.inbox. All argument validation
+ * runs before any snapshot/gh/inbox access so usage errors exit 2
+ * regardless of environment.
+ */
+async function cmdIssue(options: CliOptions): Promise<void> {
+  const config = await loadConfig();
+  const timeoutMs = effectiveRemoteTimeoutMs(options, config);
+  const pos = positionals(options.args, ISSUE_VALUE_FLAGS);
+  const action = pos[0];
+  if (!action || !(action in ISSUE_FLAG_SPECS)) {
+    fail(
+      "issue requires an action: list | view | create | edit | comment | close | link | unlink | links",
+      2,
+    );
+  }
+  const spec = ISSUE_FLAG_SPECS[action] as Record<string, FlagKind>;
+  validateFlags(options.args, spec);
+  // Forge/inbox mutations need an explicit or consistent ambient target,
+  // never the implicit default socket — same rule as `pr` mutations.
+  if (ISSUE_MUTATION_ACTIONS.has(action)) {
+    options.mutation = true;
+  }
+  const identity = ambientIdentity();
+  const explicitPane = pos[1];
+  const paneId = explicitPane ?? identity.paneId;
+  const ambient = explicitPane === undefined ? identity : null;
+  if (!paneId) {
+    fail("pane id required (argument, HERDR_PANE_ID, or plugin context)", 2);
+  }
+  const rest = pos.slice(2);
+
+  // --- link surface: pure delegation, no repo/gh resolution needed ---
+  if (action === "link" || action === "unlink" || action === "links") {
+    if (action === "links") {
+      if (rest.length > 0) fail("issue links takes no positional arguments", 2);
+    } else {
+      if (rest.length !== 1) {
+        fail(`issue ${action} requires exactly one <owner>/<repo>#<number> argument`, 2);
+      }
+      parseIssueTrackerRef(rest[0] as string);
+    }
+    return cmdIssueLink(options, config, action, paneId, rest);
+  }
+
+  // --- per-action argument validation (usage errors, exit 2) ---
+  if (action === "list") {
+    if (rest.length > 0) fail("issue list takes no positional arguments", 2);
+    const stateRaw = flagValue(options.args, "--state") ?? "open";
+    if (!["open", "closed", "all"].includes(stateRaw)) {
+      fail(`invalid --state: ${stateRaw}`, 2);
+    }
+    const limitRaw = flagValue(options.args, "--limit");
+    if (limitRaw !== undefined) {
+      const limit = Number(limitRaw);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
+        fail(`invalid --limit: ${limitRaw}`, 2);
+      }
+    }
+    for (const flag of ["--label", "--assignee", "--author"] as const) {
+      assertForgeItems(flagItems(options.args, flag), flag);
+    }
+  }
+  if (action === "view") {
+    positiveIssueNumber("view", rest);
+  }
+  if (action === "create") {
+    const title = flagValue(options.args, "--title");
+    if (!title || title.trim().length === 0) fail("issue create requires --title", 2);
+    if (
+      flagValue(options.args, "--body") !== undefined &&
+      flagValue(options.args, "--body-file") !== undefined
+    ) {
+      fail("--body and --body-file are mutually exclusive", 2);
+    }
+    if (rest.length > 0) fail("issue create takes no positional arguments", 2);
+    for (const flag of ["--label", "--assignee"] as const) {
+      assertForgeItems(flagItems(options.args, flag), flag);
+    }
+  }
+  if (action === "edit") {
+    positiveIssueNumber("edit", rest);
+    const hasField =
+      flagValue(options.args, "--title") !== undefined ||
+      flagValue(options.args, "--body") !== undefined ||
+      flagValue(options.args, "--body-file") !== undefined ||
+      flagItems(options.args, "--add-label").length > 0 ||
+      flagItems(options.args, "--remove-label").length > 0 ||
+      flagItems(options.args, "--add-assignee").length > 0 ||
+      flagItems(options.args, "--remove-assignee").length > 0 ||
+      flagValue(options.args, "--state") !== undefined;
+    if (!hasField) {
+      fail(
+        "issue edit requires at least one of --title/--body/--body-file/--add-label/--remove-label/--add-assignee/--remove-assignee/--state",
+        2,
+      );
+    }
+    const stateRaw = flagValue(options.args, "--state");
+    if (stateRaw !== undefined && !["open", "closed"].includes(stateRaw)) {
+      fail(`invalid --state: ${stateRaw}`, 2);
+    }
+    if (
+      flagValue(options.args, "--body") !== undefined &&
+      flagValue(options.args, "--body-file") !== undefined
+    ) {
+      fail("--body and --body-file are mutually exclusive", 2);
+    }
+    for (const flag of [
+      "--add-label",
+      "--remove-label",
+      "--add-assignee",
+      "--remove-assignee",
+    ] as const) {
+      assertForgeItems(flagItems(options.args, flag), flag);
+    }
+  }
+  if (action === "comment") {
+    positiveIssueNumber("comment", rest);
+  }
+  if (action === "close") {
+    positiveIssueNumber("close", rest);
+    const reason = flagValue(options.args, "--reason");
+    if (reason !== undefined && !["completed", "not planned"].includes(reason)) {
+      fail(`invalid --reason: ${reason}`, 2);
+    }
+  }
+
+  const repoFlag = flagValue(options.args, "--repo");
+  if (repoFlag !== undefined) {
+    if (repoFlag.startsWith("-") || !/^[^\s/]+\/[^\s/]+$/.test(repoFlag)) {
+      fail(`invalid --repo value: ${JSON.stringify(repoFlag)}`, 2);
+    }
+  }
+
+  const snapshot = await sessionSnapshot(options);
+  const pane = await findPaneChecked(snapshot, { paneId, ambient });
+  let repoRoot: string;
+  try {
+    repoRoot = (
+      await resolveRepo(paneCwd(pane), { timeoutMs: effectiveTimeoutMs(options, config) })
+    ).root;
+  } catch (err) {
+    if (err instanceof GitError) fail(err.message, 1, err.kind);
+    throw err;
+  }
+
+  try {
+    await ensureGh(repoRoot, { timeoutMs });
+  } catch (err) {
+    if (err instanceof GhError) fail(err.message, 1, err.kind);
+    throw err;
+  }
+
+  const forgeBase = {
+    contract: CONTRACT,
+    command: "issue",
+    pane_id: paneId,
+    repo_root: repoRoot,
+    generated_at: new Date().toISOString(),
+  };
+
+  try {
+    const repo = await resolveForgeRepo(repoRoot, { repo: repoFlag }, { timeoutMs });
+    const ghOptions = { timeoutMs };
+
+    if (action === "list") {
+      const stateRaw = (flagValue(options.args, "--state") ?? "open") as "open" | "closed" | "all";
+      const limitRaw = flagValue(options.args, "--limit");
+      const limit = limitRaw === undefined ? undefined : Number(limitRaw);
+      const issues = await collectIssueList(
+        repoRoot,
+        {
+          repo,
+          limit,
+          state: stateRaw,
+          label: flagItems(options.args, "--label"),
+          assignee: flagItems(options.args, "--assignee"),
+          author: flagValue(options.args, "--author"),
+        },
+        ghOptions,
+      );
+      emit({ ...forgeBase, action: "list", repo, issues });
+      return;
+    }
+
+    if (action === "view") {
+      const number = Number(rest[0]);
+      const issue = await collectIssueView(repoRoot, { repo, number }, ghOptions);
+      emit({ ...forgeBase, action: "view", repo, issue });
+      return;
+    }
+
+    if (action === "create") {
+      const title = flagValue(options.args, "--title") as string;
+      const bodyInput = await resolvePrBody(options.args);
+      const created = await collectIssueCreate(
+        repoRoot,
+        {
+          repo,
+          title,
+          body: bodyInput.body,
+          bodyFile: bodyInput.bodyFile,
+          labels: flagItems(options.args, "--label"),
+          assignees: flagItems(options.args, "--assignee"),
+        },
+        { ...ghOptions, bodyText: bodyInput.bodyText },
+      );
+      emit({
+        ...forgeBase,
+        action: "create",
+        repo,
+        ok: true,
+        url: created.url,
+        number: created.number,
+      });
+      return;
+    }
+
+    if (action === "edit") {
+      const number = Number(rest[0]);
+      const bodyInput = await resolvePrBody(options.args);
+      const stateRaw = flagValue(options.args, "--state");
+      const data = await updateIssue(
+        repoRoot,
+        {
+          repo,
+          number,
+          title: flagValue(options.args, "--title"),
+          body: bodyInput.body,
+          bodyFile: bodyInput.bodyFile,
+          addLabels: flagItems(options.args, "--add-label"),
+          removeLabels: flagItems(options.args, "--remove-label"),
+          addAssignees: flagItems(options.args, "--add-assignee"),
+          removeAssignees: flagItems(options.args, "--remove-assignee"),
+          state: stateRaw === undefined ? undefined : (stateRaw as "open" | "closed"),
+        },
+        { ...ghOptions, bodyText: bodyInput.bodyText },
+      );
+      emit({ ...forgeBase, action: "edit", repo, ok: true, ...data });
+      return;
+    }
+
+    if (action === "comment") {
+      const number = Number(rest[0]);
+      const bodyInput = await resolvePrBody(options.args);
+      const body = prBodyText(bodyInput);
+      if (body === undefined || body.trim().length === 0) {
+        fail("issue comment requires --body or --body-file", 2);
+      }
+      const data = await submitIssueComment(repoRoot, { repo, number, body }, ghOptions);
+      emit({ ...forgeBase, action: "comment", repo, ok: true, ...data });
+      return;
+    }
+
+    // action === "close"
+    const number = Number(rest[0]);
+    const data = await updateIssue(
+      repoRoot,
+      {
+        repo,
+        number,
+        state: "closed",
+        reason: flagValue(options.args, "--reason"),
+      },
+      ghOptions,
+    );
+    emit({ ...forgeBase, action: "close", repo, ok: true, ...data });
   } catch (err) {
     if (err instanceof GhError) fail(err.message, 1, err.kind);
     if (err instanceof GitError) fail(err.message, 1, err.kind);
@@ -1309,10 +2113,21 @@ async function cmdCapability(options: CliOptions): Promise<void> {
       "push",
       "remote",
       "pr",
+      "issue",
       "project",
     ],
     read_only: false,
-    mutation_commands: ["stage", "unstage", "commit", "branch", "upstream", "fetch", "push", "pr"],
+    mutation_commands: [
+      "stage",
+      "unstage",
+      "commit",
+      "branch",
+      "upstream",
+      "fetch",
+      "push",
+      "pr",
+      "issue",
+    ],
     requires: { git: true, bun: true },
     defaults: {
       timeoutMs: config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
@@ -1341,9 +2156,53 @@ Usage:
   git fetch <pane_id> [remote] [--prune]
   git push <pane_id> [--set-upstream] [--force-with-lease] [remote] [refspec]
   git remote <pane_id>
-  git pr list|status|create|view <pane_id> [args] [--repo owner/name]
+  git pr list|status|create|view|reviews|comments|checks|logs|merge
+      <pane_id> [args] [--repo owner/name]
       pr create: --title T [--body B | --body-file PATH|-] [--draft]
           [--base B] [--head B]
+      pr reviews|comments|checks <pane> <number>
+      pr logs <pane> <number> [--run ID | --job ID [--lines N]]
+  git pr review|comment|reply|reviewers|merge <pane_id> [args]
+      [--repo owner/name] --expect-head <full-sha>   (required)
+      pr review <pane> <number> --approve|--request-changes|--comment
+          [--body B | --body-file PATH|-]
+          [--comments-file PATH|-]   (JSON array: path/line/side/body)
+      pr comment <pane> <number> --body B|--body-file PATH|-
+      pr reply <pane> <number> <comment-id> --body B|--body-file PATH|-
+      pr reviewers <pane> <number>
+          [--add-reviewer LOGIN[,LOGIN]...] [--remove-reviewer LOGIN...]
+      pr merge <pane> <number> [--squash|--merge|--rebase]
+          [--auto | --disable-auto] --expect-head <full-sha>   (required)
+      --expect-head is the stale-head guard: pass head.sha (or
+      headRefOid/head.sha from pr view) from a prior pr read; the
+      mutation is refused (kind "stale_head") if the PR head moved.
+      pr merge re-verifies merge state (mergeStateStatus/
+      reviewDecision/isDraft) right before the write; non-mergeable
+      states fail with kind "merge_blocked". Release-train head
+      branches (release-x-y-z) are refused with kind
+      "release_boundary" — release approval stays a maintainer
+      decision. --auto arms GitHub auto-merge (method flag required);
+      --disable-auto disarms it.
+  git issue list|view|create|edit|comment|close <pane_id> [args]
+      [--repo owner/name]
+      issue list: [--limit N] [--state open|closed|all]
+          [--label L]... [--assignee U]... [--author U]
+      issue view <pane> <number>
+      issue create <pane> --title T [--body B | --body-file PATH|-]
+          [--label L]... [--assignee U]...
+      issue edit <pane> <number> [--title T] [--body B|--body-file PATH|-]
+          [--add-label L]... [--remove-label L]...
+          [--add-assignee U]... [--remove-assignee U]...
+          [--state open|closed]
+      issue comment <pane> <number> --body B|--body-file PATH|-
+      issue close <pane> <number> [--reason completed|"not planned"]
+      (no --expect-head: issues have no head sha; mutations are gated by
+      target resolution + explicit invocation only)
+  git issue link <pane_id> <owner>/<repo>#<n> [--verify]
+  git issue unlink <pane_id> <owner>/<repo>#<n>
+  git issue links <pane_id>
+      Pane↔issue links are stored by rebuildup.inbox (delegated via its
+      public CLI); requires the inbox plugin installed/resolvable.
   git project <pane_id> [--session NAME]
   git capability
 
@@ -1382,6 +2241,8 @@ async function main(): Promise<void> {
       return cmdRemote(options);
     case "pr":
       return cmdPr(options);
+    case "issue":
+      return cmdIssue(options);
     case "project":
       return cmdProject(options);
     case "capability":

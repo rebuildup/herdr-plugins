@@ -7,8 +7,17 @@ and merge-base branch comparison (`compare`). Local mutation commands
 (`stage`, `unstage`, `commit`, `branch`, `upstream`), remote
 operations (`fetch`, `push`, `remote` list), and the GitHub PR surface
 (`pr list|status|create|view` via the host `gh` CLI) landed in v0.2.0.
-Merge/review/CI-log and non-GitHub forges are later tickets. Checkpoint
-integration is Issue #4.
+v0.3.0 extends the PR surface with read-only review/check/log access
+(`pr reviews|comments|checks|logs`). v0.4.0 adds forge review/comment
+mutations (`pr review|comment|reply|reviewers`) behind a mandatory
+`--expect-head` stale-head guard. v0.5.0 adds `pr merge`
+(immediate merge / auto-merge enable / disable) behind the same guard
+plus merge-state re-verification and a release-train head refusal
+(ADR-0030). v0.6.0 adds the GitHub issue surface
+(`issue list|view|create|edit|comment|close` via `gh`) and pane↔issue
+links (`issue link|unlink|links`) delegated to `rebuildup.inbox`.
+Non-GitHub forges and merge-queue/stack specifics are
+later tickets. Checkpoint integration is Issue #4.
 
 ## Purpose
 
@@ -17,8 +26,9 @@ CLI, agents, and external clients (herdr-t3) can answer "what branch is
 this pane on, and is the worktree dirty?" without leaving herdr.
 
 herdr remains the authority for panes and workspaces. This plugin never
-creates, moves, or deletes worktrees and never mutates the repository; it
-only runs read-only `git` commands and projects display metadata.
+creates, moves, or deletes worktrees; local git mutations and forge
+writes are limited to the explicit allow-listed commands below and are
+invoked only on user/agent request.
 
 ## Identity and resolution
 
@@ -64,7 +74,8 @@ only runs read-only `git` commands and projects display metadata.
 | `fetch` | `git fetch [remote] [--prune]`; longer `remoteTimeoutMs` budget. |
 | `push` | `git push [--set-upstream] [--force-with-lease] [remote] [refspec]`; plain `--force` is never exposed. |
 | `remote` | Read-only remote list; URLs are reported with embedded credentials stripped. |
-| `pr` | GitHub PR surface via host `gh`: `list` / `status` / `create` / `view`. |
+| `pr` | GitHub PR surface via host `gh`: `list` / `status` / `create` / `view` / `reviews` / `comments` / `checks` / `logs` / `review` / `comment` / `reply` / `reviewers` / `merge`. |
+| `issue` | GitHub issue surface via host `gh`: `list` / `view` / `create` / `edit` / `comment` / `close`, plus pane↔issue `link` / `unlink` / `links` delegated to `rebuildup.inbox`. |
 | `project` | Compute `status` for a pane and project pane metadata tokens. |
 
 All commands accept `--session`, `--socket`, `--timeout` (overrides
@@ -226,11 +237,126 @@ client. Repo resolution is `gh repo view` inside the pane's repo root
   `--draft`/`--base`/`--head` pass through. The branch must already be
   pushed; gh's interactive push/prompt flow is never driven
   (`GH_PROMPT_DISABLED=1`, stdin closed immediately).
+- `pr reviews <n>` — submitted reviews (state/author/body ≤4000 chars/
+  submitted_at/commit_id) newest-50 capped, plus `review_requests`
+  (requested reviewer logins, team names) from `GET pulls/{n}` and
+  `GET pulls/{n}/reviews`.
+- `pr comments <n>` — issue comments (`issues/{n}/comments`) and line
+  review comments (`pulls/{n}/comments`: path/line/side/`in_reply_to_id`/
+  bounded `diff_hunk`), each newest-50 capped with independent
+  `*_truncated` flags.
+- `pr checks <n>` — `gh pr checks --json` per-check detail (name,
+  bucket/state, workflow, link, description, event, timings), capped at
+  100. Pending/failed checks are data; "no checks reported" maps to an
+  empty list.
+- `pr logs <n>` — Actions reads: default lists workflow runs for the
+  PR head sha (`gh run list --commit`, ≤20); `--run ID` lists that
+  run's jobs (≤50); `--job ID [--lines N]` returns a bounded log tail
+  (default 200 lines / 2000 max / 256 KiB hard cap) with `truncated`.
 - All `gh` calls are argv spawn under `remoteTimeoutMs` (default 60s);
   error messages echo subcommand words only, never argv content.
+- Every review/check/log payload echoes `head`/`base` `{ref, sha}` (and
+  `head_sha` for logs) so callers can pin mutations to a known head.
+- Forge mutations (v0.4.0, Issue #172): `pr review` submits
+  APPROVE/REQUEST_CHANGES/COMMENT via `POST pulls/{n}/reviews` —
+  including optional line comments from `--comments-file` (JSON array
+  of `{path, line, side?, body}`) since `gh pr review` cannot express
+  them; `pr comment` posts a conversation comment via
+  `POST issues/{n}/comments`; `pr reply` answers a review thread via
+  `POST pulls/{n}/comments/{id}/replies`; `pr reviewers` maps to
+  `gh pr edit --add-reviewer/--remove-reviewer`. All mutation payloads
+  go through `gh api --input -` (stdin) or plain argv flags — bodies
+  never appear in gh argv.
+- `pr merge` (v0.5.0, Issue #173, ADR-0030): three modes — immediate
+  merge (`PUT pulls/{n}/merge`, `sha` pinned to the verified head,
+  optional `--squash|--merge|--rebase`), auto-merge enable
+  (`POST pulls/{n}/auto-merge`, method flag required), and auto-merge
+  disable (`DELETE pulls/{n}/auto-merge`). On top of `--expect-head`,
+  the plugin re-fetches `mergeStateStatus`/`reviewDecision`/`isDraft`/
+  `headRefOid` via `gh pr view --json` immediately before the write.
+  Immediate merge proceeds only on `CLEAN`/`UNSTABLE`; other states,
+  drafts, and non-open PRs fail with `kind: "merge_blocked"` carrying
+  the observed values. Auto-merge refuses only `DIRTY`/`DRAFT`/
+  `UNKNOWN` (pending checks are its purpose) and reports the armed
+  `auto_merge_request`. gh HTTP 405/409/422 map to `merge_blocked`.
+  The result is re-fetched post-write: `result` is `merged` only when
+  GitHub's response says `merged: true` (`pending` otherwise), and
+  `state`/`auto_merge_request` reflect what GitHub recorded — merge
+  queue semantics are reported, never guessed.
+- **Stale-head guard (mandatory):** every forge mutation requires
+  `--expect-head <full sha>`; the plugin re-fetches the PR head
+  immediately before writing and refuses with `kind: "stale_head"` on
+  mismatch. Reviews pin `commit_id`; merges pin `sha` in the REST body.
+- **Release boundary:** mutations are explicit invocations only — no
+  automation path submits reviews, posts comments, requests reviewers,
+  merges, or auto-merges. `pr merge` hard-refuses PRs whose **head**
+  branch matches `release-<digits>(-<digits>)*` with
+  `kind: "release_boundary"` (merge and auto-merge alike): `release-* ->
+  main` approval stays a maintainer decision (github-delivery skill).
+  Ticket PRs targeting a release branch as base are unaffected.
 - The plugin exposes PR state but never acts on merge/review gates;
-  merge, reviews, line comments, CI logs, and non-GitHub forges are
-  out of scope for v0.2.0.
+  editing or deleting existing reviews/comments, merge-queue
+  manipulation, GitHub stack merges, `pr checkout`/worktree creation
+  (herdr/Worktrunk lifecycle responsibility — reference only), and
+  non-GitHub forges are out of scope.
+
+## Forge: GitHub issues via `gh` (Issue #174)
+
+`issue <action> <pane_id>` extends the same `gh`-CLI surface to issues:
+identical repo resolution (`gh repo view` in the pane's repo root,
+`--repo owner/name` override validated before any call), preflight
+(`gh --version` ≥ 2.81.0 + `gh auth status`), argv spawn, and sanitized
+child env. Per-action flag whitelists apply exactly like `pr`.
+
+- `issue list` — `gh issue list --json` fixed fields (number, title,
+  state, labels, assignees, author, createdAt, updatedAt, url) with
+  `--limit` (1–1000), `--state open|closed|all` (default `open`),
+  repeatable/comma-separated `--label`/`--assignee`, and `--author`.
+- `issue view <n>` — bounded projection: body ≤ 8000 chars
+  (`body_truncated`), newest 50 comments with per-comment body ≤ 4000
+  (`comments_truncated`), reactions flattened to `{content, count}`
+  (≤20), author/labels/assignees/milestone compacted to strings.
+- `issue create` — requires `--title`; `--body`/`--body-file PATH|-`
+  with the same never-in-argv discipline as `pr create`;
+  `--label`/`--assignee` repeatable. Returns `{url, number}` parsed
+  from gh's output.
+- `issue edit <n>` — requires ≥1 field flag (`--title`, `--body`/
+  `--body-file`, `--add-label`/`--remove-label`,
+  `--add-assignee`/`--remove-assignee`, `--state open|closed`). Runs
+  `gh issue edit` then `gh issue close|reopen` for state, then
+  re-fetches a bounded view — the payload echoes post-mutation state.
+- `issue comment <n>` — `POST issues/{n}/comments` via
+  `gh api --input -`; body never in argv.
+- `issue close <n>` — `gh issue close` with optional
+  `--reason completed|"not planned"`, then the same post-state echo.
+- **No `--expect-head` analog:** issues have no head sha. Mutation
+  safety is the `options.mutation` target gate (explicit/consistent
+  target required) plus explicit invocation only; `edit`/`close`
+  always echo the re-fetched post-mutation state. gh auth/permission
+  scope is delegated to `gh auth` — the plugin never handles tokens.
+- All forge mutations (`create`/`edit`/`comment`/`close`) are explicit
+  invocations only; there is no automation path. Issue tracking
+  operations never bypass PR review/merge gates.
+
+### Pane↔issue links (delegated to `rebuildup.inbox`)
+
+`issue link <pane> <owner>/<repo>#<n> [--verify]`,
+`issue unlink <pane> <owner>/<repo>#<n>`, and `issue links <pane>` are a
+thin delegating surface over the inbox plugin's public CLI
+(`herdr-plugins.inbox/v1` `link --issue`/`unlink --issue`/`links`) —
+the ADR-0013 sibling-plugin pattern (override `inboxPluginRoot` in
+`config.json` → sibling `../inbox` → `herdr plugin list --json`). The
+git plugin stores **no link state**: pane↔issue associations are
+pane-scoped work links owned by inbox (identity fingerprint +
+seq-regression staleness, retention, `pane.closed` drop), while the
+forge operations above are repo-scoped tracker mutations — the two
+responsibilities stay separate and share no state. Delegated payloads
+are re-wrapped under the git contract with `delegated:
+"rebuildup.inbox"`; inbox errors propagate via `error.kind`
+(`target_required`, `target_conflict`, `inbox_error`, …) and an
+unresolvable inbox plugin is `inbox_unavailable`, never a fabricated
+empty result. `issue link`/`unlink` are mutations gated by the
+inbox CLI's own target resolution; `issue links` is read-only.
 
 ## Metadata projection
 
@@ -262,12 +388,14 @@ Unknown keys are ignored; invalid values fall back to defaults.
 ## Non-goals
 
 - No daemon, no hooks that write plugin state, no polling.
-- No PR merge/review/CI-log operations and no non-GitHub forge
-  integrations (the `gh`-CLI PR foundation covers list/status/create/
-  view only; upstream `source-control.md`'s wider surface — review
-  comments, reviewers, auto-merge, GitLab/Forgejo/Gitea/Bitbucket/
-  Azure DevOps/GitCafe/Cursor Origin — is tracked in the feature
-  ledger for later trains).
+- No merge-queue manipulation, GitHub stack merges, editing/deleting
+  existing reviews or comments, and no non-GitHub forge integrations
+  (the `gh`-CLI PR surface covers list/status/create/view plus
+  read-only reviews/comments/checks/logs and explicit
+  review/comment/reviewer/merge mutations behind `--expect-head`;
+  upstream `source-control.md`'s wider surface — GitLab/Forgejo/Gitea/
+  Bitbucket/Azure DevOps/GitCafe/Cursor Origin — is tracked in the
+  feature ledger for later trains).
 - No destructive git operations (see Local mutations).
 - No parsing of GitHub remotes beyond what `gh`/git provide, no provider
   integrations.

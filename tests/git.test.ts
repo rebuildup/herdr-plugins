@@ -696,4 +696,32 @@ describe("cli usage errors", () => {
     expectUsage(["pr", "list", "p1", "--state", "bogus"]);
     expectUsage(["pr", "list", "p1", "--limit", "0"]);
   }, 60_000);
+  test("issue validates action, per-action flags, and required args", () => {
+    expectUsage(["issue"]);
+    expectUsage(["issue", "bogus", "p1"]);
+    expectUsage(["issue", "list", "p1", "--title", "t"]); // --title is create-only
+    expectUsage(["issue", "view", "p1"]); // missing issue number
+    expectUsage(["issue", "view", "p1", "abc"]);
+    expectUsage(["issue", "view", "p1", "1", "2"]);
+    expectUsage(["issue", "list", "p1", "extra"]);
+    expectUsage(["issue", "list", "p1", "--state", "bogus"]);
+    expectUsage(["issue", "list", "p1", "--limit", "0"]);
+    expectUsage(["issue", "create", "p1"]); // missing --title
+    expectUsage(["issue", "create", "p1", "--title", "t", "--body", "b", "--body-file", "f"]);
+    expectUsage(["issue", "create", "p1", "--title", "t", "extra"]);
+    expectUsage(["issue", "create", "p1", "--title", "t", "--repo", "not-a-repo"]);
+    expectUsage(["issue", "edit", "p1"]); // missing number
+    expectUsage(["issue", "edit", "p1", "1"]); // no fields to update
+    expectUsage(["issue", "edit", "p1", "1", "--state", "bogus"]);
+    expectUsage(["issue", "edit", "p1", "1", "--title", "t", "--body", "b", "--body-file", "f"]);
+    expectUsage(["issue", "comment", "p1"]); // missing number
+    expectUsage(["issue", "close", "p1", "1", "--reason", "bogus"]);
+    expectUsage(["issue", "link", "p1"]); // missing ref
+    expectUsage(["issue", "link", "p1", "not-a-ref"]);
+    expectUsage(["issue", "link", "p1", "owner/repo#0"]);
+    expectUsage(["issue", "link", "p1", "owner/repo#5", "extra"]);
+    expectUsage(["issue", "unlink", "p1", "owner/repo"]);
+    expectUsage(["issue", "links", "p1", "extra"]);
+    expectUsage(["issue", "links", "p1", "--verify"]); // --verify is link-only
+  }, 60_000);
 });

@@ -1,12 +1,21 @@
 id = "rebuildup.projects"
 name = "Projects"
-version = "0.3.0"
+version = "0.4.0"
 min_herdr_version = "0.9.0"
-description = "Project registry for herdr panes: multi-repo grouping, pin/archive, settings overrides, and project-defined scripts."
+description = "Project registry for herdr panes: multi-repo grouping, pin/archive, settings overrides, project-defined scripts, runOnWorktreeCreate auto-triggers, the read-only repo↔worktree/diff association on repos list, and runOnSettle/stopOnSettle triggers via the inbox organize-transition log (contract herdr-plugins.projects/v1, stable; additive v0.4.0)."
 platforms = ["linux", "macos", "windows"]
 
 # No build step: the plugin is dependency-free TypeScript executed by Bun
 # (runtime prerequisite, see plugins/projects/README.md).
 #
+# Event hooks (#180): `worktree.created` appends a pending trigger mark
+# (src/hook.ts — no socket/git work, must never affect herdr, ADR-0002).
+# Marks drain lazily on the next `scripts`-family CLI call; no daemon,
+# no polling (same mechanism as plugins/automations #146).
+#
 # No [[actions]] yet: registry commands are session-scoped, not pane-scoped,
 # and mutations require explicit arguments (CLI/agent invocation only).
+
+[[events]]
+on = "worktree.created"
+command = ["bun", "run", "src/hook.ts"]

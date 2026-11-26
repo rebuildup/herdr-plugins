@@ -66,6 +66,27 @@ export const ACTIVE_RUN_RESULTS: ReadonlySet<RunResult> = new Set([
   "stop_unconfirmed",
 ]);
 
+/**
+ * What started a run (#180/#182, additive). `manual` = explicit
+ * `scripts run`; `worktree.created` = auto-trigger drain carrying the
+ * event's worktree path and hook receipt time; `inbox.settled` =
+ * settle-trigger drain carrying the pane id and transition seq/at.
+ * Optional on disk — records written before #180 lack the field.
+ */
+export interface RunTrigger {
+  kind: "manual" | "worktree.created" | "inbox.settled";
+  /** Event-sourced checkout path (triggered runs only). */
+  worktree_path?: string;
+  /** Hook `received_at` of the triggering mark (triggered runs only). */
+  event_received_at?: string;
+  /** Settled pane id (inbox.settled runs only, #182). */
+  pane_id?: string;
+  /** Inbox transition `seq` that fired the run — the idempotency key. */
+  transition_seq?: number;
+  /** Inbox transition `at` timestamp (inbox.settled runs only). */
+  transition_at?: string;
+}
+
 export interface RunScriptRef {
   id: string;
   name: string;
@@ -122,6 +143,8 @@ export interface ScriptRun {
   log_path: string | null;
   /** Last structured error observed (pane gone, socket failure, …). */
   error: string | null;
+  /** Run origin (#180); absent on records predating the field. */
+  trigger?: RunTrigger;
 }
 
 export interface RunsState {
