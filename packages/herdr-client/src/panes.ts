@@ -151,6 +151,19 @@ export async function paneSendInput(
   return request(socketFor(options), "pane.send_input", { pane_id: paneId, ...params }, options);
 }
 
+/**
+ * `pane.send_text` — literal text into the pane with NO Enter/submit
+ * (spike-verified: text lands on the input line only). Distinct from
+ * `pane.send_input`, which can append key names such as `["Enter"]`.
+ */
+export async function paneSendText(
+  paneId: string,
+  text: string,
+  options: CallOptions = {},
+): Promise<unknown> {
+  return request(socketFor(options), "pane.send_text", { pane_id: paneId, text }, options);
+}
+
 /** `pane.send_keys` — key names only (e.g. ["ctrl+c"]). */
 export async function paneSendKeys(
   paneId: string,

@@ -28,6 +28,9 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
+import { agentPrompt } from "../../../packages/herdr-client/src/agents";
+import type { CallOptions } from "../../../packages/herdr-client/src/commands";
+import { paneSendText } from "../../../packages/herdr-client/src/panes";
 import type { SessionSnapshot } from "../../../packages/herdr-client/src/snapshot";
 import {
   ARTIFACT_ID_PATTERN,
@@ -876,6 +879,315 @@ export async function verifyArtifacts(options: VerifyOptions): Promise<{
   return {
     results,
     summary,
+    orphans: await orphanIds(new Set(Object.keys(state.artifacts))),
+    corrupt: [...state.corrupt].sort(),
+  };
+}
+
+// --- Delivery (T4 #143, ADR-0024 §3) -----------------------------------------
+
+/**
+ * v1 "attachment": the artifact's stable absolute path embedded in text
+ * delivered through `agent.prompt` (target = pane hosting a live agent)
+ * or `pane.send_text` (target = plain pane; literal text, no Enter).
+ * There is no structured attachment API in herdr protocol 22 — the gap
+ * is an upstream Issue candidate, not worked around (ADR-0024 §3).
+ */
+export type DeliverTargetKind = "agent" | "pane";
+
+export interface DeliverTarget {
+  kind: DeliverTargetKind;
+  paneId: string;
+}
+
+/** Transport seams; defaults hit the real herdr socket wrappers. */
+export interface DeliverDeps {
+  agentPrompt?: ((target: string, text: string) => Promise<unknown>) | undefined;
+  paneSendText?: ((paneId: string, text: string) => Promise<unknown>) | undefined;
+}
+
+export interface DeliverOptions {
+  artifactId: string;
+  target: DeliverTarget;
+  /** Optional free-text note appended to the delivery message. */
+  note?: string | undefined;
+  /** Live snapshot for target staleness checks (pane/agent existence). */
+  snapshot: SessionSnapshot;
+  /** Socket/session resolution for the default transports. */
+  callOptions?: CallOptions | undefined;
+  deps?: DeliverDeps | undefined;
+}
+
+export interface DeliverResult {
+  artifact_id: string;
+  target: { kind: DeliverTargetKind; pane_id: string };
+  /** Wire method used: `agent.prompt` or `pane.send_text`. */
+  method: "agent.prompt" | "pane.send_text";
+  /** The exact text sent — auditable, never fabricated. */
+  message: string;
+  artifact: AnnotatedArtifact;
+}
+
+/**
+ * Assemble the delivery text: a provenance-tagged header, the stable
+ * absolute path on its own line (the v1 attachment), and minimal
+ * metadata an agent needs to sanity-check what it is being handed.
+ */
+export function buildDeliveryText(record: ArtifactRecord, note?: string): string {
+  const title = record.title !== undefined ? ` "${record.title}"` : "";
+  const lines = [
+    `[artifacts] ${record.artifact_id} — ${record.kind} artifact${title}`,
+    `path: ${record.storage.resolved_path}`,
+    `mime: ${record.mime} · size: ${record.size} bytes · sha256: ${record.sha256}`,
+  ];
+  if (note !== undefined && note !== "") lines.push(`note: ${note}`);
+  return lines.join("\n");
+}
+
+function rpcCode(err: unknown): string | undefined {
+  const code = (err as { code?: unknown }).code;
+  return typeof code === "string" && code !== "" ? code : undefined;
+}
+
+/**
+ * Deliver one artifact's path reference to a pane or its agent.
+ *
+ * Refusals (all structured, never silent):
+ * - `artifact_not_found` — unknown/malformed id (from getArtifact).
+ * - `missing_ref` — payload absent/unsafe; delivering a dead path
+ *   would fabricate a usable attachment, so it is refused.
+ * - `target_not_found` — pane id absent from the live snapshot (stale
+ *   or wrong-session pane; never deliver into the void).
+ * - `agent_not_found` — `--agent` target pane has no live agent in the
+ *   snapshot (`agent.prompt` would be meaningless).
+ * - `delivery_failed` — herdr rejected or the transport failed; the
+ *   upstream RPC `code` (e.g. `agent_blocked`) is preserved in
+ *   `rpc_code`.
+ *
+ * Delivery is side-effect free on the index: the sent text lives in
+ * pane/agent scrollback, which is not durable state the plugin owns,
+ * so no `refs` entry is fabricated (AGENTS §4).
+ */
+export async function deliverArtifact(options: DeliverOptions): Promise<DeliverResult> {
+  const artifact = await getArtifact(options.artifactId, options.snapshot);
+  if (artifact.missing_ref) {
+    fail(
+      "missing_ref",
+      "not_found",
+      `artifact ${options.artifactId} payload is missing; refusing to deliver a dead path`,
+      {
+        artifact_id: options.artifactId,
+        warnings: artifact.warnings,
+      },
+    );
+  }
+
+  const paneId = options.target.paneId;
+  const pane = (options.snapshot.panes ?? []).find((p) => p.pane_id === paneId);
+  if (pane === undefined) {
+    fail(
+      "target_not_found",
+      "not_found",
+      `deliver target pane not present in live session: ${paneId}`,
+      { pane_id: paneId, target_kind: options.target.kind },
+    );
+  }
+  if (options.target.kind === "agent" && options.snapshot.agents?.[paneId] === undefined) {
+    fail("agent_not_found", "not_found", `deliver target pane has no live agent: ${paneId}`, {
+      pane_id: paneId,
+      target_kind: options.target.kind,
+    });
+  }
+
+  const message = buildDeliveryText(artifact, options.note);
+  const callOptions = options.callOptions ?? {};
+  const sendAgent =
+    options.deps?.agentPrompt ??
+    ((target: string, text: string) => agentPrompt(target, text, undefined, callOptions));
+  const sendPane =
+    options.deps?.paneSendText ??
+    ((id: string, text: string) => paneSendText(id, text, callOptions));
+
+  try {
+    if (options.target.kind === "agent") {
+      await sendAgent(paneId, message);
+    } else {
+      await sendPane(paneId, message);
+    }
+  } catch (err) {
+    if (err instanceof RegistryError) throw err;
+    const code = rpcCode(err);
+    fail(
+      "delivery_failed",
+      "unavailable",
+      `deliver send failed for pane ${paneId}: ${err instanceof Error ? err.message : String(err)}`,
+      {
+        pane_id: paneId,
+        target_kind: options.target.kind,
+        ...(code !== undefined ? { rpc_code: code } : {}),
+      },
+    );
+  }
+
+  return {
+    artifact_id: artifact.artifact_id,
+    target: { kind: options.target.kind, pane_id: paneId },
+    method: options.target.kind === "agent" ? "agent.prompt" : "pane.send_text",
+    message,
+    artifact,
+  };
+}
+
+// --- Retention (T4 #143) -------------------------------------------------------
+
+export interface GcOptions {
+  /** ISO-8601; artifacts with created_at strictly before this are expired. */
+  olderThan: string;
+  /** Report only — no index or payload mutation. */
+  dryRun: boolean;
+}
+
+export type GcAction = "deleted" | "would_delete" | "skipped";
+
+export interface GcEntry {
+  artifact_id: string;
+  action: GcAction;
+  /** Why a candidate was not deleted. */
+  reason?: "referenced" | "invalid_created_at" | "delete_failed";
+  storage_mode?: StorageMode;
+  removed_payload?: boolean;
+  error?: string;
+}
+
+export interface GcResult {
+  policy: { older_than: string };
+  dry_run: boolean;
+  evaluated: number;
+  expired: number;
+  entries: GcEntry[];
+  totals: {
+    evaluated: number;
+    expired: number;
+    deleted: number;
+    would_delete: number;
+    skipped_referenced: number;
+    skipped_other: number;
+    kept: number;
+    errors: number;
+  };
+  orphans: string[];
+  corrupt: string[];
+}
+
+/**
+ * `gc` — bounded retention for artifact records (contract v1, same
+ * shape as checkpoints gc). Candidates are records whose `created_at`
+ * is strictly before `--older-than`; among those, records carrying
+ * `refs` (handoff/conversations/checkpoint back-references) are NEVER
+ * collected — they are reported `skipped`/`referenced` and require an
+ * explicit `delete --force`. `path_ref` records lose only their index
+ * entry; external files are never removed by the plugin.
+ *
+ * Unparseable `created_at` is treated as not-provably-expired and
+ * skipped — retention never guesses. Orphan payload dirs (no index
+ * record) are reported via `orphans`, not collected: without a record
+ * there is no honest age/ownership evidence. `--dry-run` performs the
+ * full evaluation without mutating anything.
+ *
+ * gc needs no live herdr session — it is pure plugin-state work.
+ */
+export async function gcArtifacts(options: GcOptions): Promise<GcResult> {
+  const threshold = Date.parse(options.olderThan);
+  if (Number.isNaN(threshold)) {
+    fail("usage", "invalid", `--older-than must be an ISO-8601 timestamp: ${options.olderThan}`);
+  }
+  const state = await loadState();
+  const records = Object.values(state.artifacts);
+
+  const entries: GcEntry[] = [];
+  const totals = {
+    evaluated: records.length,
+    expired: 0,
+    deleted: 0,
+    would_delete: 0,
+    skipped_referenced: 0,
+    skipped_other: 0,
+    kept: 0,
+    errors: 0,
+  };
+
+  const candidates: ArtifactRecord[] = [];
+  for (const record of records) {
+    const created = Date.parse(record.created_at);
+    if (Number.isNaN(created)) {
+      entries.push({
+        artifact_id: record.artifact_id,
+        action: "skipped",
+        reason: "invalid_created_at",
+        storage_mode: record.storage.mode,
+      });
+      totals.skipped_other += 1;
+      continue;
+    }
+    if (created >= threshold) {
+      totals.kept += 1;
+      continue;
+    }
+    totals.expired += 1;
+    if (record.refs !== undefined && record.refs.length > 0) {
+      entries.push({
+        artifact_id: record.artifact_id,
+        action: "skipped",
+        reason: "referenced",
+        storage_mode: record.storage.mode,
+      });
+      totals.skipped_referenced += 1;
+      continue;
+    }
+    candidates.push(record);
+  }
+
+  if (options.dryRun) {
+    for (const record of candidates) {
+      entries.push({
+        artifact_id: record.artifact_id,
+        action: "would_delete",
+        storage_mode: record.storage.mode,
+      });
+      totals.would_delete += 1;
+    }
+  } else {
+    for (const record of candidates) {
+      try {
+        const removed = await deleteArtifact(record.artifact_id, false);
+        entries.push({
+          artifact_id: record.artifact_id,
+          action: "deleted",
+          storage_mode: removed.storage_mode,
+          removed_payload: removed.removed_payload,
+        });
+        totals.deleted += 1;
+      } catch (err) {
+        entries.push({
+          artifact_id: record.artifact_id,
+          action: "skipped",
+          reason: "delete_failed",
+          storage_mode: record.storage.mode,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        totals.errors += 1;
+      }
+    }
+  }
+
+  entries.sort((a, b) => a.artifact_id.localeCompare(b.artifact_id));
+  return {
+    policy: { older_than: options.olderThan },
+    dry_run: options.dryRun,
+    evaluated: records.length,
+    expired: totals.expired,
+    entries,
+    totals,
     orphans: await orphanIds(new Set(Object.keys(state.artifacts))),
     corrupt: [...state.corrupt].sort(),
   };

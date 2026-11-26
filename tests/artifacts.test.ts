@@ -98,11 +98,11 @@ function runCli(args: string[], extraEnv?: Record<string, string>): CliResult {
 }
 
 describe("artifacts contract constants", () => {
-  test("contract identity and draft status", () => {
+  test("contract identity and stable status", () => {
     expect(CONTRACT).toBe("herdr-plugins.artifacts/v1");
-    expect(CONTRACT_STATUS).toBe("draft");
+    expect(CONTRACT_STATUS).toBe("stable");
     expect(PLUGIN_ID).toBe("rebuildup.artifacts");
-    expect(PLUGIN_VERSION).toBe("0.1.0");
+    expect(PLUGIN_VERSION).toBe("0.2.0");
   });
 
   test("kinds, storage modes, and caps match the contract skeleton", () => {
@@ -118,14 +118,14 @@ describe("artifacts contract constants", () => {
   });
 });
 
-describe("artifacts cli (draft scaffold)", () => {
-  test("capability emits the draft contract without herdr", () => {
+describe("artifacts cli (stable contract)", () => {
+  test("capability emits the stable contract without herdr", () => {
     const result = runCli(["capability"]);
     expect(result.status).toBe(0);
     expect(result.json).not.toBeNull();
     const doc = result.json as Record<string, unknown>;
     expect(doc.contract).toBe(CONTRACT);
-    expect(doc.contract_status).toBe("draft");
+    expect(doc.contract_status).toBe("stable");
     expect(doc.plugin).toBe(PLUGIN_ID);
     expect(doc.version).toBe(PLUGIN_VERSION);
     expect(doc.kinds).toEqual([...ARTIFACT_KINDS]);
@@ -141,8 +141,12 @@ describe("artifacts cli (draft scaffold)", () => {
       "search",
       "verify",
       "delete",
+      "deliver",
+      "gc",
+      "export",
     ]);
     expect(doc.planned_commands).toEqual([...PLANNED_COMMANDS]);
+    expect(doc.planned_commands).toEqual([]);
   });
 
   test("help emits usage JSON", () => {
@@ -165,15 +169,13 @@ describe("artifacts cli (draft scaffold)", () => {
     expect(result.error?.code).toBe("usage");
   });
 
-  test("unimplemented planned commands fail with contract_draft", () => {
-    for (const command of [...PLANNED_COMMANDS]) {
+  test("v1 is stable: no contract_draft commands remain", () => {
+    // PLANNED_COMMANDS is empty since T4 (#143); deliver/gc/export are
+    // implemented and covered by tests/artifacts-t4.test.ts.
+    expect(PLANNED_COMMANDS).toEqual([]);
+    for (const command of ["deliver", "gc", "export"]) {
       const result = runCli([command]);
-      expect(result.status).toBe(1);
-      expect(result.json).toBeNull();
-      expect(result.error?.kind).toBe("contract_draft");
-      const envelope = JSON.parse(result.stderr) as Record<string, unknown>;
-      expect(envelope.contract).toBe(CONTRACT);
-      expect(envelope.ok).toBe(false);
+      expect(result.error?.kind).not.toBe("contract_draft");
     }
   });
 

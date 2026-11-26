@@ -112,8 +112,10 @@ structured attachment API is **not required for v1**.
 Upstream gap assessment: a structured pane/agent attachment API
 (protocol 22 has none) would only be needed if providers require
 non-path attachment parts (inline images, provider-specific upload
-APIs). That is recorded as an **upstream Issue candidate**, deferred —
-not worked around by fabricating attachment state.
+APIs). That is recorded as upstream
+[herdrdev/herdr#6200](https://github.com/herdrdev/herdr/issues/6200)
+(filed at T4, #143) — deferred, not worked around by fabricating
+attachment state.
 
 ### 4. Safety boundary for HTML artifacts
 

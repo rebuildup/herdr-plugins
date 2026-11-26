@@ -1,4 +1,4 @@
-# Contract `herdr-plugins.artifacts/v1` (DRAFT)
+# Contract `herdr-plugins.artifacts/v1` (STABLE)
 
 Structured JSON CLI contract for the `rebuildup.artifacts` herdr
 plugin — an artifact registry that registers, validates, indexes,
@@ -7,13 +7,14 @@ generic files). Design boundary:
 [`docs/adr/0024-artifacts-boundary.md`](../adr/0024-artifacts-boundary.md).
 Specification: [`docs/specs/artifacts.md`](../specs/artifacts.md).
 
-**Status: DRAFT.** T1 (#136) shipped `capability`/`help`; T2 (#141)
-implements the registry core `register`/`list`/`get`/`search`/`delete`;
-T3 (#142) adds kind-specific validation, richer search filters, and
-`verify`; `deliver`/`gc` remain planned for T4 (#143). The
-contract is versioned `herdr-plugins.artifacts/v1` from the start;
-fields may be added additively, removals/renames require a version
-bump.
+**Status: STABLE (v1).** T1 (#136) shipped `capability`/`help`; T2
+(#141) implemented the registry core `register`/`list`/`get`/
+`search`/`delete`; T3 (#142) added kind-specific validation, richer
+search filters, and `verify`; T4 (#143) added `deliver`/`gc`/`export`
+and stabilized the contract. From here the contract changes
+**additively only** — new commands, new optional fields, new enum
+values; removals, renames, and semantic changes require a version
+bump (`herdr-plugins.artifacts/v2`).
 
 ## Discovery
 
@@ -21,7 +22,7 @@ bump.
    `plugin_root`.
 2. `cd <plugin_root> && bun run src/cli.ts capability` → verify
    `contract == "herdr-plugins.artifacts/v1"`, `contract_status ==
-   "draft"`, and the commands you need exist.
+   "stable"`, and the commands you need exist.
 
 ## Invocation
 
@@ -41,19 +42,23 @@ bun run src/cli.ts search  <query> [--kind KIND] [--pane PANE] [--agent SESSION]
                            [--since ISO] [--until ISO] [--limit N]
 bun run src/cli.ts verify  [<artifact_id>]
 bun run src/cli.ts delete  <artifact_id> [--force]
-# --- planned (T4 #143) ---
-bun run src/cli.ts deliver --pane PANE|--agent PANE <artifact_id>
-bun run src/cli.ts gc      [--older-than ISO] [--dry-run]
+# --- delivery / retention / client export (T4 #143) ---
+bun run src/cli.ts deliver --pane PANE|--agent PANE <artifact_id> [--note TEXT]
+bun run src/cli.ts gc      --older-than ISO [--dry-run]
+bun run src/cli.ts export  [--kind KIND] [--pane PANE] [--agent SESSION]
+                           [--created-by CREATED_BY] [--session NAME] [--limit N]
 ```
 
 - All commands print exactly one JSON document on stdout. Handled
   errors print `{contract, ok:false, error:{code,message,kind?}}` on
   **stderr** and exit 1; usage errors exit 2.
 - `capability`/`help` work without a reachable herdr session.
-  Registry commands (`register`/`list`/`get`/`search`/`verify`/`delete`)
-  resolve the live session via `session.snapshot` for host/session/owner
-  identity and `owner_stale` reporting; unreachable session →
-  `kind:"session_unreachable"` exit 1.
+  Session-bound commands (`register`/`list`/`get`/`search`/`verify`/
+  `delete`/`deliver`/`export`) resolve the live session via
+  `session.snapshot` for host/session/owner identity, `owner_stale`
+  reporting, and deliver target staleness; unreachable session →
+  `kind:"session_unreachable"` exit 1. `gc` is pure plugin-state work
+  and needs no session (it runs offline).
 - `register` accepts `--path FILE` or `--stdin` (bytes on stdin;
   `path_ref` storage requires `--path` since stdin has no stable
   ref). `--kind` is inferred from extension then leading-byte MIME
@@ -78,19 +83,30 @@ bun run src/cli.ts gc      [--older-than ISO] [--dry-run]
   values are usage errors) and free-text matching over identity,
   kind/mime, filename, owner fields, host, session, and `refs` —
   metadata only, never payload bytes.
+- `deliver` requires exactly one of `--pane` (plain pane →
+  `pane.send_text`, literal text, no Enter) or `--agent` (pane hosting
+  a live agent → `agent.prompt`, which submits to the agent).
+  `--note TEXT` appends a note line to the message. See
+  [Delivery](#delivery-deliver) below.
+- `gc` requires `--older-than ISO` (invalid → usage error) and
+  supports `--dry-run`. See [Retention](#retention-gc) below.
+- `export` is the herdr-t3 client read surface: the same annotated
+  records as `list`, unfiltered by default (`--limit N` truncates and
+  `complete:false` reports it honestly). Metadata + `resolved_path`
+  only — never payload bytes.
 
 ## `capability`
 
 ```json
 {
   "contract": "herdr-plugins.artifacts/v1",
-  "contract_status": "draft",
+  "contract_status": "stable",
   "command": "capability",
   "plugin": "rebuildup.artifacts",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "read_only": false,
-  "mutation_commands": ["register", "delete"],
-  "commands": ["capability", "register", "list", "get", "search", "verify", "delete", "deliver", "gc"],
+  "mutation_commands": ["register", "delete", "deliver", "gc"],
+  "commands": ["capability", "register", "list", "get", "search", "verify", "delete", "deliver", "gc", "export"],
   "kinds": ["html", "image", "pdf", "file", "other"],
   "storage_modes": ["state_copy", "path_ref"],
   "limits": {
@@ -102,10 +118,10 @@ bun run src/cli.ts gc      [--older-than ISO] [--dry-run]
 }
 ```
 
-`limits.max_bytes` are the draft per-kind caps in bytes (upstream T3
-values: image 10 MiB, others 25 MiB; tunable before stable). For
-`path_ref` records the cap is not enforced at register — oversize is
-reported as `oversize: true` on `get`/`list` and left to the client.
+`limits.max_bytes` are the per-kind caps in bytes (upstream T3 values:
+image 10 MiB, others 25 MiB). For `path_ref` records the cap is not
+enforced at register — oversize is reported as `oversize: true` on
+`get`/`list` and left to the client.
 
 ## Artifact record
 
@@ -143,6 +159,28 @@ atomic-rename discipline (AGENTS §4):
   }
 }
 ```
+
+### Cross-plugin references (`refs`, additive)
+
+`refs[]` entries are opaque strings supplied at `register` (`--ref`,
+repeatable) by the owning plugin or user. Consumers SHOULD use a
+`<plugin>:<kind>/<id>` shape so `search`/`delete` reference detection
+stays meaningful across plugins:
+
+- `conversations:session/<session_key>` / `conversations:event/<id>` —
+  transcript index entries that produced or consumed the artifact.
+- `handoff:record/<handoff_id>` — handoff payload referencing the
+  artifact (handoff payload refs may point back via
+  `external`/`uri` refs carrying the `artifact_id` or `resolved_path`;
+  the relationship is additive in both directions and neither side
+  copies the other's state).
+- `checkpoints:entry/<id>` — checkpoint diff that produced the
+  artifact.
+
+`delete` refuses any record with non-empty `refs` unless `--force`
+(`referenced`); `gc` skips referenced records the same way. The plugin
+never resolves or validates ref targets — resolution is the consumer's
+job through the owning plugin's public contract.
 
 `meta` is optional advisory metadata. It is present only for
 `kind:"html"` and records the render-isolation notice: consumers must
@@ -237,24 +275,147 @@ inconsistencies exactly like `list`/`search`.
   "error": { "code": "artifact_not_found", "message": "…", "kind": "not_found" } }
 ```
 
-on stderr, exit 1. Planned `error.code` values (draft):
+on stderr, exit 1. `error.code` is the contract-specific code,
+`error.kind` the coarse category (`not_found`/`invalid`/`unavailable`/
+`stale`/`warning`/`session_unreachable`):
 
 | code | kind | meaning |
 | --- | --- | --- |
 | `artifact_not_found` | `not_found` | unknown or malformed artifact_id |
+| `target_not_found` | `not_found` | deliver target pane absent from the live session (stale/wrong-session pane) |
+| `agent_not_found` | `not_found` | deliver `--agent` target pane has no live agent in the snapshot |
+| `missing_ref` | `not_found` | deliver refused: payload absent/unsafe (a dead path is never delivered); on reads it surfaces as `missing_ref: true` + warning instead |
+| `delivery_failed` | `unavailable` | deliver send rejected/failed; upstream RPC `code` preserved in `rpc_code` (e.g. `agent_blocked`) |
 | `path_outside_root` / `traversal_denied` | `invalid` | path-traversal / symlink escape attempt |
 | `too_large` | `invalid` | state_copy exceeds per-kind cap |
 | `mime_mismatch` | `invalid` on refusal | sniffed type disagrees with declared kind; refusal only for `kind:"html"`, warning otherwise |
 | `invalid_html` | `invalid` | `kind:"html"` path source whose resolved name is not `.html`/`.htm` (upstream `HtmlRender` file rule) |
 | `source_not_found` / `source_not_file` / `source_unreadable` | `not_found` / `invalid` / `unavailable` | register source missing, not a regular file, or unreadable |
-| `storage_ref_missing` (`missing_ref`) | reported on reads (`missing_ref: true` + `storage_ref_missing` warning) | path_ref target vanished/unreadable, or state_copy payload missing/symlinked |
 | `owner_stale` | `stale` | owner identity no longer matches live snapshot (warning, not failure, on reads) |
 | `referenced` | `warning` | delete/gc target still referenced by handoff/conversations/checkpoint payloads; requires `--force` |
 | `session_unreachable` | `unavailable` | herdr socket unreachable |
 | `state_corrupt` | `unavailable` | index/record inconsistent beyond deterministic repair |
 | `lock_timeout` | `unavailable` | single-writer lock not acquired |
 | `unsupported_kind` | `invalid` | kind outside `kinds` |
-| `contract_draft` | `unavailable` | command not yet implemented in draft revisions (until stable) |
+| `usage` | — | usage error, exit 2 (missing/invalid flags, bad timestamps) |
+
+## Delivery (`deliver`)
+
+v1 attachment = the artifact's stable absolute path embedded in
+`agent.prompt` / `pane.send_text` text assembled by `deliver`. There is
+no structured pane/agent attachment API in herdr protocol 22; that gap
+is recorded as an upstream Issue candidate (ADR-0024 §3), not worked
+around.
+
+```bash
+deliver --agent PANE <artifact_id> [--note TEXT]   # agent.prompt to the pane's live agent
+deliver --pane  PANE <artifact_id> [--note TEXT]   # pane.send_text (literal text, no Enter)
+```
+
+Exactly one of `--pane`/`--agent` is required; `--agent` takes the
+pane id hosting the agent (herdr resolves the target). Caveat
+(verified live, herdr 0.9.5): `pane.send_text` delivers literal text,
+but embedded newlines reach the PTY as Enter — on an interactive
+shell pane each message line executes. Prefer `--agent` for agent
+panes; `--pane` is for targets where literal text (or per-line
+submission) is intended. The message is
+deterministic and auditable:
+
+```
+[artifacts] art-… — html artifact "title"
+path: /absolute/resolved/path
+mime: text/html · size: 1234 bytes · sha256: <hex>
+note: <optional --note>
+```
+
+Success payload:
+
+```json
+{
+  "contract": "herdr-plugins.artifacts/v1",
+  "ok": true,
+  "command": "deliver",
+  "target": { "kind": "agent | pane", "pane_id": "w1:p1" },
+  "method": "agent.prompt | pane.send_text",
+  "message": "<exact text sent>",
+  "artifact": { "…annotated record, same shape as get…" }
+}
+```
+
+Refusals (structured, never silent — see error model):
+
+- `artifact_not_found` — unknown/malformed id.
+- `missing_ref` — payload absent/unsafe; a dead path is never
+  delivered (reads report the same condition as a warning instead).
+- `target_not_found` — pane absent from the live `session.snapshot`
+  (closed pane, wrong session, stale id). Deliver never types into the
+  void.
+- `agent_not_found` — `--agent` pane exists but has no live agent.
+- `delivery_failed` — herdr rejected the send or the transport failed;
+  `rpc_code` preserves the upstream code (e.g. `agent_blocked`).
+
+Delivery is side-effect free on the index: the sent text lives in
+pane/agent scrollback, which the plugin does not own, so no `refs`
+entry is fabricated. Consumers that need a durable back-reference
+register the artifact with `--ref` or record the delivery in their own
+state.
+
+## Retention (`gc`)
+
+`gc --older-than ISO [--dry-run]` collects expired artifact records —
+same shape as checkpoints `gc`. Candidates are records whose
+`created_at` is strictly before `--older-than`; v1 has no default
+retention window, so the flag is required.
+
+- Referenced records (`refs` non-empty) are **never** collected:
+  reported `skipped`/`reason:"referenced"`; explicit `delete --force`
+  remains the only path.
+- `state_copy` candidates lose index record + payload dir;
+  `path_ref` candidates lose only the index record — external files
+  are never deleted by the plugin.
+- Records with unparseable `created_at` are skipped
+  (`invalid_created_at`), never guessed-expired.
+- Orphan payload dirs (no index record) are reported via `orphans`,
+  not collected — without a record there is no honest age/ownership
+  evidence.
+- `--dry-run` performs the full evaluation with zero mutation.
+
+```json
+{
+  "contract": "herdr-plugins.artifacts/v1",
+  "ok": true,
+  "command": "gc",
+  "policy": { "older_than": "ISO-8601" },
+  "dry_run": false,
+  "evaluated": 12,
+  "expired": 3,
+  "entries": [
+    { "artifact_id": "art-…", "action": "deleted", "storage_mode": "state_copy", "removed_payload": true },
+    { "artifact_id": "art-…", "action": "skipped", "reason": "referenced", "storage_mode": "state_copy" },
+    { "artifact_id": "art-…", "action": "would_delete", "storage_mode": "path_ref" }
+  ],
+  "totals": { "evaluated": 12, "expired": 3, "deleted": 2, "would_delete": 0,
+              "skipped_referenced": 1, "skipped_other": 0, "kept": 9, "errors": 0 },
+  "orphans": [],
+  "corrupt": []
+}
+```
+
+`action` is `deleted` | `would_delete` (dry-run) | `skipped`;
+`reason` is `referenced` | `invalid_created_at` | `delete_failed`
+(per-entry `error` carries the message; `totals.errors` counts them —
+one failed deletion never aborts the rest).
+
+## Export (`export`)
+
+`export` is the stable read surface herdr-t3 and other clients consume:
+one JSON document with every annotated artifact record (same shape and
+read-time annotations as `list`/`get`), the `orphans`/`corrupt`
+index-level fields, and filter echo. It carries **metadata +
+`resolved_path` only — never payload bytes**; opening/rendering the
+payload is the client's responsibility under the safety boundary
+below. `--limit N` truncates the page; `complete:false` +
+`returned < total` report the truncation honestly (default: complete).
 
 ## Safety boundary (normative)
 
@@ -264,11 +425,3 @@ For `kind:"html"` it performs shape validation only (extension +
 rules). Render-time sandboxing, CSP, and network isolation are
 **herdr-t3/client requirements**; consumers must not assume the plugin
 sanitized content beyond the metadata it reports.
-
-## Delivery (`deliver`, planned T4)
-
-v1 attachment = the artifact's stable absolute path embedded in
-`agent.prompt` / `pane.send_text` text assembled by `deliver`. There is
-no structured pane/agent attachment API in herdr protocol 22; that gap
-is recorded as an upstream Issue candidate (ADR-0024 §3), not worked
-around.
