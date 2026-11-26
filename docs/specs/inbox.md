@@ -185,5 +185,8 @@ with no `--until` uses `defaultSnooze` from the plugin `config.json`.
 - Multi-session namespacing beyond socket selection.
 - `pane.output_matched`-driven attention inference.
 - Checkpoint/handoff features (separate plugins/issues).
-- Remaining #33 scope: inbox search, PR linkage/attention-return,
-  work-group/side-chat semantics (later tickets of the #33 decomposition).
+- Work groups / side-chat semantics: mapped onto herdr workspace/tab +
+  `handoff-v1` lineage in ADR-0029; no `group` field is added to
+  organize state, and side-chat presentation is herdr-t3 scope (#7).
+- Remaining #33 scope: inbox search/PR linkage (#177) and PR-update
+  attention return (#178) are tracked as separate tickets.
