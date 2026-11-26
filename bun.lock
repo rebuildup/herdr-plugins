@@ -20,7 +20,7 @@
     },
     "plugins/checkpoints": {
       "name": "@herdr-plugins/checkpoints",
-      "version": "0.1.0",
+      "version": "0.4.0",
     },
     "plugins/git": {
       "name": "@herdr-plugins/git",
