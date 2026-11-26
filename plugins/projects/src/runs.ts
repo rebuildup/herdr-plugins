@@ -32,6 +32,20 @@ const LOCK_RETRY_MS = 25;
  */
 export type RunResult = "running" | "success" | "failed" | "stopped" | "unknown";
 
+/**
+ * What started a run (#180, additive). `manual` = explicit
+ * `scripts run`; `worktree.created` = auto-trigger drain carrying the
+ * event's worktree path and hook receipt time. Optional on disk —
+ * records written before #180 lack the field.
+ */
+export interface RunTrigger {
+  kind: "manual" | "worktree.created";
+  /** Event-sourced checkout path (triggered runs only). */
+  worktree_path?: string;
+  /** Hook `received_at` of the triggering mark (triggered runs only). */
+  event_received_at?: string;
+}
+
 export interface RunScriptRef {
   id: string;
   name: string;
@@ -68,6 +82,8 @@ export interface ScriptRun {
   log_path: string | null;
   /** Last structured error observed (pane gone, socket failure, …). */
   error: string | null;
+  /** Run origin (#180); absent on records predating the field. */
+  trigger?: RunTrigger;
 }
 
 export interface RunsState {

@@ -33,6 +33,7 @@ bun run src/cli.ts scripts run <project> <name> [--repo PATH]
 bun run src/cli.ts scripts stop <run-id|project>
 bun run src/cli.ts scripts results [project]
 bun run src/cli.ts scripts logs <run-id>
+bun run src/cli.ts scripts tick
 bun run src/cli.ts repos list <project>
 bun run src/cli.ts repos add <project> --path DIR [--path DIR]...
 bun run src/cli.ts repos remove <project> --path DIR [--path DIR]...
@@ -45,7 +46,7 @@ bun run src/cli.ts repos remove <project> --path DIR [--path DIR]...
   actions. `capability` reports `read_only: false` and
   `mutation_commands: ["register","update","repos add","repos remove",
   "archive","unarchive","pin","unpin","settings set","settings unset",
-  "scripts run","scripts stop"]`.
+  "scripts run","scripts stop","scripts tick"].
   Read outputs are unchanged; script commands (#50–#53) extend v1
   additively.
 
@@ -386,14 +387,18 @@ rename, dedicated `runs.json.lock`):
   "exit_code": 0,
   "result": "success",
   "log_path": "runs/run-mj3k2x-9f3ab1.log",
-  "error": null
+  "error": null,
+  "trigger": { "kind": "worktree.created", "worktree_path": "/abs/wt", "event_received_at": "…" }
 }
 ```
 
 `result` ∈ `running | success | failed | stopped | unknown`.
 `running` means the marker was not observed within the wait — it does
 NOT assert the process is alive. `log_path`/`script_path` are relative
-to the plugin state dir (`null` when absent).
+to the plugin state dir (`null` when absent). `trigger` (#180,
+additive, absent on records predating it) records the run origin:
+`{kind:"manual"}` for `scripts run`, `{kind:"worktree.created",
+worktree_path, event_received_at}` for auto-triggered runs.
 
 ## `scripts stop <run-id|project>`
 
@@ -436,15 +441,74 @@ demand. A `running` run whose pane is gone is marked `unknown`.
 Response: `{contract, command:"scripts logs", run_id, run, log_path,
 log, generated_at}` (`log` may be `null`).
 
-### Auto triggers — not implemented (upstream gap)
+## Auto triggers — `runOnWorktreeCreate` (#180)
 
-`t3.json` fields `runOnWorktreeCreate`/`runOnSettle`/`stopOnSettle` are
-resolved and listed but have **no execution mapping** in this release:
-herdr's `events.subscribe` exposes `worktree.*` and pane lifecycle
-events, but there is no faithful equivalent of upstream's
-worktree-creation/settle semantics to trigger on. Recorded as an
-upstream gap for a follow-up Issue; only manual `scripts run`/`stop`
-ship here. #32 automations own scheduled/event-driven execution.
+`runOnWorktreeCreate: true` script flags now execute via herdr's
+`worktree.created` plugin-hook event — the same `[[events]]` manifest
+mechanism `rebuildup.automations` uses (ADR-0022 addendum). No daemon,
+no polling, no `events.subscribe` watch process (ADR-0002).
+
+- **Hook** (`src/hook.ts`, manifest `[[events]] on="worktree.created"`):
+  performs NO socket/git/script work. It appends a
+  `PendingTriggerMark` (`event`, `received_at`, emitting session's
+  resolved `socket_path`, `worktree.path`, `workspace_id`, raw `data`)
+  to `state.json`'s `pending_triggers` under the single-writer lock,
+  capped at 200 marks (oldest dropped, counted in
+  `pending_triggers_dropped`). Identical pending marks (same
+  event+session+worktree path) collapse — herdr redelivery cannot
+  stack fires. Malformed payloads, missing `worktree.path`, and every
+  other event name exit 0 recording nothing.
+- **Drain** (lazy): the next `scripts tick`, `scripts run`,
+  `scripts stop`, `scripts results`, or `scripts logs` invocation
+  evaluates pending marks — `list`, `capability`, and `help` never
+  drain. `scripts tick` is the explicit entrypoint an external
+  scheduler/watch process can call.
+- **Repo resolution (no guessing):** each mark's `worktree_path` is
+  resolved via `resolveRepo`; the repo group is identified by
+  `git rev-parse --git-common-dir` (all linked worktrees of a repo
+  share it) and matched against every non-archived project's
+  `repos[]` members' common dirs. Zero matches → skip
+  `repo_not_registered`; multiple projects → skip `ambiguous_project`.
+  Deleted checkouts → `worktree_gone`; non-git paths surface the git
+  kinds; unreachable members simply cannot match.
+- **Script resolution** reuses the #50 layered resolution
+  (settings override → env `defaultScripts` → the EVENT worktree's
+  `t3.json` → builtin) with structured per-mark errors (`t3json_invalid`,
+  `invalid_script_list`, `unknown_script`) — one broken repo never
+  kills the drain. Only `runOnWorktreeCreate === true` scripts fire;
+  none → skip `no_run_on_worktree_create_scripts`.
+- **Execution** is the unchanged ADR-0010 runner (`workspace.create` →
+  `pane.send_input` → marker wait) against the session socket recorded
+  on the mark — the session that owns the worktree, regardless of which
+  session the draining CLI targets. Each fired run's `ScriptRun.trigger`
+  records `{kind:"worktree.created", worktree_path,
+  event_received_at}`.
+- **Drain report:** merged into the invoking command's payload as
+  `triggers: {fired[], skipped[], duplicates, pending_remaining,
+  session_unreachable?}` when non-empty. `fired[]` entries carry
+  `{run_id, project_id, script, worktree_path, result}`; `skipped[]`
+  carry `{worktree_path, socket_path, reason, detail?}`. Marks for
+  unreachable session sockets stay pending (transient outage never
+  loses a trigger); evaluated marks are consumed under the lock before
+  execution so concurrent drains cannot double-fire.
+- **Honesty:** skipped marks are reported, never silent; run results
+  keep the `running|success|failed|stopped|unknown` semantics — no
+  fabricated success. `runOnSettle`/`stopOnSettle` remain
+  unimplemented pending #181/#182.
+
+## `scripts tick`
+
+`{contract, command:"scripts tick", triggers?, generated_at}` —
+drains pending `worktree.created` marks (see above). Exit 0 on success;
+the drain itself never fails the command (per-mark outcomes are
+reported in `triggers.skipped`).
+
+## Remaining auto-trigger gap
+
+`runOnSettle`/`stopOnSettle` have no faithful trigger source yet —
+settle is plugin-owned organize state (inbox), not a herdr event.
+Tracked by #181 (design) / #182 (implementation). #32 automations own
+scheduled/event-driven execution generally.
 
 ## Errors
 

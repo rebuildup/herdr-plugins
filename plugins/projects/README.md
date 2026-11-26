@@ -29,6 +29,7 @@ bun run src/cli.ts scripts run <project> <name> [--repo PATH]
 bun run src/cli.ts scripts stop <run-id|project>
 bun run src/cli.ts scripts results [project]
 bun run src/cli.ts scripts logs <run-id>
+bun run src/cli.ts scripts tick
 bun run src/cli.ts repos list <project>
 bun run src/cli.ts repos add|remove <project> --path DIR [--path DIR]...
 ```
@@ -41,8 +42,13 @@ in a dedicated herdr pane with a structured completion marker
 interrupts the recorded pane, and `scripts results`/`logs` expose the
 run records. Multi-repo projects require `--repo` for `run`. Script
 commands are trusted repo content executed with user privileges.
-Auto triggers (`runOnWorktreeCreate`/`runOnSettle`/`stopOnSettle`) are
-not implemented — upstream event gap, see docs/specs/projects.md.
+`t3.json` scripts flagged `runOnWorktreeCreate` auto-run via the
+`worktree.created` hook event: the hook records a pending mark and the
+next `scripts tick` (or `scripts run|stop|results|logs`) drains it —
+repo membership is verified by `git-common-dir`, skips are reported in
+the payload's `triggers` block, and runs carry
+`trigger:{kind:"worktree.created", worktree_path}`. `runOnSettle`/
+`stopOnSettle` are not implemented — see docs/specs/projects.md.
 
 Full contract: `docs/contracts/projects-v1.md`. Spec: `docs/specs/projects.md`.
 Design: ADR-0009 (registry), ADR-0010 (script execution).
