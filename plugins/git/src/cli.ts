@@ -29,7 +29,14 @@ import {
   collectPrView,
   ensureGh,
   GhError,
+  isValidHeadSha,
+  type PrLineComment,
+  type PrReviewEvent,
   resolveForgeRepo,
+  submitPrComment,
+  submitPrReply,
+  submitPrReview,
+  updatePrReviewers,
 } from "./gh";
 import {
   assertSafeGitArg,
@@ -57,7 +64,7 @@ import {
 
 const CONTRACT = "herdr-plugins.git/v1";
 const PLUGIN_ID = "rebuildup.git";
-const PLUGIN_VERSION = "0.3.0";
+const PLUGIN_VERSION = "0.4.0";
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_REMOTE_TIMEOUT_MS = 60_000;
 const DEFAULT_DIFF_MAX_BYTES = 256 * 1024;
@@ -806,7 +813,52 @@ const PR_VALUE_FLAGS = [
   "--run",
   "--job",
   "--lines",
+  "--expect-head",
+  "--comments-file",
+  "--add-reviewer",
+  "--remove-reviewer",
 ];
+
+interface PrBodyInput {
+  /** Inline `--body` value. */
+  body: string | undefined;
+  /** `"--body-file -"` effective value: `-` when the body is piped. */
+  bodyFile: string | undefined;
+  /** Body text resolved from `--body-file` (file contents or stdin). */
+  bodyText: string | undefined;
+}
+
+/**
+ * Shared `--body`/`--body-file` resolution for `pr create` and the forge
+ * mutations: the flags are mutually exclusive, `-` reads stdin, and real
+ * file paths are read into memory so the text can be piped to `gh` (or
+ * folded into an `gh api --input -` payload) instead of riding in argv.
+ */
+async function resolvePrBody(args: string[]): Promise<PrBodyInput> {
+  const body = flagValue(args, "--body");
+  const bodyFile = flagValue(args, "--body-file");
+  if (body !== undefined && bodyFile !== undefined) {
+    fail("--body and --body-file are mutually exclusive", 2);
+  }
+  let bodyText: string | undefined;
+  let effectiveBodyFile = bodyFile;
+  if (bodyFile && bodyFile !== "-") {
+    try {
+      bodyText = await readFile(bodyFile, "utf8");
+      effectiveBodyFile = "-";
+    } catch {
+      fail(`cannot read --body-file: ${bodyFile}`, 2);
+    }
+  } else if (bodyFile === "-") {
+    bodyText = await Bun.stdin.text();
+  }
+  return { body, bodyFile: effectiveBodyFile, bodyText };
+}
+
+/** Effective body text for `gh api` payloads (file/stdin already resolved). */
+function prBodyText(input: PrBodyInput): string | undefined {
+  return input.body ?? input.bodyText;
+}
 
 /**
  * `pr <action> <pane> [args]` — GitHub PR surface via the host `gh` CLI.
@@ -820,10 +872,23 @@ async function cmdPr(options: CliOptions): Promise<void> {
   const paneId = pos[1] ?? process.env.HERDR_PANE_ID ?? invocationContext().focused_pane_id;
   if (
     !action ||
-    !["list", "status", "create", "view", "reviews", "comments", "checks", "logs"].includes(action)
+    ![
+      "list",
+      "status",
+      "create",
+      "view",
+      "reviews",
+      "comments",
+      "checks",
+      "logs",
+      "review",
+      "comment",
+      "reply",
+      "reviewers",
+    ].includes(action)
   ) {
     fail(
-      "pr requires an action: list | status | create | view | reviews | comments | checks | logs",
+      "pr requires an action: list | status | create | view | reviews | comments | checks | logs | review | comment | reply | reviewers",
       2,
     );
   }
@@ -982,14 +1047,143 @@ async function cmdPr(options: CliOptions): Promise<void> {
       return;
     }
 
+    // Forge mutations (Issue #172): review / comment / reply / reviewers.
+    // Every mutation requires --expect-head <full sha> — the mandatory
+    // stale-head guard re-fetches the PR head immediately before writing
+    // and refuses with kind "stale_head" when it moved. These are explicit
+    // user/agent invocations only; no automation path exists (the
+    // github-delivery release-approval boundary is never bypassed).
+    if (["review", "comment", "reply", "reviewers"].includes(action)) {
+      const number = Number(rest[0]);
+      if (!Number.isInteger(number) || number < 1) {
+        fail(`pr ${action} requires a positive PR number`, 2);
+      }
+      const expectHeadRaw = flagValue(options.args, "--expect-head");
+      if (!expectHeadRaw || !isValidHeadSha(expectHeadRaw)) {
+        fail(
+          `pr ${action} requires --expect-head <full head sha> (head.sha from a prior pr read)`,
+          2,
+        );
+      }
+      const expectHead = expectHeadRaw;
+
+      if (action === "review") {
+        if (rest.length > 1) fail("pr review accepts at most one PR number", 2);
+        const events = (
+          [
+            ["--approve", "APPROVE"],
+            ["--request-changes", "REQUEST_CHANGES"],
+            ["--comment", "COMMENT"],
+          ] as const
+        )
+          .filter(([flag]) => hasFlag(options.args, flag))
+          .map(([, event]) => event);
+        if (events.length !== 1) {
+          fail("pr review requires exactly one of --approve, --request-changes, --comment", 2);
+        }
+        const commentsFile = flagValue(options.args, "--comments-file");
+        const bodyInput = await resolvePrBody(options.args);
+        if (commentsFile === "-" && bodyInput.bodyFile === "-") {
+          fail("--body-file - and --comments-file - cannot both read stdin", 2);
+        }
+        let comments: PrLineComment[] | undefined;
+        if (commentsFile !== undefined) {
+          let raw: string;
+          if (commentsFile === "-") {
+            raw = await Bun.stdin.text();
+          } else {
+            try {
+              raw = await readFile(commentsFile, "utf8");
+            } catch {
+              fail(`cannot read --comments-file: ${commentsFile}`, 2);
+            }
+          }
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(raw);
+          } catch {
+            fail("--comments-file is not valid JSON", 2);
+          }
+          if (!Array.isArray(parsed)) {
+            fail("--comments-file must contain a JSON array of line comments", 2);
+          }
+          comments = parsed as PrLineComment[];
+        }
+        const data = await submitPrReview(
+          repoRoot,
+          {
+            repo,
+            number,
+            expectHead,
+            event: events[0] as PrReviewEvent,
+            body: prBodyText(bodyInput),
+            comments,
+          },
+          ghOptions,
+        );
+        emit({ ...forgeBase, action: "review", repo, ok: true, ...data });
+        return;
+      }
+
+      if (action === "comment") {
+        if (rest.length > 1) fail("pr comment accepts at most one PR number", 2);
+        const bodyInput = await resolvePrBody(options.args);
+        const body = prBodyText(bodyInput);
+        if (body === undefined || body.trim().length === 0) {
+          fail("pr comment requires --body or --body-file", 2);
+        }
+        const data = await submitPrComment(repoRoot, { repo, number, expectHead, body }, ghOptions);
+        emit({ ...forgeBase, action: "comment", repo, ok: true, ...data });
+        return;
+      }
+
+      if (action === "reply") {
+        if (rest.length !== 2) {
+          fail("pr reply requires a PR number and a review-comment id", 2);
+        }
+        const commentId = Number(rest[1]);
+        if (!Number.isInteger(commentId) || commentId < 1) {
+          fail("pr reply requires a positive review-comment id", 2);
+        }
+        const bodyInput = await resolvePrBody(options.args);
+        const body = prBodyText(bodyInput);
+        if (body === undefined || body.trim().length === 0) {
+          fail("pr reply requires --body or --body-file", 2);
+        }
+        const data = await submitPrReply(
+          repoRoot,
+          { repo, number, expectHead, commentId, body },
+          ghOptions,
+        );
+        emit({ ...forgeBase, action: "reply", repo, ok: true, ...data });
+        return;
+      }
+
+      // action === "reviewers"
+      if (rest.length > 1) fail("pr reviewers accepts at most one PR number", 2);
+      const splitLogins = (flag: string): string[] =>
+        flagValues(options.args, flag)
+          .flatMap((value) => value.split(","))
+          .map((login) => login.trim())
+          .filter((login) => login.length > 0);
+      const add = splitLogins("--add-reviewer");
+      const remove = splitLogins("--remove-reviewer");
+      if (add.length === 0 && remove.length === 0) {
+        fail("pr reviewers requires --add-reviewer and/or --remove-reviewer", 2);
+      }
+      const data = await updatePrReviewers(
+        repoRoot,
+        { repo, number, expectHead, add, remove },
+        ghOptions,
+      );
+      emit({ ...forgeBase, action: "reviewers", repo, ok: true, ...data });
+      return;
+    }
+
     // action === "create"
     const title = flagValue(options.args, "--title");
     if (!title) fail("pr create requires --title", 2);
-    const body = flagValue(options.args, "--body");
-    const bodyFile = flagValue(options.args, "--body-file");
-    if (body !== undefined && bodyFile !== undefined) {
-      fail("--body and --body-file are mutually exclusive", 2);
-    }
+    const bodyInput = await resolvePrBody(options.args);
     const base = flagValue(options.args, "--base");
     const head = flagValue(options.args, "--head");
     for (const [value, what] of [
@@ -1000,31 +1194,18 @@ async function cmdPr(options: CliOptions): Promise<void> {
     }
     if (rest.length > 0) fail("pr create takes no positional arguments", 2);
 
-    let bodyText: string | undefined;
-    let effectiveBodyFile = bodyFile;
-    if (bodyFile && bodyFile !== "-") {
-      try {
-        bodyText = await readFile(bodyFile, "utf8");
-        effectiveBodyFile = "-";
-      } catch {
-        fail(`cannot read --body-file: ${bodyFile}`, 2);
-      }
-    } else if (bodyFile === "-") {
-      bodyText = await Bun.stdin.text();
-    }
-
     const created = await collectPrCreate(
       repoRoot,
       {
         repo,
         title,
-        body,
-        bodyFile: effectiveBodyFile,
+        body: bodyInput.body,
+        bodyFile: bodyInput.bodyFile,
         draft: hasFlag(options.args, "--draft"),
         base,
         head,
       },
-      { ...ghOptions, bodyText },
+      { ...ghOptions, bodyText: bodyInput.bodyText },
     );
     emit({
       ...forgeBase,
@@ -1158,12 +1339,24 @@ Usage:
   git fetch <pane_id> [remote] [--prune]
   git push <pane_id> [--set-upstream] [--force-with-lease] [remote] [refspec]
   git remote <pane_id>
-  git pr list|status|create|view|reviews|comments|checks|logs <pane_id> [args]
-      [--repo owner/name]
+  git pr list|status|create|view|reviews|comments|checks|logs
+      <pane_id> [args] [--repo owner/name]
       pr create: --title T [--body B | --body-file PATH|-] [--draft]
           [--base B] [--head B]
       pr reviews|comments|checks <pane> <number>
       pr logs <pane> <number> [--run ID | --job ID [--lines N]]
+  git pr review|comment|reply|reviewers <pane_id> [args]
+      [--repo owner/name] --expect-head <full-sha>   (required)
+      pr review <pane> <number> --approve|--request-changes|--comment
+          [--body B | --body-file PATH|-]
+          [--comments-file PATH|-]   (JSON array: path/line/side/body)
+      pr comment <pane> <number> --body B|--body-file PATH|-
+      pr reply <pane> <number> <comment-id> --body B|--body-file PATH|-
+      pr reviewers <pane> <number>
+          [--add-reviewer LOGIN[,LOGIN]...] [--remove-reviewer LOGIN...]
+      --expect-head is the stale-head guard: pass head.sha from a prior
+      pr read; the mutation is refused (kind "stale_head") if the PR head
+      moved. Merge/auto-merge are intentionally not exposed.
   git project <pane_id> [--session NAME]
   git capability
 

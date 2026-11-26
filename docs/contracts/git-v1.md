@@ -5,7 +5,8 @@ Read commands (`status`, `files`, `diff`, `log`, `compare`, `remote`,
 `pr list`, `pr status`, `pr view`, `pr reviews`, `pr comments`,
 `pr checks`, `pr logs`, `project`) are side-effect free;
 mutation commands (`stage`, `unstage`, `commit`, `branch`, `upstream`,
-`fetch`, `push`, `pr create`) change the pane repository's index/refs/
+`fetch`, `push`, `pr create`, `pr review`, `pr comment`, `pr reply`,
+`pr reviewers`) change the pane repository's index/refs/
 remotes or the forge on the herdr host. Follows the same conventions as `herdr-plugins.inbox/v1`
 (`docs/contracts/inbox-v1.md`).
 
@@ -43,6 +44,15 @@ bun run src/cli.ts pr list|status|create|view|reviews|comments|checks|logs
     <pane_id> [args] [--repo owner/name]
     pr reviews|comments|checks <pane> <number>
     pr logs <pane> <number> [--run ID | --job ID [--lines N]]
+bun run src/cli.ts pr review|comment|reply|reviewers <pane_id> [args]
+    [--repo owner/name] --expect-head <full-sha>   (required)
+    pr review <pane> <number> --approve|--request-changes|--comment
+        [--body B | --body-file PATH|-]
+        [--comments-file PATH|-]
+    pr comment <pane> <number> --body B|--body-file PATH|-
+    pr reply <pane> <number> <comment-id> --body B|--body-file PATH|-
+    pr reviewers <pane> <number>
+        [--add-reviewer LOGIN[,LOGIN]...] [--remove-reviewer LOGIN...]
 bun run src/cli.ts project <pane_id> [--session NAME]
 bun run src/cli.ts capability
 ```
@@ -348,21 +358,60 @@ rejected before any `gh` call.
     and `truncated` when the tail was cut.
   All modes echo `head`/`base` `{ref, sha}` and `head_sha` so callers
   can verify freshness before any later mutation.
-- `pr create` — the only forge mutation. Requires `--title`; body via
+- `pr create` — forge mutation. Requires `--title`; body via
   `--body` (inline argv) or `--body-file PATH` / `--body-file -`
   (stdin) — long bodies never appear in argv. `--draft`, `--base`,
   `--head` map to the same gh flags. The branch must already be pushed;
   gh's own push/prompt flow is not driven by the plugin. Success returns
   `{action:"create", repo, ok:true, url, number}` parsed from gh's
   output.
-- `pr` appears in `mutation_commands` because `pr create` mutates the
-  forge; `list`/`status`/`view`/`reviews`/`comments`/`checks`/`logs`
-  are read-only. PR state is never used to bypass merge/review gates —
-  the plugin exposes state, it does not act on it. Review submission,
-  comment posting, merge, and non-GitHub forges are out of scope
+- `pr review <number>` — submit a review (`--approve`,
+  `--request-changes`, or `--comment`; exactly one required) via
+  `POST repos/{repo}/pulls/{n}/reviews`. Optional review body via
+  `--body`/`--body-file`; the whole JSON payload is piped to
+  `gh api --input -`, so bodies never appear in gh argv. Optional
+  `--comments-file PATH|-` supplies a JSON array of line comments
+  (`{path, line, side?: "RIGHT"|"LEFT", body}`) delivered in the same
+  review's `comments[]` — this is the only way to attach line comments,
+  since `gh pr review` cannot express them. The POST pins `commit_id`
+  to the verified head sha.
+- `pr comment <number>` — PR-conversation comment via
+  `POST issues/{n}/comments` (`gh pr comment` equivalent; issues and
+  PRs share the endpoint). `--body` or `--body-file` required.
+- `pr reply <number> <comment-id>` — reply inside a review thread via
+  `POST pulls/{n}/comments/{id}/replies`. `--body`/`--body-file`
+  required.
+- `pr reviewers <number>` — request or dismiss reviewers via
+  `gh pr edit --add-reviewer/--remove-reviewer`
+  (`--add-reviewer LOGIN[,LOGIN]...`, `--remove-reviewer …`, at least
+  one required; comma-separated or repeated). The payload echoes the
+  post-mutation `review_requests` re-fetched from the PR.
+- **Stale-head guard (mandatory on every `pr` mutation).**
+  `review`/`comment`/`reply`/`reviewers` all require
+  `--expect-head <full sha>` (40- or 64-hex; short shas rejected with a
+  usage error). Immediately before writing, the plugin re-fetches
+  `GET pulls/{n}` and refuses with `error.kind: "stale_head"` when the
+  live `head.sha` differs — a review/comment can never land on a commit
+  the caller did not last read. Callers obtain the sha from `head.sha`
+  in any `pr` read payload (`view`/`reviews`/`comments`/`checks`/
+  `logs`). A missing/unreadable head sha is `gh_error`, never a
+  proceed.
+- **github-delivery boundary.** These commands exist for explicit
+  user/agent invocations only. There is no automation path that
+  submits reviews, posts comments, requests reviewers, merges, or
+  auto-merges — in particular the plugin never approves its own
+  release PR or merges a `release-* -> main` PR; release approval stays
+  a maintainer decision per the github-delivery skill.
+- `pr` appears in `mutation_commands` because `pr create`/`review`/
+  `comment`/`reply`/`reviewers` mutate the forge; `list`/`status`/
+  `view`/`reviews`/`comments`/`checks`/`logs` are read-only. PR state
+  is never used to bypass merge/review gates — the plugin exposes
+  state, it does not act on it. Merge/auto-merge, editing or deleting
+  existing reviews/comments, and non-GitHub forges are out of scope
   (later tickets).
 - gh error messages echo only the subcommand words, never argv content
-  (titles/bodies may be sensitive).
+  (titles/bodies may be sensitive); `gh api` mutation payloads travel
+  on stdin (`--input -`) for the same reason.
 
 ## `project`
 
@@ -385,7 +434,7 @@ the status data remains authoritative.
 {
   "contract": "herdr-plugins.git/v1",
   "plugin": "rebuildup.git",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "commands": [
     "capability", "status", "files", "diff", "log", "compare",
     "stage", "unstage", "commit", "branch", "upstream", "fetch",
