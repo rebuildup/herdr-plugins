@@ -14,6 +14,7 @@ import {
   ensureGh,
   GhError,
   isValidHeadSha,
+  mergePr,
   resolveForgeRepo,
   submitPrComment,
   submitPrReply,
@@ -45,6 +46,12 @@ const ENV_KEYS = [
   "GH_STUB_ISSUE_COMMENT_POST_JSON",
   "GH_STUB_REPLY_POST_JSON",
   "GH_STUB_POST_STDIN_LOG",
+  "GH_STUB_MERGE_VIEW_JSON",
+  "GH_STUB_MERGE_VIEW_JSON_POST",
+  "GH_STUB_MERGE_PUT_JSON",
+  "GH_STUB_AUTO_MERGE_POST_JSON",
+  "GH_STUB_AUTO_MERGE_DELETE_JSON",
+  "GH_STUB_MERGE_API_FAIL",
 ];
 
 function tempDir(): string {
@@ -85,7 +92,7 @@ case "\${1:-}" in
   repo) echo "\${GH_STUB_REPO:-octo/widgets}"; exit 0;;
   api)
     case "$*" in
-      *--method*POST*|*--input*)
+      *--method*POST*|*--method*PUT*|*--method*DELETE*|*--input*)
         if [ -n "\${STDIN_DATA:-}" ] && [ -n "\${GH_STUB_POST_STDIN_LOG:-}" ]; then
           printf '%s\\n' "$STDIN_DATA" >> "$GH_STUB_POST_STDIN_LOG"
         fi
@@ -93,6 +100,19 @@ case "\${1:-}" in
           *pulls/*/comments/*/replies*) cat "\${GH_STUB_REPLY_POST_JSON:-/dev/null}";;
           *pulls/*/reviews*) cat "\${GH_STUB_REVIEW_POST_JSON:-/dev/null}";;
           *issues/*/comments*) cat "\${GH_STUB_ISSUE_COMMENT_POST_JSON:-/dev/null}";;
+          *pulls/*/auto-merge*)
+            if [ "\${GH_STUB_MERGE_API_FAIL:-0}" = "1" ]; then
+              echo "auto-merge refused (HTTP 422)" >&2; exit 1
+            fi
+            case "$*" in
+              *--method*DELETE*) cat "\${GH_STUB_AUTO_MERGE_DELETE_JSON:-/dev/null}" 2>/dev/null || true;;
+              *) cat "\${GH_STUB_AUTO_MERGE_POST_JSON:-/dev/null}";;
+            esac;;
+          *pulls/*/merge*)
+            if [ "\${GH_STUB_MERGE_API_FAIL:-0}" = "1" ]; then
+              echo "Merge is not possible (HTTP 405)" >&2; exit 1
+            fi
+            cat "\${GH_STUB_MERGE_PUT_JSON:-/dev/null}";;
           *) echo "unexpected POST endpoint: $*" >&2; exit 1;;
         esac
         exit 0;;
@@ -106,7 +126,13 @@ case "\${1:-}" in
   pr)
     case "\${2:-}" in
       list) cat "\${GH_STUB_LIST_JSON:-/dev/null}" 2>/dev/null || echo '[]';;
-      view) cat "\${GH_STUB_VIEW_JSON:-/dev/null}";;
+      view)
+        # After a merge/auto-merge write lands, GH_STUB_MERGE_VIEW_JSON_POST
+        # models the post-write state (merged / auto_merge_request armed).
+        if [ -n "\${GH_STUB_MERGE_VIEW_JSON_POST:-}" ] && [ -f "\${GH_STUB_LOG:-/dev/null}" ] && grep -qE -- "--method PUT|auto-merge" "$GH_STUB_LOG" 2>/dev/null; then
+          cat "$GH_STUB_MERGE_VIEW_JSON_POST"
+        elif [ -n "\${GH_STUB_MERGE_VIEW_JSON:-}" ]; then cat "$GH_STUB_MERGE_VIEW_JSON";
+        else cat "\${GH_STUB_VIEW_JSON:-/dev/null}"; fi;;
       checks)
         if [ "\${GH_STUB_CHECKS_FAIL:-0}" = "1" ]; then
           echo "no checks reported on the 'feature' branch" >&2; exit 1
@@ -959,5 +985,353 @@ describe("pr reviewers mutation", () => {
       }),
     ).rejects.toMatchObject({ kind: "gh_error" });
     expect(stubCalls(logFile).some((c) => c.startsWith("pr edit"))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR merge / auto-merge (Issue #173)
+// ---------------------------------------------------------------------------
+
+const MERGE_HEAD_SHA = "c".repeat(40);
+
+function mergeViewFixture(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    number: 7,
+    state: "OPEN",
+    isDraft: false,
+    mergeable: "MERGEABLE",
+    mergeStateStatus: "CLEAN",
+    reviewDecision: "APPROVED",
+    headRefOid: MERGE_HEAD_SHA,
+    headRefName: "feature/x",
+    baseRefName: "main",
+    url: "https://example.com/pr/7",
+    autoMergeRequest: null,
+    ...overrides,
+  };
+}
+
+function stubMergeFixtures(work: string, viewOverrides: Record<string, unknown> = {}): void {
+  setEnv("GH_STUB_PR_DETAIL_JSON", writeStubJson(work, "detail.json", PR_DETAIL));
+  setEnv(
+    "GH_STUB_MERGE_VIEW_JSON",
+    writeStubJson(work, "merge-view.json", mergeViewFixture(viewOverrides)),
+  );
+}
+
+describe("pr merge", () => {
+  test("immediate merge PUTs pulls/{n}/merge with sha pinned to verified head", async () => {
+    const { work, logFile } = installGhStub();
+    stubMergeFixtures(work);
+    const stdinLog = postStdin(work);
+    setEnv(
+      "GH_STUB_MERGE_PUT_JSON",
+      writeStubJson(work, "merge.json", { merged: true, sha: "f".repeat(40), message: "Merged" }),
+    );
+    setEnv(
+      "GH_STUB_MERGE_VIEW_JSON_POST",
+      writeStubJson(work, "merge-view-post.json", mergeViewFixture({ state: "MERGED" })),
+    );
+    const out = (await mergePr(tempDir(), {
+      repo: "octo/widgets",
+      number: 7,
+      expectHead: MERGE_HEAD_SHA,
+      method: "squash",
+    })) as {
+      result: string;
+      state: string;
+      method: string;
+      pre_merge_state: { merge_state_status: string; review_decision: string; mergeable: string };
+      merge: { merged: boolean; sha: string };
+      head: { sha: string };
+    };
+    expect(out.result).toBe("merged");
+    expect(out.state).toBe("MERGED");
+    expect(out.method).toBe("squash");
+    expect(out.pre_merge_state).toEqual({
+      merge_state_status: "CLEAN",
+      review_decision: "APPROVED",
+      mergeable: "MERGEABLE",
+    });
+    expect(out.merge).toMatchObject({ merged: true });
+    expect(out.head.sha).toBe("abc123");
+    const call = stubCalls(logFile).find((c) => c.includes("--method PUT"));
+    expect(call).toContain("api repos/octo/widgets/pulls/7/merge");
+    expect(call).toContain("--input -");
+    const payload = JSON.parse(readFileSync(stdinLog, "utf8").trim()) as {
+      sha: string;
+      merge_method: string;
+    };
+    expect(payload.sha).toBe(MERGE_HEAD_SHA);
+    expect(payload.merge_method).toBe("squash");
+  });
+
+  test("merged:false from GitHub reports result pending, never merged", async () => {
+    const { work } = installGhStub();
+    stubMergeFixtures(work);
+    setEnv(
+      "GH_STUB_MERGE_PUT_JSON",
+      writeStubJson(work, "merge.json", { merged: false, message: "Merge already in progress" }),
+    );
+    const out = (await mergePr(tempDir(), {
+      repo: "octo/widgets",
+      number: 7,
+      expectHead: MERGE_HEAD_SHA,
+    })) as { result: string; state: string; merge: { merged: boolean } };
+    expect(out.result).toBe("pending");
+    expect(out.merge.merged).toBe(false);
+    // Post-state is still OPEN — honestly reported, not fabricated.
+    expect(out.state).toBe("OPEN");
+  });
+
+  test("stale head refuses before any merge write", async () => {
+    const { work, logFile } = installGhStub();
+    stubMergeFixtures(work);
+    await expect(
+      mergePr(tempDir(), {
+        repo: "octo/widgets",
+        number: 7,
+        expectHead: STALE_SHA,
+        method: "merge",
+      }),
+    ).rejects.toMatchObject({ kind: "stale_head" });
+    const calls = stubCalls(logFile);
+    expect(calls.some((c) => c.includes("--method PUT"))).toBe(false);
+    expect(calls.some((c) => c.includes("--method POST"))).toBe(false);
+  });
+
+  test.each(["BLOCKED", "DIRTY", "BEHIND", "UNKNOWN", "DRAFT", "HAS_HOOKS"])(
+    "mergeStateStatus %s refuses with merge_blocked and no write",
+    async (status) => {
+      const { work, logFile } = installGhStub();
+      stubMergeFixtures(work, { mergeStateStatus: status });
+      await expect(
+        mergePr(tempDir(), {
+          repo: "octo/widgets",
+          number: 7,
+          expectHead: MERGE_HEAD_SHA,
+        }),
+      ).rejects.toMatchObject({ kind: "merge_blocked" });
+      expect(stubCalls(logFile).some((c) => c.includes("--method PUT"))).toBe(false);
+    },
+  );
+
+  test("UNSTABLE (non-required checks failing) still attempts the merge", async () => {
+    const { work } = installGhStub();
+    stubMergeFixtures(work, { mergeStateStatus: "UNSTABLE" });
+    setEnv(
+      "GH_STUB_MERGE_PUT_JSON",
+      writeStubJson(work, "merge.json", { merged: true, sha: "f".repeat(40), message: "Merged" }),
+    );
+    const out = (await mergePr(tempDir(), {
+      repo: "octo/widgets",
+      number: 7,
+      expectHead: MERGE_HEAD_SHA,
+    })) as { result: string; pre_merge_state: { merge_state_status: string } };
+    expect(out.result).toBe("merged");
+    expect(out.pre_merge_state.merge_state_status).toBe("UNSTABLE");
+  });
+
+  test("draft PR is refused even when mergeStateStatus is CLEAN", async () => {
+    const { work, logFile } = installGhStub();
+    stubMergeFixtures(work, { isDraft: true });
+    await expect(
+      mergePr(tempDir(), {
+        repo: "octo/widgets",
+        number: 7,
+        expectHead: MERGE_HEAD_SHA,
+      }),
+    ).rejects.toMatchObject({ kind: "merge_blocked" });
+    expect(stubCalls(logFile).some((c) => c.includes("--method PUT"))).toBe(false);
+  });
+
+  test("already-merged PR is refused", async () => {
+    const { work } = installGhStub();
+    stubMergeFixtures(work, { state: "MERGED" });
+    await expect(
+      mergePr(tempDir(), {
+        repo: "octo/widgets",
+        number: 7,
+        expectHead: MERGE_HEAD_SHA,
+      }),
+    ).rejects.toMatchObject({ kind: "merge_blocked" });
+  });
+
+  test("release-train head branch is refused with release_boundary (no write)", async () => {
+    const { work, logFile } = installGhStub();
+    stubMergeFixtures(work, { headRefName: "release-0-9-0", baseRefName: "main" });
+    await expect(
+      mergePr(tempDir(), {
+        repo: "octo/widgets",
+        number: 7,
+        expectHead: MERGE_HEAD_SHA,
+      }),
+    ).rejects.toMatchObject({ kind: "release_boundary" });
+    const calls = stubCalls(logFile);
+    expect(calls.some((c) => c.includes("--method PUT"))).toBe(false);
+    expect(calls.some((c) => c.includes("--method POST"))).toBe(false);
+    expect(calls.some((c) => c.includes("--method DELETE"))).toBe(false);
+  });
+
+  test("ticket PR targeting a release branch as base is NOT refused", async () => {
+    const { work } = installGhStub();
+    // head is a ticket branch, base is the release train — normal flow.
+    stubMergeFixtures(work, { headRefName: "173", baseRefName: "release-0-9-0" });
+    setEnv(
+      "GH_STUB_MERGE_PUT_JSON",
+      writeStubJson(work, "merge.json", { merged: true, sha: "f".repeat(40), message: "Merged" }),
+    );
+    const out = (await mergePr(tempDir(), {
+      repo: "octo/widgets",
+      number: 7,
+      expectHead: MERGE_HEAD_SHA,
+    })) as { result: string };
+    expect(out.result).toBe("merged");
+  });
+
+  test("GitHub 405 refusal maps to merge_blocked", async () => {
+    const { work } = installGhStub();
+    stubMergeFixtures(work);
+    setEnv("GH_STUB_MERGE_API_FAIL", "1");
+    await expect(
+      mergePr(tempDir(), {
+        repo: "octo/widgets",
+        number: 7,
+        expectHead: MERGE_HEAD_SHA,
+      }),
+    ).rejects.toMatchObject({ kind: "merge_blocked" });
+  });
+});
+
+describe("pr auto-merge", () => {
+  test("--auto POSTs pulls/{n}/auto-merge with merge_method and echoes armed state", async () => {
+    const { work, logFile } = installGhStub();
+    stubMergeFixtures(work, { mergeStateStatus: "BLOCKED" }); // pending checks
+    const stdinLog = postStdin(work);
+    setEnv(
+      "GH_STUB_AUTO_MERGE_POST_JSON",
+      writeStubJson(work, "auto.json", { merge_method: "squash", enabled_by: { login: "me" } }),
+    );
+    setEnv(
+      "GH_STUB_MERGE_VIEW_JSON_POST",
+      writeStubJson(
+        work,
+        "auto-view-post.json",
+        mergeViewFixture({
+          autoMergeRequest: { mergeMethod: "SQUASH", enabledAt: "2026-02-01T00:00:00Z" },
+        }),
+      ),
+    );
+    const out = (await mergePr(tempDir(), {
+      repo: "octo/widgets",
+      number: 7,
+      expectHead: MERGE_HEAD_SHA,
+      method: "squash",
+      auto: true,
+    })) as {
+      result: string;
+      action: string;
+      state: string;
+      auto_merge_request: { merge_method: string } | null;
+    };
+    expect(out.result).toBe("auto_merge_enabled");
+    expect(out.action).toBe("auto_merge_enable");
+    expect(out.state).toBe("OPEN"); // queued, not merged — honest
+    expect(out.auto_merge_request).toMatchObject({ merge_method: "SQUASH" });
+    const call = stubCalls(logFile).find((c) => c.includes("--method POST"));
+    expect(call).toContain("api repos/octo/widgets/pulls/7/auto-merge");
+    const payload = JSON.parse(readFileSync(stdinLog, "utf8").trim()) as {
+      merge_method: string;
+    };
+    expect(payload.merge_method).toBe("squash");
+  });
+
+  test("auto-merge refuses DIRTY/DRAFT/UNKNOWN but allows BLOCKED (pending checks)", async () => {
+    const { work, logFile } = installGhStub();
+    for (const status of ["DIRTY", "DRAFT", "UNKNOWN"]) {
+      stubMergeFixtures(work, { mergeStateStatus: status });
+      await expect(
+        mergePr(tempDir(), {
+          repo: "octo/widgets",
+          number: 7,
+          expectHead: MERGE_HEAD_SHA,
+          method: "merge",
+          auto: true,
+        }),
+      ).rejects.toMatchObject({ kind: "merge_blocked" });
+    }
+    // BLOCKED with pending checks is exactly what auto-merge is for.
+    stubMergeFixtures(work, { mergeStateStatus: "BLOCKED" });
+    setEnv(
+      "GH_STUB_AUTO_MERGE_POST_JSON",
+      writeStubJson(work, "auto.json", { merge_method: "merge" }),
+    );
+    const out = (await mergePr(tempDir(), {
+      repo: "octo/widgets",
+      number: 7,
+      expectHead: MERGE_HEAD_SHA,
+      method: "merge",
+      auto: true,
+    })) as { result: string };
+    expect(out.result).toBe("auto_merge_enabled");
+    expect(stubCalls(logFile).filter((c) => c.includes("--method POST"))).toHaveLength(1);
+  });
+
+  test("auto-merge without a method is rejected before any fetch", async () => {
+    const { work, logFile } = installGhStub();
+    stubMergeFixtures(work);
+    await expect(
+      mergePr(tempDir(), {
+        repo: "octo/widgets",
+        number: 7,
+        expectHead: MERGE_HEAD_SHA,
+        auto: true,
+      }),
+    ).rejects.toMatchObject({ kind: "gh_error" });
+    expect(stubCalls(logFile)).toEqual([]);
+  });
+
+  test("release-train head refuses auto-merge too", async () => {
+    const { work, logFile } = installGhStub();
+    stubMergeFixtures(work, { headRefName: "release-1-0-0" });
+    await expect(
+      mergePr(tempDir(), {
+        repo: "octo/widgets",
+        number: 7,
+        expectHead: MERGE_HEAD_SHA,
+        method: "squash",
+        auto: true,
+      }),
+    ).rejects.toMatchObject({ kind: "release_boundary" });
+    expect(stubCalls(logFile).some((c) => c.includes("--method POST"))).toBe(false);
+  });
+
+  test("--disable-auto DELETEs pulls/{n}/auto-merge", async () => {
+    const { work, logFile } = installGhStub();
+    stubMergeFixtures(work);
+    const out = (await mergePr(tempDir(), {
+      repo: "octo/widgets",
+      number: 7,
+      expectHead: MERGE_HEAD_SHA,
+      disableAuto: true,
+    })) as { result: string; action: string };
+    expect(out.result).toBe("auto_merge_disabled");
+    expect(out.action).toBe("auto_merge_disable");
+    const call = stubCalls(logFile).find((c) => c.includes("--method DELETE"));
+    expect(call).toContain("api repos/octo/widgets/pulls/7/auto-merge");
+  });
+
+  test("--disable-auto still enforces the stale-head guard", async () => {
+    const { work, logFile } = installGhStub();
+    stubMergeFixtures(work);
+    await expect(
+      mergePr(tempDir(), {
+        repo: "octo/widgets",
+        number: 7,
+        expectHead: STALE_SHA,
+        disableAuto: true,
+      }),
+    ).rejects.toMatchObject({ kind: "stale_head" });
+    expect(stubCalls(logFile).some((c) => c.includes("--method DELETE"))).toBe(false);
   });
 });

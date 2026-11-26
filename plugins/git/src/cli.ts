@@ -30,6 +30,7 @@ import {
   ensureGh,
   GhError,
   isValidHeadSha,
+  mergePr,
   type PrLineComment,
   type PrReviewEvent,
   resolveForgeRepo,
@@ -64,7 +65,7 @@ import {
 
 const CONTRACT = "herdr-plugins.git/v1";
 const PLUGIN_ID = "rebuildup.git";
-const PLUGIN_VERSION = "0.4.0";
+const PLUGIN_VERSION = "0.5.0";
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_REMOTE_TIMEOUT_MS = 60_000;
 const DEFAULT_DIFF_MAX_BYTES = 256 * 1024;
@@ -885,10 +886,11 @@ async function cmdPr(options: CliOptions): Promise<void> {
       "comment",
       "reply",
       "reviewers",
+      "merge",
     ].includes(action)
   ) {
     fail(
-      "pr requires an action: list | status | create | view | reviews | comments | checks | logs | review | comment | reply | reviewers",
+      "pr requires an action: list | status | create | view | reviews | comments | checks | logs | review | comment | reply | reviewers | merge",
       2,
     );
   }
@@ -1180,6 +1182,59 @@ async function cmdPr(options: CliOptions): Promise<void> {
       return;
     }
 
+    // `pr merge` (Issue #173): immediate merge, auto-merge enable, or
+    // auto-merge disable. Same mandatory --expect-head guard plus a
+    // mergeStateStatus/reviewDecision/isDraft re-verification immediately
+    // before the write; release-train head branches are hard-refused
+    // (github-delivery boundary, ADR-0030).
+    if (action === "merge") {
+      const number = Number(rest[0]);
+      if (!Number.isInteger(number) || number < 1) {
+        fail("pr merge requires a positive PR number", 2);
+      }
+      if (rest.length > 1) fail("pr merge accepts at most one PR number", 2);
+      const expectHeadRaw = flagValue(options.args, "--expect-head");
+      if (!expectHeadRaw || !isValidHeadSha(expectHeadRaw)) {
+        fail("pr merge requires --expect-head <full head sha> (head.sha from a prior pr read)", 2);
+      }
+      const methods = (
+        [
+          ["--squash", "squash"],
+          ["--merge", "merge"],
+          ["--rebase", "rebase"],
+        ] as const
+      )
+        .filter(([flag]) => hasFlag(options.args, flag))
+        .map(([, method]) => method);
+      if (methods.length > 1) {
+        fail("pr merge accepts at most one of --squash, --merge, --rebase", 2);
+      }
+      const method = methods[0] as "merge" | "squash" | "rebase" | undefined;
+      const auto = hasFlag(options.args, "--auto");
+      const disableAuto = hasFlag(options.args, "--disable-auto");
+      if (auto && disableAuto) fail("--auto and --disable-auto are mutually exclusive", 2);
+      if (auto && method === undefined) {
+        fail("pr merge --auto requires --squash, --merge, or --rebase", 2);
+      }
+      if (disableAuto && method !== undefined) {
+        fail("merge method flags are not valid with --disable-auto", 2);
+      }
+      const data = await mergePr(
+        repoRoot,
+        {
+          repo,
+          number,
+          expectHead: expectHeadRaw,
+          method,
+          auto: auto || undefined,
+          disableAuto: disableAuto || undefined,
+        },
+        ghOptions,
+      );
+      emit({ ...forgeBase, action: "merge", repo, ok: true, ...data });
+      return;
+    }
+
     // action === "create"
     const title = flagValue(options.args, "--title");
     if (!title) fail("pr create requires --title", 2);
@@ -1339,13 +1394,13 @@ Usage:
   git fetch <pane_id> [remote] [--prune]
   git push <pane_id> [--set-upstream] [--force-with-lease] [remote] [refspec]
   git remote <pane_id>
-  git pr list|status|create|view|reviews|comments|checks|logs
+  git pr list|status|create|view|reviews|comments|checks|logs|merge
       <pane_id> [args] [--repo owner/name]
       pr create: --title T [--body B | --body-file PATH|-] [--draft]
           [--base B] [--head B]
       pr reviews|comments|checks <pane> <number>
       pr logs <pane> <number> [--run ID | --job ID [--lines N]]
-  git pr review|comment|reply|reviewers <pane_id> [args]
+  git pr review|comment|reply|reviewers|merge <pane_id> [args]
       [--repo owner/name] --expect-head <full-sha>   (required)
       pr review <pane> <number> --approve|--request-changes|--comment
           [--body B | --body-file PATH|-]
@@ -1354,9 +1409,17 @@ Usage:
       pr reply <pane> <number> <comment-id> --body B|--body-file PATH|-
       pr reviewers <pane> <number>
           [--add-reviewer LOGIN[,LOGIN]...] [--remove-reviewer LOGIN...]
-      --expect-head is the stale-head guard: pass head.sha from a prior
-      pr read; the mutation is refused (kind "stale_head") if the PR head
-      moved. Merge/auto-merge are intentionally not exposed.
+      pr merge <pane> <number> [--squash|--merge|--rebase]
+          [--auto | --disable-auto] --expect-head <full-sha>   (required)
+      --expect-head is the stale-head guard: pass head.sha (or
+      headRefOid/head.sha from pr view) from a prior pr read; the merge
+      is refused (kind "stale_head") if the PR head moved. Merge-state
+      (mergeStateStatus/reviewDecision/isDraft) is re-verified right
+      before the write; non-mergeable states fail with kind
+      "merge_blocked". Release-train head branches (release-x-y-z) are
+      refused with kind "release_boundary" — release approval stays a
+      maintainer decision. --auto arms GitHub auto-merge (method flag
+      required); --disable-auto disarms it.
   git project <pane_id> [--session NAME]
   git capability
 
