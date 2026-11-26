@@ -50,5 +50,17 @@ the payload's `triggers` block, and runs carry
 `trigger:{kind:"worktree.created", worktree_path}`. `runOnSettle`/
 `stopOnSettle` are not implemented — see docs/specs/projects.md.
 
+`repos list` also reports the repo↔worktree association (#184): per
+member repo it calls herdr `worktree.list` (read-only,
+`trust_repository: false`), verifies each checkout by
+`git rev-parse --git-common-dir`, and returns `worktrees[]` with
+path/branch/dirty plus, for worktrees open in a herdr workspace,
+pane-addressed `herdr-plugins.git/v1` pointers and a compact `status`
+summary fetched via the sibling git plugin's CLI. Pane-less worktrees
+report path/branch/dirty only — no diff data is fabricated, and the
+plugin never creates worktrees or panes (herdr/Worktrunk own
+lifecycle). Unreachable herdr degrades to `worktrees: null` +
+`worktrees_error`; foreign checkouts land in `worktrees_skipped`.
+
 Full contract: `docs/contracts/projects-v1.md`. Spec: `docs/specs/projects.md`.
 Design: ADR-0009 (registry), ADR-0010 (script execution).
