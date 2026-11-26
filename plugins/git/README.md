@@ -113,6 +113,32 @@ staleness follows inbox-v1 rules verbatim.
 Full contract: `docs/contracts/git-v1.md`. Spec: `docs/specs/git.md`.
 Design: ADR-0006/0007/0008/0030.
 
+## Interactive TUI
+
+`rebuildup.git` also ships an interactive terminal surface per
+`docs/contracts/tui-v1.md` (issue #238): manifest pane entrypoint `main`
+(`placement = "tab"`) plus the `open` action, which opens the UI for the
+focused pane's repository via `herdr plugin pane open`. The UI covers
+status, changed files with per-file stage/unstage/diff, a paged
+diff viewer, commit history + per-commit show, branch comparison,
+branch operations, fetch/push, and remote listing. The target repo/HEAD
+is pinned at launch and revalidated before every mutation; commit, push,
+bulk stage/unstage, and branch switches require in-TUI confirmation.
+Forge (PR/Issue) workflows stay CLI-only for now (#239).
+
+```toml
+# opt-in keybind (user-owned; plugins never write herdr config)
+[[keys.command]]
+key = "prefix+g"
+type = "plugin_action"
+command = "rebuildup.git.open"
+description = "open git TUI"
+```
+
+For a repo checkout without herdr: `bun run src/tui.ts --cwd <path>`.
+Non-interactive use is unchanged — `src/cli.ts` remains the CLI/MCP/GUI
+contract surface.
+
 ## Notes
 
 - v0.2.0 adds local mutations (stage/commit/branch/upstream), remote
