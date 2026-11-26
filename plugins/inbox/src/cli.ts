@@ -22,9 +22,12 @@ import {
   subscribeAgentEvents,
 } from "../../../packages/herdr-client/src/index";
 import {
+  applyInboxFilters,
   archivePane,
   buildInbox,
   computeOrderRanks,
+  type InboxFilters,
+  linkPane,
   type OrderPlacement,
   pinPane,
   pruneState,
@@ -32,13 +35,17 @@ import {
   restorePane,
   settlePane,
   snoozePane,
+  toPublicLink,
   unarchivePane,
+  unlinkPane,
   unpinPane,
   upsertEntry,
 } from "./model";
 import {
   type InboxEntry,
+  type LinkKind,
   loadState,
+  type PaneLink,
   PLUGIN_ID,
   sessionEntries,
   sessionKeyFor,
@@ -110,6 +117,11 @@ function positional(args: string[]): string[] {
       arg === "--for" ||
       arg === "--before" ||
       arg === "--after" ||
+      arg === "--organize" ||
+      arg === "--search" ||
+      arg === "--workspace" ||
+      arg === "--pr" ||
+      arg === "--issue" ||
       arg === "--session" ||
       arg === "--socket" ||
       arg === "--timeout"
@@ -213,13 +225,37 @@ async function projectMetadata(
   return warnings;
 }
 
+const ORGANIZE_FILTERS = new Set(["settled", "snoozed", "archived", "none"]);
+
+/** Parse read-side `list` filters; unknown --organize values are usage errors. */
+function parseListFilters(args: string[]): InboxFilters {
+  const filters: InboxFilters = {};
+  if (args.includes("--attention")) filters.attention = true;
+  const organize = flagValue(args, "--organize");
+  if (organize !== undefined) {
+    if (!ORGANIZE_FILTERS.has(organize)) {
+      fail(`invalid --organize value (expected settled|snoozed|archived|none): ${organize}`, 2);
+    }
+    filters.organize = organize as NonNullable<InboxFilters["organize"]>;
+  }
+  const search = flagValue(args, "--search");
+  if (search !== undefined) filters.search = search;
+  const workspace = flagValue(args, "--workspace");
+  if (workspace !== undefined) filters.workspace = workspace;
+  return filters;
+}
+
 async function cmdList(options: CliOptions): Promise<void> {
   const now = new Date();
   const snapshot = await sessionSnapshot(options);
   const state = await loadState();
   const entries = state.sessions[sessionKeyFor(options)] ?? {};
   resolveState(entries, snapshot.agents ?? {}, now);
-  const items = buildInbox(snapshot.panes ?? [], snapshot.agents ?? {}, entries, now);
+  const filters = parseListFilters(options.args);
+  const items = applyInboxFilters(
+    buildInbox(snapshot.panes ?? [], snapshot.agents ?? {}, entries, now),
+    filters,
+  );
   const inbox = items.filter((item) => item.in_inbox);
   emit({
     contract: CONTRACT,
@@ -229,6 +265,12 @@ async function cmdList(options: CliOptions): Promise<void> {
       socket: options.socketPath ?? process.env.HERDR_SOCKET_PATH ?? null,
     },
     state_file: stateFilePath(),
+    filters: {
+      attention: filters.attention === true,
+      organize: filters.organize ?? null,
+      search: filters.search ?? null,
+      workspace: filters.workspace ?? null,
+    },
     counts: {
       total: items.length,
       inbox: inbox.length,
@@ -236,6 +278,7 @@ async function cmdList(options: CliOptions): Promise<void> {
       organized: items.filter((i) => i.organize).length,
       pinned: items.filter((i) => i.pinned).length,
       archived: items.filter((i) => i.organize?.kind === "archived").length,
+      linked: items.filter((i) => i.links.length > 0).length,
     },
     items,
   });
@@ -495,6 +538,179 @@ async function cmdOrder(options: CliOptions): Promise<void> {
   });
 }
 
+const TRACKER_REF_PATTERN =
+  /^([A-Za-z0-9][A-Za-z0-9_.-]*(?:\/[A-Za-z0-9][A-Za-z0-9_.-]*)+)#([1-9][0-9]*)$/;
+
+/** Parse "<repo>#<number>" where repo is a forge path like "owner/name". */
+export function parseTrackerRef(spec: string): { repo: string; number: number } {
+  const match = TRACKER_REF_PATTERN.exec(spec);
+  if (!match) {
+    fail(`invalid tracker ref (expected <owner>/<repo>#<number>): ${spec}`, 2);
+  }
+  return { repo: match[1] as string, number: Number(match[2]) };
+}
+
+/** Exactly one of --pr/--issue must carry the tracker ref. */
+function trackerKindAndRef(args: string[]): { kind: LinkKind; ref: string } {
+  const pr = flagValue(args, "--pr");
+  const issue = flagValue(args, "--issue");
+  if ((pr === undefined) === (issue === undefined)) {
+    fail("requires exactly one of --pr <repo>#<n> or --issue <repo>#<n>", 2);
+  }
+  return pr !== undefined ? { kind: "pr", ref: pr } : { kind: "issue", ref: issue as string };
+}
+
+const GH_VERIFY_TIMEOUT_MS = 15_000;
+
+/**
+ * Opt-in existence check via `gh`. Any failure (missing gh, auth, offline,
+ * timeout, not found) is a warning — the user-declared link is still
+ * recorded, per docs/specs/inbox.md (no event-driven auto-linking).
+ */
+async function verifyTrackerRef(
+  kind: LinkKind,
+  repo: string,
+  number: number,
+): Promise<string | null> {
+  const ref = `${repo}#${number}`;
+  return await new Promise((resolve) => {
+    let proc: ReturnType<typeof spawn>;
+    try {
+      proc = spawn("gh", [kind, "view", String(number), "--repo", repo, "--json", "number"], {
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+    } catch (err) {
+      resolve(`link verification unavailable (gh spawn failed): ${String(err)}; recorded anyway`);
+      return;
+    }
+    let settled = false;
+    const done = (message: string | null) => {
+      if (!settled) {
+        settled = true;
+        resolve(message);
+      }
+    };
+    const timer = setTimeout(() => {
+      try {
+        proc.kill("SIGKILL");
+      } catch {
+        // already exited
+      }
+      done(`link verification timed out for ${ref}; recorded without verification`);
+    }, GH_VERIFY_TIMEOUT_MS);
+    let stderr = "";
+    proc.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+    proc.on("error", (err) => {
+      clearTimeout(timer);
+      done(`link verification unavailable: ${String(err)}; recorded anyway`);
+    });
+    proc.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) {
+        done(null);
+      } else {
+        const detail = stderr.trim().slice(0, 200);
+        done(
+          `link verification failed for ${ref} (gh exit ${code}${detail ? `: ${detail}` : ""}); recorded anyway`,
+        );
+      }
+    });
+  });
+}
+
+function linkViews(links: PaneLink[] | undefined) {
+  return (links ?? []).map(toPublicLink);
+}
+
+/**
+ * Declare a user-owned tracker link (PR/Issue) on a pane. Links are explicit
+ * references stored in plugin state — never derived from forge events — and
+ * follow the same identity discipline as organize marks minus timed expiry
+ * (agent-session fingerprint + seq regression). The pane must exist in the
+ * session snapshot; re-linking the same ref re-validates its fingerprint.
+ */
+async function cmdLink(options: CliOptions): Promise<void> {
+  const paneId = await resolvePaneId(options.args);
+  const { kind, ref } = trackerKindAndRef(options.args);
+  const { repo, number } = parseTrackerRef(ref);
+  const now = new Date();
+  const snapshot = await sessionSnapshot(options);
+  const pane = await findPane(snapshot, paneId);
+  const agent = snapshot.agents?.[paneId];
+
+  const warnings: string[] = [];
+  if (options.args.includes("--verify")) {
+    const problem = await verifyTrackerRef(kind, repo, number);
+    if (problem) warnings.push(problem);
+  }
+
+  const sessionKey = sessionKeyFor(options);
+  await updateState((state) => {
+    const entries = sessionEntries(state, sessionKey);
+    linkPane(entries, pane, agent, { kind, repo, number, ref: `${repo}#${number}` }, now);
+  });
+
+  const fresh = await loadState();
+  emit({
+    contract: CONTRACT,
+    command: "link",
+    pane_id: paneId,
+    link: { kind, repo, number, ref: `${repo}#${number}` },
+    links: linkViews(fresh.sessions[sessionKey]?.[paneId]?.links),
+    warnings,
+  });
+}
+
+/** Remove one declared link; the pane must still exist in the snapshot. */
+async function cmdUnlink(options: CliOptions): Promise<void> {
+  const paneId = await resolvePaneId(options.args);
+  const { kind, ref } = trackerKindAndRef(options.args);
+  const { repo, number } = parseTrackerRef(ref);
+  const now = new Date();
+  const snapshot = await sessionSnapshot(options);
+  await findPane(snapshot, paneId);
+
+  const sessionKey = sessionKeyFor(options);
+  const removed = await updateState((state) => {
+    const entries = sessionEntries(state, sessionKey);
+    return unlinkPane(entries, paneId, kind, repo, number, now);
+  });
+  if (!removed) {
+    fail(`no matching ${kind} link on pane ${paneId}: ${repo}#${number}`);
+  }
+
+  const fresh = await loadState();
+  emit({
+    contract: CONTRACT,
+    command: "unlink",
+    pane_id: paneId,
+    removed: toPublicLink(removed),
+    links: linkViews(fresh.sessions[sessionKey]?.[paneId]?.links),
+    warnings: [],
+  });
+}
+
+/** Read the declared links stored for a pane (staleness already resolved). */
+async function cmdLinks(options: CliOptions): Promise<void> {
+  const paneId = await resolvePaneId(options.args);
+  const now = new Date();
+  const snapshot = await sessionSnapshot(options);
+  const state = await loadState();
+  const entries = state.sessions[sessionKeyFor(options)] ?? {};
+  resolveState(entries, snapshot.agents ?? {}, now);
+  const entry = entries[paneId];
+  if (!entry) fail(`no inbox state for pane: ${paneId}`);
+  emit({
+    contract: CONTRACT,
+    command: "links",
+    pane_id: paneId,
+    links: linkViews(entry.links),
+    warnings: [],
+  });
+}
+
 function emitLine(payload: unknown): void {
   process.stdout.write(`${JSON.stringify(payload)}\n`);
 }
@@ -566,7 +782,7 @@ async function cmdCapability(options: CliOptions): Promise<void> {
   emit({
     contract: CONTRACT,
     plugin: PLUGIN_ID,
-    version: "0.2.0",
+    version: "0.3.0",
     commands: [
       "list",
       "settle",
@@ -577,6 +793,9 @@ async function cmdCapability(options: CliOptions): Promise<void> {
       "archive",
       "unarchive",
       "order",
+      "link",
+      "unlink",
+      "links",
       "reconcile",
       "watch",
       "capability",
@@ -601,6 +820,10 @@ Usage:
   inbox archive <pane_id> [--session NAME]
   inbox unarchive <pane_id> [--session NAME]
   inbox order <pane_id> (--first | --last | --before <pane_id> | --after <pane_id>) [--session NAME]
+  inbox link <pane_id> (--pr <owner>/<repo>#<n> | --issue <owner>/<repo>#<n>) [--verify] [--session NAME]
+  inbox unlink <pane_id> (--pr <owner>/<repo>#<n> | --issue <owner>/<repo>#<n>) [--session NAME]
+  inbox links <pane_id> [--session NAME]
+  inbox list [--attention] [--organize settled|snoozed|archived|none] [--search <text>] [--workspace <id>]
   inbox reconcile [--session NAME]
   inbox watch [--interval SECONDS] [--session NAME]
   inbox capability [--session NAME]
@@ -624,6 +847,12 @@ async function main(): Promise<void> {
       return cmdOrganize(options, options.command);
     case "order":
       return cmdOrder(options);
+    case "link":
+      return cmdLink(options);
+    case "unlink":
+      return cmdUnlink(options);
+    case "links":
+      return cmdLinks(options);
     case "reconcile":
       return cmdReconcile(options);
     case "_wake":

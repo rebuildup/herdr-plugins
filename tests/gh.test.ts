@@ -13,7 +13,12 @@ import {
   collectPrView,
   ensureGh,
   GhError,
+  isValidHeadSha,
   resolveForgeRepo,
+  submitPrComment,
+  submitPrReply,
+  submitPrReview,
+  updatePrReviewers,
   versionAtLeast,
 } from "../plugins/git/src/gh";
 
@@ -36,6 +41,10 @@ const ENV_KEYS = [
   "GH_STUB_RUNS_JSON",
   "GH_STUB_RUN_VIEW_JSON",
   "GH_STUB_JOB_LOG",
+  "GH_STUB_REVIEW_POST_JSON",
+  "GH_STUB_ISSUE_COMMENT_POST_JSON",
+  "GH_STUB_REPLY_POST_JSON",
+  "GH_STUB_POST_STDIN_LOG",
 ];
 
 function tempDir(): string {
@@ -66,6 +75,8 @@ function setEnv(key: string, value: string | undefined): void {
 const STUB = `#!/usr/bin/env bash
 set -u
 printf '%s\\n' "$*" >> "\${GH_STUB_LOG:-/dev/null}"
+# Capture stdin once so POST payloads (gh api --input -) can be asserted.
+STDIN_DATA="$(cat 2>/dev/null || true)"
 case "\${1:-}" in
   --version) echo "gh version \${GH_STUB_VERSION:-2.105.0}"; exit 0;;
   auth)
@@ -74,6 +85,17 @@ case "\${1:-}" in
   repo) echo "\${GH_STUB_REPO:-octo/widgets}"; exit 0;;
   api)
     case "$*" in
+      *--method*POST*|*--input*)
+        if [ -n "\${STDIN_DATA:-}" ] && [ -n "\${GH_STUB_POST_STDIN_LOG:-}" ]; then
+          printf '%s\\n' "$STDIN_DATA" >> "$GH_STUB_POST_STDIN_LOG"
+        fi
+        case "$*" in
+          *pulls/*/comments/*/replies*) cat "\${GH_STUB_REPLY_POST_JSON:-/dev/null}";;
+          *pulls/*/reviews*) cat "\${GH_STUB_REVIEW_POST_JSON:-/dev/null}";;
+          *issues/*/comments*) cat "\${GH_STUB_ISSUE_COMMENT_POST_JSON:-/dev/null}";;
+          *) echo "unexpected POST endpoint: $*" >&2; exit 1;;
+        esac
+        exit 0;;
       *pulls/*/reviews*) cat "\${GH_STUB_REVIEWS_JSON:-/dev/null}";;
       *issues/*/comments*) cat "\${GH_STUB_ISSUE_COMMENTS_JSON:-/dev/null}";;
       *pulls/*/comments*) cat "\${GH_STUB_LINE_COMMENTS_JSON:-/dev/null}";;
@@ -91,6 +113,7 @@ case "\${1:-}" in
         fi
         cat "\${GH_STUB_CHECKS_JSON:-/dev/null}";;
       create) echo "https://github.com/octo/widgets/pull/42";;
+      edit) echo "https://github.com/octo/widgets/pull/7";;
       *) exit 1;;
     esac
     exit 0;;
@@ -602,5 +625,339 @@ describe("pr logs", () => {
     const call = stubCalls(logFile).find((c) => c.startsWith("run view"));
     expect(call).toContain("--job 9001");
     expect(call).toContain("--log");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR review/comment mutations (Issue #172)
+// ---------------------------------------------------------------------------
+
+const HEAD_SHA = "a".repeat(40);
+const STALE_SHA = "b".repeat(40);
+
+function stubMutationFixtures(work: string): void {
+  setEnv("GH_STUB_PR_DETAIL_JSON", writeStubJson(work, "detail.json", PR_DETAIL));
+}
+
+function postStdin(work: string): string {
+  const file = path.join(work, "post-stdin.log");
+  setEnv("GH_STUB_POST_STDIN_LOG", file);
+  return file;
+}
+
+describe("isValidHeadSha", () => {
+  test("accepts full sha1/sha256 hex, rejects short or non-hex", () => {
+    expect(isValidHeadSha("a".repeat(40))).toBe(true);
+    expect(isValidHeadSha("A".repeat(40))).toBe(true);
+    expect(isValidHeadSha("a".repeat(64))).toBe(true);
+    expect(isValidHeadSha("abc123")).toBe(false);
+    expect(isValidHeadSha("g".repeat(40))).toBe(false);
+    expect(isValidHeadSha("")).toBe(false);
+  });
+});
+
+describe("pr review mutation", () => {
+  test("approve POSTs to pulls/{n}/reviews with commit_id pinned to head", async () => {
+    const { work, logFile } = installGhStub();
+    stubMutationFixtures(work);
+    const stdinLog = postStdin(work);
+    setEnv(
+      "GH_STUB_REVIEW_POST_JSON",
+      writeStubJson(work, "review.json", {
+        id: 900,
+        user: { login: "me" },
+        state: "APPROVED",
+        body: "",
+        commit_id: "abc123",
+        submitted_at: "2026-02-01T00:00:00Z",
+        html_url: "https://example.com/review/900",
+      }),
+    );
+    const out = (await submitPrReview(tempDir(), {
+      repo: "octo/widgets",
+      number: 7,
+      expectHead: "abc123",
+      event: "APPROVE",
+    })) as {
+      head: { sha: string };
+      review: { id: number; state: string; commit_id: string; url: string };
+    };
+    expect(out.review).toMatchObject({
+      id: 900,
+      state: "APPROVED",
+      commit_id: "abc123",
+      url: "https://example.com/review/900",
+    });
+    expect(out.head.sha).toBe("abc123");
+    const call = stubCalls(logFile).find((c) => c.includes("--method POST"));
+    expect(call).toContain("api repos/octo/widgets/pulls/7/reviews");
+    expect(call).toContain("--input -");
+    const payload = readFileSync(stdinLog, "utf8");
+    expect(payload).toContain('"commit_id":"abc123"');
+    expect(payload).toContain('"event":"APPROVE"');
+    // Review body never appears in argv.
+    expect(call).not.toContain("looks good");
+  });
+
+  test("request-changes with line comments sends comments[] via stdin payload", async () => {
+    const { work, logFile } = installGhStub();
+    stubMutationFixtures(work);
+    const stdinLog = postStdin(work);
+    setEnv(
+      "GH_STUB_REVIEW_POST_JSON",
+      writeStubJson(work, "review.json", {
+        id: 901,
+        user: { login: "me" },
+        state: "CHANGES_REQUESTED",
+        commit_id: "abc123",
+        html_url: "https://example.com/review/901",
+      }),
+    );
+    const out = (await submitPrReview(tempDir(), {
+      repo: "octo/widgets",
+      number: 7,
+      expectHead: "abc123",
+      event: "REQUEST_CHANGES",
+      body: "please fix",
+      comments: [
+        { path: "src/a.ts", line: 42, side: "RIGHT", body: "nit: rename" },
+        { path: "src/b.ts", line: 7, body: "second" },
+      ],
+    })) as { review: { state: string } };
+    expect(out.review.state).toBe("CHANGES_REQUESTED");
+    const payload = JSON.parse(readFileSync(stdinLog, "utf8").trim()) as {
+      event: string;
+      body: string;
+      comments: Array<{ path: string; line: number; side?: string; body: string }>;
+    };
+    expect(payload.event).toBe("REQUEST_CHANGES");
+    expect(payload.body).toBe("please fix");
+    expect(payload.comments).toHaveLength(2);
+    expect(payload.comments[0]).toEqual({
+      path: "src/a.ts",
+      line: 42,
+      side: "RIGHT",
+      body: "nit: rename",
+    });
+    expect(payload.comments[1]).not.toHaveProperty("side");
+    const call = stubCalls(logFile).find((c) => c.includes("--method POST"));
+    expect(call).not.toContain("nit: rename");
+    expect(call).not.toContain("please fix");
+  });
+
+  test("stale head refuses before any POST", async () => {
+    const { work, logFile } = installGhStub();
+    stubMutationFixtures(work); // head sha is abc123
+    await expect(
+      submitPrReview(tempDir(), {
+        repo: "octo/widgets",
+        number: 7,
+        expectHead: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        event: "APPROVE",
+      }),
+    ).rejects.toMatchObject({ kind: "stale_head" });
+    const calls = stubCalls(logFile);
+    expect(calls.some((c) => c.includes("--method POST"))).toBe(false);
+    // The guard still fetched the PR once.
+    expect(calls.some((c) => c.includes("api repos/octo/widgets/pulls/7"))).toBe(true);
+  });
+
+  test("missing head sha is a structured gh_error, not a proceed", async () => {
+    const { work } = installGhStub();
+    setEnv(
+      "GH_STUB_PR_DETAIL_JSON",
+      writeStubJson(work, "detail.json", { number: 7, head: { ref: "x", sha: null } }),
+    );
+    await expect(
+      submitPrReview(tempDir(), {
+        repo: "octo/widgets",
+        number: 7,
+        expectHead: HEAD_SHA,
+        event: "COMMENT",
+        body: "hi",
+      }),
+    ).rejects.toMatchObject({ kind: "gh_error" });
+  });
+
+  test("invalid line comment entries are rejected before POST", async () => {
+    const { work, logFile } = installGhStub();
+    stubMutationFixtures(work);
+    await expect(
+      submitPrReview(tempDir(), {
+        repo: "octo/widgets",
+        number: 7,
+        expectHead: "abc123",
+        event: "COMMENT",
+        comments: [{ path: "", line: 0, body: "" }],
+      }),
+    ).rejects.toMatchObject({ kind: "gh_error" });
+    expect(stubCalls(logFile).some((c) => c.includes("--method POST"))).toBe(false);
+  });
+
+  test("gh POST failure maps to gh_error", async () => {
+    const { work } = installGhStub();
+    stubMutationFixtures(work);
+    // No GH_STUB_REVIEW_POST_JSON -> stub cats /dev/null -> empty stdout ->
+    // JSON.parse fails inside ghApiPost... use a failing endpoint instead:
+    setEnv("GH_STUB_REVIEW_POST_JSON", "not-json{");
+    await expect(
+      submitPrReview(tempDir(), {
+        repo: "octo/widgets",
+        number: 7,
+        expectHead: "abc123",
+        event: "APPROVE",
+      }),
+    ).rejects.toThrow();
+  });
+});
+
+describe("pr comment mutation", () => {
+  test("posts to issues/{n}/comments and echoes the comment", async () => {
+    const { work, logFile } = installGhStub();
+    stubMutationFixtures(work);
+    const stdinLog = postStdin(work);
+    setEnv(
+      "GH_STUB_ISSUE_COMMENT_POST_JSON",
+      writeStubJson(work, "comment.json", {
+        id: 55,
+        user: { login: "me" },
+        body: "hello pr",
+        created_at: "2026-02-01T00:00:00Z",
+        updated_at: "2026-02-01T00:00:00Z",
+        html_url: "https://example.com/comment/55",
+      }),
+    );
+    const out = (await submitPrComment(tempDir(), {
+      repo: "octo/widgets",
+      number: 7,
+      expectHead: "abc123",
+      body: "hello pr",
+    })) as {
+      comment: { id: number; body: string; url: string };
+      head: { sha: string };
+    };
+    expect(out.comment).toMatchObject({ id: 55, body: "hello pr" });
+    const call = stubCalls(logFile).find((c) => c.includes("--method POST"));
+    expect(call).toContain("api repos/octo/widgets/issues/7/comments");
+    const payload = JSON.parse(readFileSync(stdinLog, "utf8").trim()) as { body: string };
+    expect(payload.body).toBe("hello pr");
+    expect(call).not.toContain("hello pr");
+  });
+
+  test("stale head refuses before posting", async () => {
+    const { work, logFile } = installGhStub();
+    stubMutationFixtures(work);
+    await expect(
+      submitPrComment(tempDir(), {
+        repo: "octo/widgets",
+        number: 7,
+        expectHead: STALE_SHA,
+        body: "hi",
+      }),
+    ).rejects.toMatchObject({ kind: "stale_head" });
+    expect(stubCalls(logFile).some((c) => c.includes("--method POST"))).toBe(false);
+  });
+});
+
+describe("pr reply mutation", () => {
+  test("posts to pulls/{n}/comments/{id}/replies", async () => {
+    const { work, logFile } = installGhStub();
+    stubMutationFixtures(work);
+    setEnv(
+      "GH_STUB_REPLY_POST_JSON",
+      writeStubJson(work, "reply.json", {
+        id: 77,
+        user: { login: "me" },
+        body: "done",
+        in_reply_to_id: 22,
+        html_url: "https://example.com/reply/77",
+      }),
+    );
+    const out = (await submitPrReply(tempDir(), {
+      repo: "octo/widgets",
+      number: 7,
+      expectHead: "abc123",
+      commentId: 22,
+      body: "done",
+    })) as { comment_id: number; comment: { id: number; body: string } };
+    expect(out.comment_id).toBe(22);
+    expect(out.comment).toMatchObject({ id: 77, body: "done" });
+    const call = stubCalls(logFile).find((c) => c.includes("--method POST"));
+    expect(call).toContain("api repos/octo/widgets/pulls/7/comments/22/replies");
+  });
+
+  test("stale head refuses before posting", async () => {
+    const { work, logFile } = installGhStub();
+    stubMutationFixtures(work);
+    await expect(
+      submitPrReply(tempDir(), {
+        repo: "octo/widgets",
+        number: 7,
+        expectHead: STALE_SHA,
+        commentId: 22,
+        body: "done",
+      }),
+    ).rejects.toMatchObject({ kind: "stale_head" });
+    expect(stubCalls(logFile).some((c) => c.includes("--method POST"))).toBe(false);
+  });
+});
+
+describe("pr reviewers mutation", () => {
+  test("gh pr edit --add-reviewer/--remove-reviewer then echoes review_requests", async () => {
+    const { work, logFile } = installGhStub();
+    stubMutationFixtures(work);
+    const out = (await updatePrReviewers(tempDir(), {
+      repo: "octo/widgets",
+      number: 7,
+      expectHead: "abc123",
+      add: ["alice", "bob"],
+      remove: ["carol"],
+    })) as {
+      review_requests: { users: unknown[]; teams: unknown[] };
+      head: { sha: string };
+    };
+    expect(out.review_requests.users).toEqual(["rev1", "rev2"]);
+    expect(out.review_requests.teams).toEqual(["team-a"]);
+    expect(out.head.sha).toBe("abc123");
+    const call = stubCalls(logFile).find((c) => c.startsWith("pr edit"));
+    expect(call).toContain("pr edit 7");
+    expect(call).toContain("--repo octo/widgets");
+    expect(call).toContain("--add-reviewer alice,bob");
+    expect(call).toContain("--remove-reviewer carol");
+  });
+
+  test("stale head refuses before gh pr edit", async () => {
+    const { work, logFile } = installGhStub();
+    stubMutationFixtures(work);
+    await expect(
+      updatePrReviewers(tempDir(), {
+        repo: "octo/widgets",
+        number: 7,
+        expectHead: STALE_SHA,
+        add: ["alice"],
+      }),
+    ).rejects.toMatchObject({ kind: "stale_head" });
+    expect(stubCalls(logFile).some((c) => c.startsWith("pr edit"))).toBe(false);
+  });
+
+  test("invalid reviewer login and empty request are rejected", async () => {
+    const { work, logFile } = installGhStub();
+    stubMutationFixtures(work);
+    await expect(
+      updatePrReviewers(tempDir(), {
+        repo: "octo/widgets",
+        number: 7,
+        expectHead: "abc123",
+        add: ["bad login!"],
+      }),
+    ).rejects.toMatchObject({ kind: "gh_error" });
+    await expect(
+      updatePrReviewers(tempDir(), {
+        repo: "octo/widgets",
+        number: 7,
+        expectHead: "abc123",
+      }),
+    ).rejects.toMatchObject({ kind: "gh_error" });
+    expect(stubCalls(logFile).some((c) => c.startsWith("pr edit"))).toBe(false);
   });
 });

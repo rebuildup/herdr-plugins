@@ -8,9 +8,10 @@ and merge-base branch comparison (`compare`). Local mutation commands
 operations (`fetch`, `push`, `remote` list), and the GitHub PR surface
 (`pr list|status|create|view` via the host `gh` CLI) landed in v0.2.0.
 v0.3.0 extends the PR surface with read-only review/check/log access
-(`pr reviews|comments|checks|logs`). Review submission, comment
-posting, merge, and non-GitHub forges are later tickets. Checkpoint
-integration is Issue #4.
+(`pr reviews|comments|checks|logs`). v0.4.0 adds forge review/comment
+mutations (`pr review|comment|reply|reviewers`) behind a mandatory
+`--expect-head` stale-head guard. Merge/auto-merge and non-GitHub
+forges are later tickets. Checkpoint integration is Issue #4.
 
 ## Purpose
 
@@ -19,8 +20,9 @@ CLI, agents, and external clients (herdr-t3) can answer "what branch is
 this pane on, and is the worktree dirty?" without leaving herdr.
 
 herdr remains the authority for panes and workspaces. This plugin never
-creates, moves, or deletes worktrees and never mutates the repository; it
-only runs read-only `git` commands and projects display metadata.
+creates, moves, or deletes worktrees; local git mutations and forge
+writes are limited to the explicit allow-listed commands below and are
+invoked only on user/agent request.
 
 ## Identity and resolution
 
@@ -220,11 +222,31 @@ client. Repo resolution is `gh repo view` inside the pane's repo root
 - All `gh` calls are argv spawn under `remoteTimeoutMs` (default 60s);
   error messages echo subcommand words only, never argv content.
 - Every review/check/log payload echoes `head`/`base` `{ref, sha}` (and
-  `head_sha` for logs) so mutation tickets can verify freshness.
+  `head_sha` for logs) so callers can pin mutations to a known head.
+- Forge mutations (v0.4.0, Issue #172): `pr review` submits
+  APPROVE/REQUEST_CHANGES/COMMENT via `POST pulls/{n}/reviews` —
+  including optional line comments from `--comments-file` (JSON array
+  of `{path, line, side?, body}`) since `gh pr review` cannot express
+  them; `pr comment` posts a conversation comment via
+  `POST issues/{n}/comments`; `pr reply` answers a review thread via
+  `POST pulls/{n}/comments/{id}/replies`; `pr reviewers` maps to
+  `gh pr edit --add-reviewer/--remove-reviewer`. All mutation payloads
+  go through `gh api --input -` (stdin) or plain argv flags — bodies
+  never appear in gh argv.
+- **Stale-head guard (mandatory):** every forge mutation requires
+  `--expect-head <full sha>`; the plugin re-fetches the PR head
+  immediately before writing and refuses with `kind: "stale_head"` on
+  mismatch. Reviews additionally pin `commit_id` to that sha.
+- **Release boundary:** mutations are explicit invocations only — no
+  automation path submits reviews, posts comments, requests reviewers,
+  merges, or auto-merges. The plugin never approves its own release PR
+  or merges `release-* -> main`; that stays a maintainer decision
+  (github-delivery skill).
 - The plugin exposes PR state but never acts on merge/review gates;
-  review submission, comment posting, merge, `pr checkout`/worktree
-  creation (herdr/Worktrunk lifecycle responsibility — reference only),
-  and non-GitHub forges are out of scope.
+  merge/auto-merge, editing or deleting existing reviews/comments,
+  `pr checkout`/worktree creation (herdr/Worktrunk lifecycle
+  responsibility — reference only), and non-GitHub forges are out of
+  scope.
 
 ## Metadata projection
 
@@ -256,12 +278,14 @@ Unknown keys are ignored; invalid values fall back to defaults.
 ## Non-goals
 
 - No daemon, no hooks that write plugin state, no polling.
-- No PR merge/review/comment-posting operations and no non-GitHub forge
-  integrations (the `gh`-CLI PR surface covers list/status/create/view
-  plus read-only reviews/comments/checks/logs; upstream
-  `source-control.md`'s wider surface — review submission, reviewers,
-  auto-merge, GitLab/Forgejo/Gitea/Bitbucket/Azure DevOps/GitCafe/
-  Cursor Origin — is tracked in the feature ledger for later trains).
+- No PR merge/auto-merge operations, no editing/deleting existing
+  reviews or comments, and no non-GitHub forge integrations (the
+  `gh`-CLI PR surface covers list/status/create/view plus read-only
+  reviews/comments/checks/logs and explicit review/comment/reviewer
+  mutations behind `--expect-head`; upstream `source-control.md`'s
+  wider surface — auto-merge, GitLab/Forgejo/Gitea/Bitbucket/Azure
+  DevOps/GitCafe/Cursor Origin — is tracked in the feature ledger for
+  later trains).
 - No destructive git operations (see Local mutations).
 - No parsing of GitHub remotes beyond what `gh`/git provide, no provider
   integrations.

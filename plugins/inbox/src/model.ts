@@ -17,6 +17,8 @@ import type {
   ArchivedMark,
   GenerationMark,
   InboxEntry,
+  LinkKind,
+  PaneLink,
   PinnedMark,
   SettledMark,
   SnoozedMark,
@@ -30,6 +32,19 @@ export interface OrganizeView {
   since: string;
   /** Snooze deadline (snoozed only). */
   until?: string;
+}
+
+/** Public view of a stored PaneLink (fingerprint/seq internals omitted). */
+export interface InboxLink {
+  kind: LinkKind;
+  repo: string;
+  number: number;
+  ref: string;
+  at: string;
+}
+
+export function toPublicLink(link: PaneLink): InboxLink {
+  return { kind: link.kind, repo: link.repo, number: link.number, ref: link.ref, at: link.at };
 }
 
 export interface InboxItem {
@@ -50,6 +65,8 @@ export interface InboxItem {
   attention: boolean;
   /** False when organize state hides the pane from the default inbox view. */
   in_inbox: boolean;
+  /** User-declared tracker links (possibly empty). */
+  links: InboxLink[];
 }
 
 /** Statuses that must never be hidden by organize state. */
@@ -105,6 +122,24 @@ function markExpiredOrAdvanced(mark: MarkLike, agent: AgentInfo | undefined, now
   return false;
 }
 
+/**
+ * Link staleness: a declared tracker reference is dropped when the pane's
+ * agent-session fingerprint no longer matches (agent generation swap) or
+ * when the recorded `state_change_seq` regresses (pane/agent identity
+ * recycled). `state_change_seq` advances on routine status transitions, so
+ * — unlike organize marks — a forward seq advance never expires a link:
+ * the association describes the work, not a transient status. Links on
+ * panes absent from the snapshot are tolerated (fingerprint may be
+ * temporarily unreportable) and still die with the entry on `pane.closed`
+ * or retention pruning.
+ */
+function linkStale(link: PaneLink, agent: AgentInfo | undefined): boolean {
+  if (!sameAgentSession(link.agent_session, agentSessionRef(agent))) return true;
+  const seq = currentSeq(agent);
+  if (seq >= 0 && link.seq >= 0 && seq < link.seq) return true;
+  return false;
+}
+
 /** True while the entry carries any organize state worth retaining. */
 function entryHasState(entry: InboxEntry): boolean {
   return (
@@ -112,7 +147,8 @@ function entryHasState(entry: InboxEntry): boolean {
     entry.snoozed !== undefined ||
     entry.archived !== undefined ||
     entry.pinned !== undefined ||
-    entry.order !== undefined
+    entry.order !== undefined ||
+    (entry.links?.length ?? 0) > 0
   );
 }
 
@@ -143,6 +179,13 @@ export function resolveEntry(
   if (entry.pinned && markExpiredOrAdvanced(entry.pinned, agent, now)) {
     delete entry.pinned;
     cleared = true;
+  }
+  if (entry.links) {
+    const kept = entry.links.filter((link) => !linkStale(link, agent));
+    if (kept.length !== entry.links.length) {
+      entry.links = kept.length > 0 ? kept : undefined;
+      cleared = true;
+    }
   }
 
   if (entry.snoozed) {
@@ -306,10 +349,88 @@ export function unarchivePane(
   return true;
 }
 
+export interface NewPaneLink {
+  kind: LinkKind;
+  repo: string;
+  number: number;
+  ref: string;
+}
+
+/**
+ * Declare (or re-declare) a tracker link on a pane. Re-linking the same
+ * kind+repo+number re-stamps `at` and the identity fingerprint — that is
+ * the explicit re-validation path for a link whose guard went stale.
+ */
+export function linkPane(
+  entries: Record<string, InboxEntry>,
+  pane: PaneInfo,
+  agent: AgentInfo | undefined,
+  link: NewPaneLink,
+  now: Date,
+): InboxEntry {
+  const entry = upsertEntry(entries, pane, now.toISOString());
+  const record: PaneLink = {
+    ...link,
+    at: now.toISOString(),
+    seq: currentSeq(agent),
+    agent_session: agentSessionRef(agent),
+  };
+  const links = entry.links ?? [];
+  const index = links.findIndex(
+    (existing) =>
+      existing.kind === link.kind && existing.repo === link.repo && existing.number === link.number,
+  );
+  if (index >= 0) {
+    links[index] = record;
+  } else {
+    links.push(record);
+  }
+  entry.links = links;
+  return entry;
+}
+
+/** Remove one declared link; returns the removed record for echo. */
+export function unlinkPane(
+  entries: Record<string, InboxEntry>,
+  paneId: string,
+  kind: LinkKind,
+  repo: string,
+  number: number,
+  now: Date,
+): PaneLink | undefined {
+  const entry = entries[paneId];
+  const links = entry?.links;
+  if (!entry || !links) return undefined;
+  const index = links.findIndex(
+    (link) => link.kind === kind && link.repo === repo && link.number === number,
+  );
+  if (index === -1) return undefined;
+  const [removed] = links.splice(index, 1);
+  entry.updated_at = now.toISOString();
+  if (links.length === 0) delete entry.links;
+  dropIfEmpty(entries, paneId);
+  return removed;
+}
+
+/**
+ * Restore clears organize state (marks, pin, order) but preserves declared
+ * tracker links — they are work references, not organize state. `unlink`
+ * and `pane.closed` are the link removal paths.
+ */
 export function restorePane(entries: Record<string, InboxEntry>, paneId: string): boolean {
-  const existed = paneId in entries;
+  const entry = entries[paneId];
+  if (!entry) return false;
+  const links = entry.links;
   delete entries[paneId];
-  return existed;
+  if (links && links.length > 0) {
+    entries[paneId] = {
+      pane_id: paneId,
+      workspace_id: entry.workspace_id,
+      links,
+      updated_at: entry.updated_at,
+    };
+  }
+  return true;
 }
 
 export type OrderPlacement =
@@ -401,6 +522,41 @@ export function pruneState(
   return removed;
 }
 
+/** Read-side list filters; they never mutate state. */
+export interface InboxFilters {
+  /** Keep only items currently requiring attention (`blocked`). */
+  attention?: boolean;
+  /** Keep items whose organize kind matches; "none" = no hide-kind mark. */
+  organize?: OrganizeKind | "none";
+  /** Case-insensitive substring over title, cwd, and pane_id. */
+  search?: string;
+  /** Exact workspace_id match. */
+  workspace?: string;
+}
+
+export function applyInboxFilters(items: InboxItem[], filters: InboxFilters): InboxItem[] {
+  const needle = filters.search?.trim().toLowerCase();
+  return items.filter((item) => {
+    if (filters.attention === true && !item.attention) return false;
+    if (filters.organize !== undefined) {
+      const matches =
+        filters.organize === "none"
+          ? item.organize === undefined
+          : item.organize?.kind === filters.organize;
+      if (!matches) return false;
+    }
+    if (filters.workspace !== undefined && item.workspace_id !== filters.workspace) return false;
+    if (needle) {
+      const haystack = [item.title, item.cwd, item.pane_id]
+        .filter((field): field is string => typeof field === "string")
+        .join("\n")
+        .toLowerCase();
+      if (!haystack.includes(needle)) return false;
+    }
+    return true;
+  });
+}
+
 /**
  * Build the inbox view: every live pane with agent activity plus any pane
  * carrying organize state, resolved against current agent info. Items carry
@@ -442,15 +598,18 @@ export function buildInbox(
       order: entry?.order,
       attention,
       in_inbox: !hidden,
+      links: (entry?.links ?? []).map(toPublicLink),
     });
   }
 
   // Organize entries for panes missing from the snapshot (closed panes) are
-  // retained in state but reported as absent rather than fabricated.
+  // retained in state but reported as absent rather than fabricated. Entries
+  // carrying only links are reported too so declared references stay visible.
   for (const [paneId, entry] of Object.entries(entries)) {
     if (seen.has(paneId)) continue;
     const resolved = resolveEntry(entry, undefined, now);
-    if (resolved.organize) {
+    const links = (entry.links ?? []).map(toPublicLink);
+    if (resolved.organize || links.length > 0) {
       items.push({
         pane_id: paneId,
         workspace_id: entry.workspace_id,
@@ -459,6 +618,7 @@ export function buildInbox(
         order: entry.order,
         attention: false,
         in_inbox: false,
+        links,
       });
     }
   }
