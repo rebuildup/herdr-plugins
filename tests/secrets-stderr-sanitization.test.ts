@@ -5,22 +5,16 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 /**
- * Negative fixture for issue #170 contract re-check: rebuildup.secrets
- * must never emit secret-shaped material, including content a provider
- * CLI writes to stderr on failure.
+ * Negative fixture for issue #170 contract re-check / #209 fix:
+ * rebuildup.secrets must never emit secret-shaped material, including
+ * content a provider CLI writes to stderr (or stdout) on failure.
  *
- * KNOWN GAP (documented, test skipped): `provider.ts classifyFailure`
- * embeds up to 300 chars of raw provider stderr into the `detail` field
- * that `resolve` prints on stdout and that `run`/`inject`/`capability
- * --probe` surface in error envelopes. A hostile or misconfigured
- * `--domain`/`--infisical-bin` that echoes secret material (or the
- * INFISICAL_TOKEN) in an error message would leak it into plugin output,
- * weakening the ADR-0027 §3 "never emitted" boundary. The desired
- * contract is that `detail` carries only classified, sanitized
- * diagnostics — never verbatim provider output.
- *
- * Un-skip this test once provider stderr is redacted (e.g. fixed
- * classification strings, or stderr scrubbed of env/token values).
+ * `provider.ts classifyFailure` classifies provider stderr internally
+ * but `detail` carries only the exit/signal fact — provider output is
+ * never verbatim in `resolve` stdout JSON, the `run`/`inject` stderr
+ * error envelopes, or the `capability --probe` reachability detail
+ * (ADR-0027 §3). `capability`'s `cli.detail` likewise reports only the
+ * `--version` exit code.
  */
 
 const CLI = path.join(import.meta.dir, "../plugins/secrets/src/cli.ts");
@@ -73,31 +67,77 @@ function runCli(args: string[], env: Record<string, string>) {
   );
 }
 
-describe("secrets provider stderr sanitization (#170 negative fixture)", () => {
-  test.skip("provider stderr content never reaches emitted detail/envelopes", async () => {
-    const dir = tempDir();
-    const configDir = path.join(dir, "config");
-    mkdirSync(configDir, { recursive: true });
-    writeFileSync(
-      path.join(configDir, "config.json"),
-      JSON.stringify({
-        infisical: { domain: "https://infisical.test/api", projectId: "p1" },
-        bindings: [{ name: "a", env: "A_KEY", ref: "infisical:dev:/:A_SECRET" }],
-      }),
-    );
-    const binDir = writeLeakyInfisical(dir);
-    const env: Record<string, string> = {};
-    for (const [key, value] of Object.entries(process.env)) {
-      if (value !== undefined) env[key] = value;
-    }
-    env.PATH = `${binDir}:${process.env.PATH ?? ""}`;
-    env.HERDR_PLUGIN_CONFIG_DIR = configDir;
-    env.HERDR_PLUGIN_STATE_DIR = path.join(dir, "state");
+function harness(): { configDir: string; env: Record<string, string> } {
+  const dir = tempDir();
+  const configDir = path.join(dir, "config");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(
+    path.join(configDir, "config.json"),
+    JSON.stringify({
+      infisical: { domain: "https://infisical.test/api", projectId: "p1" },
+      bindings: [{ name: "a", env: "A_KEY", ref: "infisical:dev:/:A_SECRET" }],
+    }),
+  );
+  const binDir = writeLeakyInfisical(dir);
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined) env[key] = value;
+  }
+  env.PATH = `${binDir}:${process.env.PATH ?? ""}`;
+  env.HERDR_PLUGIN_CONFIG_DIR = configDir;
+  env.HERDR_PLUGIN_STATE_DIR = path.join(dir, "state");
+  return { configDir, env };
+}
 
-    const result = await runCli(["resolve", "--binding", "a"], env);
+/** The leak marker must not appear in ANY plugin output surface. */
+function expectNoLeak(result: { stdout: string; stderr: string }): void {
+  expect(result.stdout).not.toContain(LEAK_MARKER);
+  expect(result.stderr).not.toContain(LEAK_MARKER);
+}
+
+describe("secrets provider stderr sanitization (#170 negative fixture, #209)", () => {
+  test("resolve: provider stderr content never reaches detail or envelopes", async () => {
+    const { configDir, env } = harness();
+    const result = await runCli(["resolve", "--config-dir", configDir, "--binding", "a"], env);
     expect(result.status).toBe(1);
-    // The leak marker must not appear in ANY plugin output surface.
-    expect(result.stdout).not.toContain(LEAK_MARKER);
-    expect(result.stderr).not.toContain(LEAK_MARKER);
+    expectNoLeak(result);
+    const bindings = JSON.parse(result.stdout).bindings as Array<Record<string, unknown>>;
+    expect(bindings[0]?.status).toBe("provider_error");
+    expect(String(bindings[0]?.detail ?? "")).not.toContain(LEAK_MARKER);
+  });
+
+  test("run: resolution_failed envelope carries no provider stderr", async () => {
+    const { configDir, env } = harness();
+    const result = await runCli(
+      ["run", "--config-dir", configDir, "--binding", "a", "--", process.execPath, "-e", "0"],
+      env,
+    );
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("resolution_failed");
+    expectNoLeak(result);
+  });
+
+  test("inject: resolution_failed envelope carries no provider stderr", async () => {
+    const { configDir, env } = harness();
+    const result = await runCli(
+      ["inject", "--config-dir", configDir, "--binding", "a", "--surface", "workspace"],
+      env,
+    );
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("resolution_failed");
+    expectNoLeak(result);
+  });
+
+  test("capability --probe: reachability detail carries no provider stderr", async () => {
+    const { configDir, env } = harness();
+    const result = await runCli(["capability", "--config-dir", configDir, "--probe"], env);
+    expect(result.status).toBe(0);
+    expectNoLeak(result);
+    const provider = JSON.parse(result.stdout).provider as Record<string, unknown>;
+    const reachability = provider.reachability as Record<string, unknown>;
+    expect(reachability.status).toBe("provider_error");
+    if (typeof reachability.detail === "string") {
+      expect(reachability.detail).not.toContain(LEAK_MARKER);
+    }
   });
 });

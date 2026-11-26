@@ -9,7 +9,7 @@
 
 export const CONTRACT = "herdr-plugins.secrets/v1";
 export const PLUGIN_ID = "rebuildup.secrets";
-export const PLUGIN_VERSION = "0.1.0";
+export const PLUGIN_VERSION = "0.1.1";
 
 /** Canonical self-hosted Infisical control plane (secrets-management skill). */
 export const CANONICAL_INFISICAL_DOMAIN = "https://secrets.rebuildup.dev/api";
