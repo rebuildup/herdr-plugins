@@ -72,7 +72,7 @@
     },
     "plugins/textgen": {
       "name": "@herdr-plugins/textgen",
-      "version": "0.7.0",
+      "version": "0.8.0",
     },
     "plugins/usage": {
       "name": "@herdr-plugins/usage",

@@ -1,6 +1,6 @@
 id = "rebuildup.textgen"
 name = "TextGen"
-version = "0.7.0"
+version = "0.8.0"
 min_herdr_version = "0.9.0"
 description = "Text generation contract (herdr-plugins.textgen/v1): six generation tasks (thread title, branch name, commit message, PR content, review guide, next prompt) resolved across agent-pane providers and opt-in API generators, with a strict input boundary and validated outputs. Generation only — git/forge execution stays with the caller."
 platforms = ["linux", "macos", "windows"]
@@ -13,7 +13,31 @@ platforms = ["linux", "macos", "windows"]
 # `agent.prompt --wait` → `agent.read` → cleanup), so generation stays
 # visible, interruptible, and under herdr's PTY authority. API generators
 # are opt-in per config (ADR-0018 credential boundary). No
-# [[actions]] / [[events]] / [[startup]]: generation and the
+# [[events]] / [[startup]] hooks: generation and the
 # watch-next-prompt subscription are explicit CLI invocations (#109);
 # event-driven triggers run inside the long-lived CLI, not as plugin
 # hooks, so a plugin failure can never wedge herdr's event pipeline.
+#
+# Interactive TUI surface (#246, contract docs/contracts/tui-v1.md,
+# ADR-0031/0032/0033): one tab-placed pane entrypoint plus an `open`
+# action that pins the origin context and calls `plugin.pane.open`.
+# The UI consumes this plugin's own CLI for capability/git-context/
+# generate, so the public contract stays the single source of truth;
+# `generate` is confirm-gated against `capability`/`mutation_commands`
+# and results are review/copy only — generation is never auto-applied
+# and the contract persists nothing (#249).
+
+[[panes]]
+id = "main"
+title = "TextGen: generate"
+description = "Generation console: pick a task, fill contract input fields, choose provider, review the result. Results are not persisted and never auto-applied."
+platforms = ["linux", "macos", "windows"]
+placement = "tab"
+command = ["bun", "run", "src/tui.ts", "main"]
+
+[[actions]]
+id = "open"
+title = "TextGen: open generate UI"
+description = "Open the textgen generation TUI in a new tab."
+contexts = ["pane", "workspace"]
+command = ["bun", "run", "src/tui.ts", "open"]

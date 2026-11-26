@@ -35,7 +35,7 @@ implement against is [`docs/contracts/tui-v1.md`](../contracts/tui-v1.md).
 | rebuildup.usage | usage/v1 stable | #232 | 5 | 0 | usage/quota/divergence/cost reports with filters |
 | rebuildup.controls | controls/v1 stable | #232 | 8 | 0 | agent send/command/wait/interrupt/read/rename/start |
 | rebuildup.handoff | handoff/v1 stable | #232 | 9 | 0 | records/lineage + execute/delegate/merge-back |
-| rebuildup.textgen | textgen/v1 stable | #232 | 5 | 0 | task picker + result review + explicit adopt; config |
+| rebuildup.textgen | textgen/v1 stable | #232 | 5 | 1 (`open`) | implemented #246 — task picker + input form + provider select + confirm-gated generate; result review/copy only (not persisted, #249); config stays CLI |
 | rebuildup.artifacts | artifacts/v1 stable | #233 | 10 | 0 | list/search/get/verify + register/delete/deliver/gc |
 | rebuildup.secrets | secrets/v1 stable | #233 | 5 | 0 | metadata-only resolve + explicit run/inject + config |
 | rebuildup.machines | machines/v1 draft | #233 | 3 | 0 | inventory table + probe; lifecycle stays `herdr machine` |

@@ -10,7 +10,7 @@
 
 export const CONTRACT = "herdr-plugins.textgen/v1";
 export const PLUGIN_ID = "rebuildup.textgen";
-export const PLUGIN_VERSION = "0.7.0";
+export const PLUGIN_VERSION = "0.8.0";
 
 /** Execution paths a task/provider pair can use. `cli` is reserved (ADR-0017). */
 export type GenerationPath = "agent" | "api" | "cli";
