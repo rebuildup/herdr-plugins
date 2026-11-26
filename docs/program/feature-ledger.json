@@ -53,10 +53,10 @@
       "title_ja": "Inbox 拡張: pin/reorder/archive/検索/PR 連動/作業グループ",
       "upstream_refs": ["docs/user/thread-sidebar.md", "docs/user/triage.md"],
       "classification": "plugin",
-      "issues": [33],
+      "issues": [33, 176],
       "depends_on": ["inbox-organize", "#8", "#9"],
       "acceptance": "T3Code の整理・検索・PR 連動機能を herdr のモデルへ対応付け、実行状態とユーザー整理状態を分離し attention を隠さない。",
-      "verification": "未着手。#8 (attention 粒度) と #9 (agent view) の上流 gap が一部依存。"
+      "verification": "T1 (#176, release-0-9-0): pin/unpin/archive/unarchive/order を plugins/inbox v0.2.0 として実装。契約 herdr-plugins.inbox/v1 は additive 拡張のみ (organize.kind に archived 追加、item に pinned/order、counts に pinned/archived)。archive は hide-kind のみで pane/agent/PTY に一切触れないことを fake-socket 契約テストで固定。pin/archive は既存の世代ガード (agent_session fingerprint + state_change_seq) を継承、order は pane_id スコープの layout hint。残差: 検索・PR 連動・作業グループ/side chat は #33 の後続 ticket。#8/#9 upstream gap は引き続き依存候補。"
     },
     {
       "id": "attention-granularity",

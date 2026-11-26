@@ -12,9 +12,17 @@
  */
 
 import type { AgentInfo, PaneInfo } from "../../../packages/herdr-client/src/snapshot";
-import type { AgentSessionRef, InboxEntry, SettledMark, SnoozedMark } from "./state";
+import type {
+  AgentSessionRef,
+  ArchivedMark,
+  GenerationMark,
+  InboxEntry,
+  PinnedMark,
+  SettledMark,
+  SnoozedMark,
+} from "./state";
 
-export type OrganizeKind = "settled" | "snoozed";
+export type OrganizeKind = "settled" | "snoozed" | "archived";
 
 export interface OrganizeView {
   kind: OrganizeKind;
@@ -34,6 +42,10 @@ export interface InboxItem {
   state_change_seq?: number | undefined;
   agent_session?: AgentSessionRef | null | undefined;
   organize?: OrganizeView | undefined;
+  /** True while the pane carries a live pinned mark. */
+  pinned: boolean;
+  /** Manual order rank; lower sorts first. Undefined = unordered. */
+  order?: number | undefined;
   /** True when the pane currently requires user attention. */
   attention: boolean;
   /** False when organize state hides the pane from the default inbox view. */
@@ -93,10 +105,21 @@ function markExpiredOrAdvanced(mark: MarkLike, agent: AgentInfo | undefined, now
   return false;
 }
 
+/** True while the entry carries any organize state worth retaining. */
+function entryHasState(entry: InboxEntry): boolean {
+  return (
+    entry.settled !== undefined ||
+    entry.snoozed !== undefined ||
+    entry.archived !== undefined ||
+    entry.pinned !== undefined ||
+    entry.order !== undefined
+  );
+}
+
 /**
  * Resolve one entry against the live agent snapshot. Returns the surviving
- * organize view (snooze takes display precedence) and whether any mark was
- * cleared. Mutates `entry` in place.
+ * organize view (snooze > settle > archive take display precedence) and
+ * whether any mark was cleared. Mutates `entry` in place.
  */
 export function resolveEntry(
   entry: InboxEntry,
@@ -111,6 +134,14 @@ export function resolveEntry(
   }
   if (entry.settled && markExpiredOrAdvanced(entry.settled, agent, now)) {
     delete entry.settled;
+    cleared = true;
+  }
+  if (entry.archived && markExpiredOrAdvanced(entry.archived, agent, now)) {
+    delete entry.archived;
+    cleared = true;
+  }
+  if (entry.pinned && markExpiredOrAdvanced(entry.pinned, agent, now)) {
+    delete entry.pinned;
     cleared = true;
   }
 
@@ -128,6 +159,12 @@ export function resolveEntry(
       cleared,
     };
   }
+  if (entry.archived) {
+    return {
+      organize: { kind: "archived", since: entry.archived.at },
+      cleared,
+    };
+  }
   return { cleared };
 }
 
@@ -141,14 +178,14 @@ export function resolveState(
   for (const [paneId, entry] of Object.entries(entries)) {
     const result = resolveEntry(entry, agents[paneId], now);
     if (result.cleared) clearedPaneIds.push(paneId);
-    if (!entry.settled && !entry.snoozed) {
+    if (!entryHasState(entry)) {
       delete entries[paneId];
     }
   }
   return { clearedPaneIds };
 }
 
-function upsertEntry(
+export function upsertEntry(
   entries: Record<string, InboxEntry>,
   pane: PaneInfo,
   nowIso: string,
@@ -171,6 +208,10 @@ function seqMark(agent: AgentInfo | undefined) {
   };
 }
 
+function generationMark(agent: AgentInfo | undefined, now: Date): GenerationMark {
+  return { at: now.toISOString(), ...seqMark(agent) };
+}
+
 export function settlePane(
   entries: Record<string, InboxEntry>,
   pane: PaneInfo,
@@ -178,9 +219,10 @@ export function settlePane(
   now: Date,
 ): InboxEntry {
   const entry = upsertEntry(entries, pane, now.toISOString());
-  const mark: SettledMark = { at: now.toISOString(), ...seqMark(agent) };
+  const mark: SettledMark = generationMark(agent, now);
   entry.settled = mark;
   delete entry.snoozed;
+  delete entry.archived;
   return entry;
 }
 
@@ -199,13 +241,119 @@ export function snoozePane(
   };
   entry.snoozed = mark;
   delete entry.settled;
+  delete entry.archived;
   return entry;
+}
+
+/**
+ * Archive is a hide-kind like settle: it removes the pane from the default
+ * inbox view but never touches herdr execution state. Attention still
+ * forces the pane back into view, and the mark auto-clears on agent
+ * generation advance like every other organize mark.
+ */
+export function archivePane(
+  entries: Record<string, InboxEntry>,
+  pane: PaneInfo,
+  agent: AgentInfo | undefined,
+  now: Date,
+): InboxEntry {
+  const entry = upsertEntry(entries, pane, now.toISOString());
+  const mark: ArchivedMark = generationMark(agent, now);
+  entry.archived = mark;
+  delete entry.settled;
+  delete entry.snoozed;
+  return entry;
+}
+
+/** Pin is an ordering flag, not a hide-kind: it never affects `in_inbox`. */
+export function pinPane(
+  entries: Record<string, InboxEntry>,
+  pane: PaneInfo,
+  agent: AgentInfo | undefined,
+  now: Date,
+): InboxEntry {
+  const entry = upsertEntry(entries, pane, now.toISOString());
+  const mark: PinnedMark = generationMark(agent, now);
+  entry.pinned = mark;
+  return entry;
+}
+
+/** Drop the entry once no organize state remains (marks, pin, or order). */
+function dropIfEmpty(entries: Record<string, InboxEntry>, paneId: string): void {
+  const entry = entries[paneId];
+  if (entry && !entryHasState(entry)) delete entries[paneId];
+}
+
+export function unpinPane(entries: Record<string, InboxEntry>, paneId: string, now: Date): boolean {
+  const entry = entries[paneId];
+  if (!entry?.pinned) return false;
+  delete entry.pinned;
+  entry.updated_at = now.toISOString();
+  dropIfEmpty(entries, paneId);
+  return true;
+}
+
+export function unarchivePane(
+  entries: Record<string, InboxEntry>,
+  paneId: string,
+  now: Date,
+): boolean {
+  const entry = entries[paneId];
+  if (!entry?.archived) return false;
+  delete entry.archived;
+  entry.updated_at = now.toISOString();
+  dropIfEmpty(entries, paneId);
+  return true;
 }
 
 export function restorePane(entries: Record<string, InboxEntry>, paneId: string): boolean {
   const existed = paneId in entries;
   delete entries[paneId];
   return existed;
+}
+
+export type OrderPlacement =
+  | { kind: "first" }
+  | { kind: "last" }
+  | { kind: "before"; paneId: string }
+  | { kind: "after"; paneId: string };
+
+/**
+ * Compute dense order ranks for a manual reorder. Ordering is scoped to the
+ * moved pane's display group — items sharing its `attention` and `pinned`
+ * flags — because the list sort orders by those flags before `order`.
+ * `siblings` must be the visible inbox items of that group in current
+ * display order, including the moved pane. Returns pane_id → rank (lower
+ * sorts first) for every sibling, or an error string.
+ */
+export function computeOrderRanks(
+  siblings: InboxItem[],
+  movedPaneId: string,
+  placement: OrderPlacement,
+): Map<string, number> | { error: string } {
+  const moved = siblings.find((item) => item.pane_id === movedPaneId);
+  if (!moved) return { error: `pane is not in the inbox order group: ${movedPaneId}` };
+  const rest = siblings.filter((item) => item.pane_id !== movedPaneId);
+
+  let index: number;
+  if (placement.kind === "first") {
+    index = 0;
+  } else if (placement.kind === "last") {
+    index = rest.length;
+  } else {
+    const refIndex = rest.findIndex((item) => item.pane_id === placement.paneId);
+    if (refIndex === -1) {
+      return { error: `reference pane is not in the same inbox group: ${placement.paneId}` };
+    }
+    index = placement.kind === "before" ? refIndex : refIndex + 1;
+  }
+
+  const sequence = [...rest.slice(0, index), moved, ...rest.slice(index)];
+  const ranks = new Map<string, number>();
+  for (const [i, item] of sequence.entries()) {
+    ranks.set(item.pane_id, i);
+  }
+  return ranks;
 }
 
 export interface PruneOptions {
@@ -290,6 +438,8 @@ export function buildInbox(
       state_change_seq: agent?.state_change_seq,
       agent_session: agentSessionRef(agent),
       organize,
+      pinned: entry?.pinned !== undefined,
+      order: entry?.order,
       attention,
       in_inbox: !hidden,
     });
@@ -305,14 +455,24 @@ export function buildInbox(
         pane_id: paneId,
         workspace_id: entry.workspace_id,
         organize: resolved.organize,
+        pinned: entry.pinned !== undefined,
+        order: entry.order,
         attention: false,
         in_inbox: false,
       });
     }
   }
 
+  // Display order: pinned first (pin is the strongest user placement
+  // signal), then attention (never hidden, always surfaced), then manual
+  // order rank, then pane id. Items without an order rank sort after
+  // ordered ones.
   items.sort((a, b) => {
+    if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
     if (a.attention !== b.attention) return a.attention ? -1 : 1;
+    const ao = a.order ?? Number.POSITIVE_INFINITY;
+    const bo = b.order ?? Number.POSITIVE_INFINITY;
+    if (ao !== bo) return ao - bo;
     return a.pane_id.localeCompare(b.pane_id);
   });
   return items;

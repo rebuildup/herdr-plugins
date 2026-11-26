@@ -21,7 +21,21 @@ import {
   sessionSnapshot,
   subscribeAgentEvents,
 } from "../../../packages/herdr-client/src/index";
-import { buildInbox, pruneState, resolveState, restorePane, settlePane, snoozePane } from "./model";
+import {
+  archivePane,
+  buildInbox,
+  computeOrderRanks,
+  type OrderPlacement,
+  pinPane,
+  pruneState,
+  resolveState,
+  restorePane,
+  settlePane,
+  snoozePane,
+  unarchivePane,
+  unpinPane,
+  upsertEntry,
+} from "./model";
 import {
   type InboxEntry,
   loadState,
@@ -94,6 +108,8 @@ function positional(args: string[]): string[] {
     if (
       arg === "--until" ||
       arg === "--for" ||
+      arg === "--before" ||
+      arg === "--after" ||
       arg === "--session" ||
       arg === "--socket" ||
       arg === "--timeout"
@@ -174,10 +190,21 @@ async function projectMetadata(
     ? {
         inbox_state: "snoozed",
         inbox_snoozed_until: entry.snoozed.until,
+        inbox_pinned: entry.pinned ? "true" : null,
       }
     : entry?.settled
-      ? { inbox_state: "settled", inbox_snoozed_until: null }
-      : { inbox_state: null, inbox_snoozed_until: null };
+      ? {
+          inbox_state: "settled",
+          inbox_snoozed_until: null,
+          inbox_pinned: entry.pinned ? "true" : null,
+        }
+      : entry?.archived
+        ? {
+            inbox_state: "archived",
+            inbox_snoozed_until: null,
+            inbox_pinned: entry.pinned ? "true" : null,
+          }
+        : { inbox_state: null, inbox_snoozed_until: null, inbox_pinned: null };
   try {
     await reportPaneMetadata(paneId, tokens, options);
   } catch (err) {
@@ -207,15 +234,16 @@ async function cmdList(options: CliOptions): Promise<void> {
       inbox: inbox.length,
       attention: items.filter((i) => i.attention).length,
       organized: items.filter((i) => i.organize).length,
+      pinned: items.filter((i) => i.pinned).length,
+      archived: items.filter((i) => i.organize?.kind === "archived").length,
     },
     items,
   });
 }
 
-async function cmdOrganize(
-  options: CliOptions,
-  kind: "settle" | "snooze" | "restore",
-): Promise<void> {
+type OrganizeCommand = "settle" | "snooze" | "restore" | "pin" | "unpin" | "archive" | "unarchive";
+
+async function cmdOrganize(options: CliOptions, kind: OrganizeCommand): Promise<void> {
   const paneId = await resolvePaneId(options.args);
   const now = new Date();
   const snapshot = await sessionSnapshot(options);
@@ -242,12 +270,25 @@ async function cmdOrganize(
   const sessionKey = sessionKeyFor(options);
   const entry = await updateState(async (state) => {
     const entries = sessionEntries(state, sessionKey);
-    if (kind === "settle") return settlePane(entries, pane, agent, now);
-    if (kind === "restore") {
-      restorePane(entries, paneId);
-      return undefined;
+    switch (kind) {
+      case "settle":
+        return settlePane(entries, pane, agent, now);
+      case "snooze":
+        return snoozePane(entries, pane, agent, until as Date, now);
+      case "restore":
+        restorePane(entries, paneId);
+        return undefined;
+      case "pin":
+        return pinPane(entries, pane, agent, now);
+      case "unpin":
+        unpinPane(entries, paneId, now);
+        return entries[paneId];
+      case "archive":
+        return archivePane(entries, pane, agent, now);
+      case "unarchive":
+        unarchivePane(entries, paneId, now);
+        return entries[paneId];
     }
-    return snoozePane(entries, pane, agent, until as Date, now);
   });
 
   warnings.push(...(await projectMetadata(paneId, entry, options)));
@@ -269,7 +310,11 @@ async function cmdOrganize(
       ? { kind: "snoozed", since: resolvedEntry.snoozed.at, until: resolvedEntry.snoozed.until }
       : resolvedEntry?.settled
         ? { kind: "settled", since: resolvedEntry.settled.at }
-        : null,
+        : resolvedEntry?.archived
+          ? { kind: "archived", since: resolvedEntry.archived.at }
+          : null,
+    pinned: resolvedEntry?.pinned !== undefined,
+    order: resolvedEntry?.order ?? null,
     warnings,
   });
 }
@@ -301,23 +346,30 @@ async function reconcileOnce(options: CliOptions): Promise<ReconcileResult> {
     const entries = sessionEntries(state, sessionKey);
     const cleared = resolveState(entries, agents, now).clearedPaneIds;
     const pruned = pruneState(entries, livePaneIds, now);
+    // A pane can lose one mark while keeping others (e.g. settle expired but
+    // pin survives); project the post-resolution entry, not a blanket clear.
+    const clearedEntries = cleared
+      .filter((paneId) => livePaneIds.has(paneId))
+      .map((paneId) => ({ pane_id: paneId, entry: entries[paneId] }));
     const organized = Object.values(entries)
       .filter(
         (entry) =>
           livePaneIds.has(entry.pane_id) &&
-          (entry.settled !== undefined || entry.snoozed !== undefined),
+          (entry.settled !== undefined ||
+            entry.snoozed !== undefined ||
+            entry.archived !== undefined ||
+            entry.pinned !== undefined),
       )
       .map((entry) => ({ pane_id: entry.pane_id, entry }));
-    return { cleared, pruned, organized };
+    return { cleared, pruned, clearedEntries, organized };
   });
 
   const warnings: string[] = [];
   const projected: string[] = [];
   // Only live panes can carry metadata tokens; cleared marks on absent panes
   // need no projection (and would only produce spurious warnings).
-  for (const paneId of mutation.cleared) {
-    if (!livePaneIds.has(paneId)) continue;
-    warnings.push(...(await projectMetadata(paneId, undefined, options)));
+  for (const { pane_id: paneId, entry } of mutation.clearedEntries) {
+    warnings.push(...(await projectMetadata(paneId, entry, options)));
     projected.push(paneId);
   }
   for (const { pane_id: paneId, entry } of mutation.organized) {
@@ -380,6 +432,67 @@ async function cmdWake(options: CliOptions): Promise<void> {
 async function cmdReconcile(options: CliOptions): Promise<void> {
   const result = await reconcileOnce(options);
   emit({ contract: CONTRACT, command: "reconcile", ...result });
+}
+
+function parseOrderPlacement(args: string[]): OrderPlacement {
+  const before = flagValue(args, "--before");
+  const after = flagValue(args, "--after");
+  const first = args.includes("--first");
+  const last = args.includes("--last");
+  const modes = [before !== undefined, after !== undefined, first, last].filter(Boolean).length;
+  if (modes !== 1) {
+    fail("order requires exactly one of --before <pane> | --after <pane> | --first | --last", 2);
+  }
+  if (before !== undefined) return { kind: "before", paneId: before };
+  if (after !== undefined) return { kind: "after", paneId: after };
+  return { kind: first ? "first" : "last" };
+}
+
+/**
+ * Manual ordering: rewrite dense `order` ranks for the moved pane's display
+ * group (same attention/pinned flags). Only visible inbox panes participate;
+ * hidden panes keep whatever rank they had and rejoin as unordered/ordered
+ * items when they resurface. Ordering never hides or mutates execution
+ * state — it is a layout hint only.
+ */
+async function cmdOrder(options: CliOptions): Promise<void> {
+  const paneId = await resolvePaneId(options.args);
+  const placement = parseOrderPlacement(options.args);
+  const now = new Date();
+  const snapshot = await sessionSnapshot(options);
+  const state = await loadState();
+  const sessionKey = sessionKeyFor(options);
+  const entries = state.sessions[sessionKey] ?? {};
+  resolveState(entries, snapshot.agents ?? {}, now);
+  const items = buildInbox(snapshot.panes ?? [], snapshot.agents ?? {}, entries, now);
+
+  const moved = items.find((item) => item.in_inbox && item.pane_id === paneId);
+  if (!moved) fail(`pane is not in the inbox (hidden panes cannot be ordered): ${paneId}`);
+  const siblings = items.filter(
+    (item) => item.in_inbox && item.attention === moved.attention && item.pinned === moved.pinned,
+  );
+  const ranks = computeOrderRanks(siblings, paneId, placement);
+  if ("error" in ranks) fail(ranks.error, 2);
+
+  const paneById = new Map((snapshot.panes ?? []).map((pane) => [pane.pane_id, pane]));
+  await updateState((stateDoc) => {
+    const sessionEntriesMap = sessionEntries(stateDoc, sessionKey);
+    for (const [id, rank] of ranks) {
+      const pane = paneById.get(id);
+      if (!pane) continue;
+      const entry = upsertEntry(sessionEntriesMap, pane, now.toISOString());
+      entry.order = rank;
+    }
+  });
+
+  emit({
+    contract: CONTRACT,
+    command: "order",
+    pane_id: paneId,
+    order: ranks.get(paneId) ?? null,
+    placement,
+    warnings: [],
+  });
 }
 
 function emitLine(payload: unknown): void {
@@ -453,9 +566,22 @@ async function cmdCapability(options: CliOptions): Promise<void> {
   emit({
     contract: CONTRACT,
     plugin: PLUGIN_ID,
-    version: "0.1.0",
-    commands: ["list", "settle", "snooze", "restore", "reconcile", "watch", "capability"],
-    actions: ["settle", "restore", "snooze"],
+    version: "0.2.0",
+    commands: [
+      "list",
+      "settle",
+      "snooze",
+      "restore",
+      "pin",
+      "unpin",
+      "archive",
+      "unarchive",
+      "order",
+      "reconcile",
+      "watch",
+      "capability",
+    ],
+    actions: ["settle", "restore", "snooze", "pin", "unpin", "archive", "unarchive"],
     events: ["pane.agent_status_changed", "pane.closed"],
     startup: ["reconcile"],
     state_file: stateFilePath(),
@@ -470,6 +596,11 @@ Usage:
   inbox settle <pane_id> [--session NAME]
   inbox snooze <pane_id> --until <iso8601|+30m|+2h|+1d> [--session NAME]
   inbox restore <pane_id> [--session NAME]
+  inbox pin <pane_id> [--session NAME]
+  inbox unpin <pane_id> [--session NAME]
+  inbox archive <pane_id> [--session NAME]
+  inbox unarchive <pane_id> [--session NAME]
+  inbox order <pane_id> (--first | --last | --before <pane_id> | --after <pane_id>) [--session NAME]
   inbox reconcile [--session NAME]
   inbox watch [--interval SECONDS] [--session NAME]
   inbox capability [--session NAME]
@@ -486,7 +617,13 @@ async function main(): Promise<void> {
     case "settle":
     case "snooze":
     case "restore":
+    case "pin":
+    case "unpin":
+    case "archive":
+    case "unarchive":
       return cmdOrganize(options, options.command);
+    case "order":
+      return cmdOrder(options);
     case "reconcile":
       return cmdReconcile(options);
     case "_wake":

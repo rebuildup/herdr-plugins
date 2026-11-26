@@ -68,24 +68,27 @@ async function main(): Promise<void> {
     const entry = entries[paneId];
     if (!entry) return null;
     const result = resolveEntry(entry, agent, now);
-    if (!entry.settled && !entry.snoozed) {
+    const hasState =
+      entry.settled !== undefined ||
+      entry.snoozed !== undefined ||
+      entry.archived !== undefined ||
+      entry.pinned !== undefined ||
+      entry.order !== undefined;
+    if (!hasState) {
       delete entries[paneId];
     }
     entry.updated_at = now.toISOString();
-    return result;
+    return { ...result, pinned: entry.pinned !== undefined };
   });
 
   if (!outcome) return;
 
   // Refresh the pane's inbox metadata token to match resolved organize state.
-  const tokens: Record<string, string | null> = {};
-  if (outcome.organize) {
-    tokens.inbox_state = outcome.organize.kind;
-    tokens.inbox_snoozed_until = outcome.organize.until ?? null;
-  } else {
-    tokens.inbox_state = null;
-    tokens.inbox_snoozed_until = null;
-  }
+  const tokens: Record<string, string | null> = {
+    inbox_state: outcome.organize?.kind ?? null,
+    inbox_snoozed_until: outcome.organize?.until ?? null,
+    inbox_pinned: outcome.pinned ? "true" : null,
+  };
   try {
     await reportPaneMetadata(paneId, tokens);
   } catch (err) {

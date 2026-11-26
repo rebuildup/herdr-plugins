@@ -1,11 +1,11 @@
 # rebuildup.inbox
 
 Work inbox for herdr agent panes — the standalone-plugin port of T3 Code's
-settle / snooze / restore organize model.
+settle / snooze / pin / archive / manual-ordering / restore organize model.
 
 - Plugin ID: `rebuildup.inbox`
 - Install: `herdr plugin install rebuildup/herdr-plugins/plugins/inbox`
-  (pre-release: append `--ref release-0-1-0` or a commit SHA)
+  (pre-release: append `--ref release-0-9-0` or a commit SHA)
 - Runtime prerequisite: [Bun](https://bun.sh) on `PATH` (plugin commands run
   `bun run src/cli.ts`; see ADR-0003 for the no-daemon/Bun decision).
 
@@ -15,13 +15,19 @@ settle / snooze / restore organize model.
   advances or its agent session identity changes.
 - `snooze` hides a pane until a wall-clock deadline (`--until`), waking early
   on the same generation signals.
-- `restore` returns a pane to the inbox immediately.
+- `archive` hides a pane as "filed away" — it never closes the pane, stops
+  the agent, or touches the PTY; `unarchive` (or attention/a generation
+  change) brings it back.
+- `pin` sorts a pane to the top of the inbox without hiding it.
+- `order` sets a manual rank within the pane's display group
+  (`--first`/`--last`/`--before <pane>`/`--after <pane>`).
+- `restore` returns a pane to the inbox and clears all organize state.
 - `list` emits the versioned JSON contract (`herdr-plugins.inbox/v1`) for TUI,
   CLI, agents, and external clients such as herdr-t3 — see
   `docs/contracts/inbox-v1.md`.
 - Event hooks (`pane.agent_status_changed`, `pane.closed`) and a startup
   reconcile keep organize state consistent and refresh pane metadata tokens
-  (`inbox_state`, `inbox_snoozed_until`).
+  (`inbox_state`, `inbox_snoozed_until`, `inbox_pinned`).
 
 Organize state is user-side UI state only: it never modifies herdr agent
 execution state, and attention statuses (e.g. `blocked`) are never hidden.
@@ -33,6 +39,11 @@ bun run src/cli.ts list [--session NAME] [--socket PATH]
 bun run src/cli.ts settle <pane_id>
 bun run src/cli.ts snooze <pane_id> --until <iso8601|+30m|+2h|+1d>
 bun run src/cli.ts restore <pane_id>
+bun run src/cli.ts pin <pane_id>
+bun run src/cli.ts unpin <pane_id>
+bun run src/cli.ts archive <pane_id>
+bun run src/cli.ts unarchive <pane_id>
+bun run src/cli.ts order <pane_id> --first|--last|--before <pane>|--after <pane>
 bun run src/cli.ts reconcile
 bun run src/cli.ts watch [--interval SECONDS]
 bun run src/cli.ts capability
