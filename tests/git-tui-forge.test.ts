@@ -19,6 +19,7 @@ import type { Line, ScreenView } from "../packages/tui/src/screen";
 import { TaskRunner } from "../packages/tui/src/task";
 import {
   buildPaneOpenParams,
+  forgeCliChildEnv,
   formatIssueView,
   formatPrChecksPayload,
   formatPrCommentsPayload,
@@ -262,6 +263,29 @@ describe("resolvePinnedTarget", () => {
       HERDR_PLUGIN_CONTEXT_JSON: "{}",
     } as NodeJS.ProcessEnv);
     expect(target.originPaneId).toBeNull();
+  });
+});
+
+describe("forgeCliChildEnv", () => {
+  test("drops UI-pane ambient identity, keeps targeting vars", () => {
+    const env = forgeCliChildEnv({
+      HERDR_PANE_ID: "w1:p9",
+      HERDR_PLUGIN_CONTEXT_JSON: '{"focused_pane_id":"w1:p1"}',
+      HERDR_SOCKET_PATH: "/tmp/s.sock",
+      HERDR_SESSION: "verify234",
+      HERDR_PLUGIN_CONFIG_DIR: "/cfg",
+      HERDR_WORKSPACE_ID: "w1",
+      PATH: "/bin",
+      EMPTY: undefined,
+    } as NodeJS.ProcessEnv);
+    expect(env.HERDR_PANE_ID).toBeUndefined();
+    expect(env.HERDR_PLUGIN_CONTEXT_JSON).toBeUndefined();
+    expect(env.EMPTY).toBeUndefined();
+    expect(env.HERDR_SOCKET_PATH).toBe("/tmp/s.sock");
+    expect(env.HERDR_SESSION).toBe("verify234");
+    expect(env.HERDR_PLUGIN_CONFIG_DIR).toBe("/cfg");
+    expect(env.HERDR_WORKSPACE_ID).toBe("w1");
+    expect(env.PATH).toBe("/bin");
   });
 });
 
