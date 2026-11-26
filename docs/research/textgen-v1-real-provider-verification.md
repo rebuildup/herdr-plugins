@@ -69,7 +69,11 @@ provider-output-compliance gap, not a contract violation: validation
 refuses to guess, and the manual PR path is unaffected. Follow-up
 filed as rebuildup/herdr-plugins#132 (lenient JSON extraction /
 provider-specific output shaping); not an upstream herdr gap, so no
-upstream issue was filed.
+upstream issue was filed. Resolved by #186: output validation now
+applies a conservative second-chance parse (first balanced JSON block,
+raw control chars escaped inside string literals only) after strict
+parsing fails — see `docs/contracts/textgen-v1.md` "Output
+validation". Live `agent:codex` re-verification remains a residual.
 
 ## Billing-prevention confirmation (#29 acceptance)
 

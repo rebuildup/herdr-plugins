@@ -75,6 +75,16 @@ malformed list/JSON (`output_invalid_json`). Agent-path output must
 contain the `<<<TEXTGEN_RESULT>>>`/`<<<TEXTGEN_END>>>` markers
 (`output_unmarked`).
 
+JSON outputs (`pr_content` objects, `text_list` arrays) are parsed
+strictly first. Only when strict parsing fails, a conservative
+second-chance pass extracts the first balanced JSON block and escapes
+raw line breaks/tabs that appear *inside* JSON string literals —
+provider agents are observed wrapping long string values across
+terminal lines (Issue #186/#132). Nothing is guess-repaired:
+truncated, unbalanced, multi-value, or non-JSON output still fails
+with `output_invalid_json`. This tolerance is additive: the accepted
+result shapes and the error taxonomy are unchanged.
+
 ## Commands
 
 ### `capability`
