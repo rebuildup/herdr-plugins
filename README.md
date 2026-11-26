@@ -25,6 +25,7 @@ clients through one versioned contract.
 | [handoff](plugins/handoff/) | `rebuildup.handoff` | Handoff/delegation records + execution: source pane/agent identity + reference payload + `native_resume`/`portable_context` strategies, cross-machine `--remote`, delegation lineage (`delegate`/`merge-back`, worktree targets) with honest status lifecycle (`herdr-plugins.handoff/v1` stable, #6 T1–T4). |
 | [textgen](plugins/textgen/) | `rebuildup.textgen` | Text generation (`herdr-plugins.textgen/v1`): six tasks over dedicated agent panes or opt-in API generators, with strict input/output boundaries. Generation only — execution stays with the caller. |
 | [mcp](plugins/mcp/) | `rebuildup.mcp` | Outside-agent MCP surface (`herdr-plugins.mcp/v1`, draft): local stdio MCP server exposing herdr sessions + plugin contracts with read-only/supervised/full access levels; remote HTTP/OAuth is upstream gap herdrdev/herdr#6199 (#30 T1). |
+| [machines](plugins/machines/) | `rebuildup.machines` | Remote machines inventory (`herdr-plugins.machines/v1`, draft): read-only `list`/`probe`/`capability` over herdr saved machines — reachability, remote version/protocol, plugin surface via the `SavedSshApiBridge` path. Lifecycle stays with `herdr machine`; no credentials (ADR-0028, #161). |
 
 ## Development
 
