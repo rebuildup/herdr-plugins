@@ -72,6 +72,32 @@ bun run src/cli.ts capability
 Inside a manifest action or event hook, `<pane_id>` may be omitted; the
 plugin resolves it from `HERDR_PANE_ID` / `HERDR_PLUGIN_CONTEXT_JSON`.
 
+## Interactive TUI
+
+Plugin v0.7.0 adds an interactive terminal surface (`herdr-plugins.tui/v1`,
+ADR-0031/0032/0033):
+
+- Pane entrypoint `main` (`[[panes]]`, placement `tab`) runs
+  `bun run src/tui.ts` — an inbox browser with attention states,
+  `/`-filter, scope cycling, pin/order/archive, settle/snooze/restore,
+  PR/Issue link management, the transition log, and explicit `reconcile`.
+- Action `open` (`rebuildup.inbox.open`) opens that pane via
+  `plugin.pane.open` and returns immediately — bind it yourself, e.g.:
+
+  ```toml
+  [[keys.command]]
+  key = "prefix+o"
+  type = "plugin_action"
+  command = "rebuildup.inbox.open"
+  description = "open inbox TUI"
+  ```
+
+The TUI is a view over the same CLI contract: opening is read-only
+(`reconcile` never runs implicitly), the origin context is pinned at
+launch, agent generation is revalidated before every mutation, and every
+mutation goes through a confirmation dialog. Non-TTY invocations print a
+plain-text list instead of faking a UI.
+
 `watch` is an opt-in long-running reconciler (subscription + periodic
 expiry). Without it or an event, snooze expiry materializes lazily on the
 next command invocation — see `docs/specs/inbox.md` for the constraint.

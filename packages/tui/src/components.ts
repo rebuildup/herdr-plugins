@@ -487,6 +487,12 @@ export class SelectList<T> implements ScreenView {
     return this.filterActive ? this.filterDraft : this.committedFilter;
   }
 
+  /** True while the `/` filter draft is being edited — host screens must
+   *  defer printable keys to the list instead of handling them as commands. */
+  get filtering(): boolean {
+    return this.filterActive;
+  }
+
   private filtered(): SelectItem<T>[] {
     const q = this.filterActive ? this.filterDraft : this.committedFilter;
     if (q === "") return this.items;
