@@ -13,6 +13,7 @@ import {
   type TargetErrorCode,
   TargetResolutionError,
 } from "../packages/herdr-client/src/index";
+import { herdrSocketEndpoint, testEnv } from "./helpers/test-env";
 
 // ---------------------------------------------------------------------------
 // Env helpers: resolveTarget/ambientIdentity read process.env, so each test
@@ -312,7 +313,7 @@ async function startFakeHerdr(
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
-    server.listen(socketPath, () => resolve());
+    server.listen(herdrSocketEndpoint(socketPath), () => resolve());
   });
   return {
     socketPath,
@@ -364,18 +365,10 @@ async function runPluginCli(
   args: string[],
   env: Record<string, string>,
 ): Promise<CliRun> {
-  const childEnv: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (
-      value !== undefined &&
-      !key.startsWith("HERDR_") &&
-      key !== "XDG_CONFIG_HOME" &&
-      key !== "XDG_STATE_HOME"
-    ) {
-      childEnv[key] = value;
-    }
-  }
-  Object.assign(childEnv, env);
+  // Scrubbed spawn env (#199): ambient HERDR_*/XDG_* never reaches the
+  // child; the explicit `env` argument is the only opt-in channel.
+  // pluginDirs:"derive" — these tests assert the XDG-derived state path.
+  const childEnv = testEnv(env, { pluginDirs: "derive" });
   // Async spawn: the fake herdr servers live in this same process, so a
   // blocking spawnSync would starve them and every request would time out.
   const result = await new Promise<{

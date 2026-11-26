@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { testEnv } from "./helpers/test-env";
 
 /**
  * Negative fixture for issue #170 contract re-check / #209 fix:
@@ -79,13 +80,11 @@ function harness(): { configDir: string; env: Record<string, string> } {
     }),
   );
   const binDir = writeLeakyInfisical(dir);
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined) env[key] = value;
-  }
-  env.PATH = `${binDir}:${process.env.PATH ?? ""}`;
-  env.HERDR_PLUGIN_CONFIG_DIR = configDir;
-  env.HERDR_PLUGIN_STATE_DIR = path.join(dir, "state");
+  const env = testEnv({
+    PATH: `${binDir}:${process.env.PATH ?? ""}`,
+    HERDR_PLUGIN_CONFIG_DIR: configDir,
+    HERDR_PLUGIN_STATE_DIR: path.join(dir, "state"),
+  });
   return { configDir, env };
 }
 

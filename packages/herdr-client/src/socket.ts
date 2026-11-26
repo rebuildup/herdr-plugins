@@ -39,7 +39,14 @@ function nextId(prefix: string): string {
   return `${prefix}-${process.pid}-${nextRequestId}`;
 }
 
-function socketEndpoint(socketPath: string): string {
+/**
+ * Map a logical herdr socket path to the transport endpoint used for
+ * `net.createConnection`/`net.Server.listen`: on win32 the herdr socket is
+ * a Windows named pipe (`\\.\pipe\<path>`), elsewhere it is the filesystem
+ * path itself. Exported so test fakes bind the exact same endpoint the
+ * client connects to (#211) — do not weaken or fork this mapping.
+ */
+export function socketEndpoint(socketPath: string): string {
   if (process.platform === "win32") {
     return `\\\\.\\pipe\\${socketPath}`;
   }

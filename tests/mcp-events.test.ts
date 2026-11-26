@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { herdrSocketEndpoint, testEnv } from "./helpers/test-env";
 
 const CLI = path.join(import.meta.dir, "../plugins/mcp/src/cli.ts");
 
@@ -126,7 +127,7 @@ async function fakeHerdr(): Promise<FakeHerdr> {
   });
   await new Promise<void>((resolveListen, rejectListen) => {
     server.once("error", rejectListen);
-    server.listen(socketPath, () => resolveListen());
+    server.listen(herdrSocketEndpoint(socketPath), () => resolveListen());
   });
   return {
     socketPath,
@@ -184,7 +185,7 @@ function serveClient(socketPath: string): {
     ["bun", "run", CLI, "serve", "--socket", socketPath, "--access-level", "read-only"],
     {
       cwd: path.resolve(import.meta.dir, ".."),
-      env: { ...process.env },
+      env: testEnv(),
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
