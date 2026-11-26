@@ -25,6 +25,7 @@ import {
   projectIdFromRoot,
   repoIndex,
 } from "./model";
+import { resolveGitPluginRoot } from "./plugincli";
 import {
   herdrTransport,
   listRuns,
@@ -47,10 +48,11 @@ import {
   updateState,
 } from "./state";
 import { loadT3ProjectFile, T3JsonError, type T3ProjectFileScript } from "./t3json";
-import { drainWorktreeTriggers, type TriggerDrainReport } from "./triggers";
+import { drainSettleTriggers, drainWorktreeTriggers, type TriggerDrainReport } from "./triggers";
+import { associateRepoWorktrees, type WorktreeAssociationSkip } from "./worktrees";
 
 const CONTRACT = "herdr-plugins.projects/v1";
-const PLUGIN_VERSION = "0.2.0";
+const PLUGIN_VERSION = "0.4.0";
 const DEFAULT_TIMEOUT_MS = 10_000;
 
 interface PluginConfig {
@@ -63,6 +65,11 @@ interface PluginConfig {
   runLogMaxBytes?: number | undefined;
   /** ctrl+c→close grace on `scripts stop`; default 2_000. */
   stopGraceMs?: number | undefined;
+  /**
+   * Override for the rebuildup.inbox plugin root used by the settle
+   * drain (#182); falls back to `../inbox` sibling / `herdr plugin list`.
+   */
+  inboxRoot?: string | undefined;
 }
 
 interface CliOptions extends CallOptions {
@@ -108,6 +115,8 @@ function emit(payload: unknown): void {
     (triggerReport.fired.length > 0 ||
       triggerReport.skipped.length > 0 ||
       triggerReport.duplicates > 0 ||
+      triggerReport.stopped !== undefined ||
+      triggerReport.inbox_unavailable === true ||
       triggerReport.session_unreachable === true)
       ? { ...(payload as Record<string, unknown>), triggers: triggerReport }
       : payload;
@@ -115,25 +124,60 @@ function emit(payload: unknown): void {
 }
 
 /**
- * Drain pending `worktree.created` marks recorded by `src/hook.ts`.
- * Best-effort by contract: unreachable sessions keep their marks and
- * per-worktree failures land in `triggers.skipped` — the drain never
- * fails the calling command.
+ * Drain pending `worktree.created` marks (src/hook.ts) AND new inbox
+ * organize transitions (#182 settle triggers). Best-effort by contract:
+ * unreachable sessions keep their marks/cursors and per-item failures
+ * land in `triggers.skipped` — the drain never fails the calling
+ * command; an absent/unrunnable inbox reports `inbox_unavailable`.
  */
 async function drainTriggers(options: CliOptions, config: PluginConfig): Promise<void> {
   const callOptions: CallOptions = {};
   if (options.session !== undefined) callOptions.session = options.session;
   if (options.socketPath !== undefined) callOptions.socketPath = options.socketPath;
   if (options.timeoutMs !== undefined) callOptions.timeoutMs = options.timeoutMs;
-  triggerReport = await drainWorktreeTriggers(
+  const drainConfig = {
+    waitTimeoutMs: config.runTimeoutMs,
+    logMaxBytes: config.runLogMaxBytes,
+    stopGraceMs: config.stopGraceMs,
+  };
+  const worktree = await drainWorktreeTriggers(callOptions, drainConfig, config.defaultScripts);
+  // Settle drain (#182): `--inbox-root` flag wins over config.json
+  // `inboxRoot`; both are optional overrides over sibling/plugin-list
+  // resolution inside drainSettleTriggers.
+  const flagIndex = options.args.indexOf("--inbox-root");
+  const flagRoot = flagIndex !== -1 ? options.args[flagIndex + 1] : undefined;
+  if (flagIndex !== -1) {
+    // Consume the flag pair so subcommand parsers never see it as a
+    // positional/unknown flag.
+    options.args = options.args.filter((_, i) => i !== flagIndex && i !== flagIndex + 1);
+  }
+  const settle = await drainSettleTriggers(
     callOptions,
-    {
-      waitTimeoutMs: config.runTimeoutMs,
-      logMaxBytes: config.runLogMaxBytes,
-      stopGraceMs: config.stopGraceMs,
-    },
+    drainConfig,
     config.defaultScripts,
+    flagRoot ?? config.inboxRoot,
   );
+  triggerReport = {
+    ...worktree,
+    fired: [...worktree.fired, ...settle.fired],
+    skipped: [...worktree.skipped, ...settle.skipped],
+    ...(settle.available ? {} : { inbox_unavailable: true }),
+    ...(settle.session_key !== undefined &&
+    (settle.fired.length > 0 ||
+      settle.skipped.length > 0 ||
+      settle.stopped.length > 0 ||
+      settle.cursor_expired === true)
+      ? {
+          settle: {
+            session_key: settle.session_key,
+            cursor_before: settle.cursor_before ?? 0,
+            cursor_after: settle.cursor_after ?? settle.cursor_before ?? 0,
+            cursor_expired: settle.cursor_expired === true,
+          },
+        }
+      : {}),
+    ...(settle.stopped.length > 0 ? { stopped: settle.stopped } : {}),
+  };
 }
 
 function fail(message: string, code = 1, kind?: string, extra?: Record<string, unknown>): never {
@@ -237,6 +281,7 @@ async function loadConfig(): Promise<PluginConfig> {
         typeof parsed.stopGraceMs === "number" && parsed.stopGraceMs >= 0
           ? parsed.stopGraceMs
           : undefined,
+      inboxRoot: typeof parsed.inboxRoot === "string" ? parsed.inboxRoot : undefined,
     };
   } catch {
     return {};
@@ -552,6 +597,27 @@ async function cmdReposList(options: CliOptions): Promise<void> {
     fail(`project not found: ${id}`, 1, "project_not_found", { project_id: id });
   }
 
+  // Worktree/diff association (#184, ADR-0029): one session snapshot
+  // serves every member; an unreachable socket degrades to honest
+  // per-member `worktrees: null` + `worktrees_error`, never a failure.
+  let snapshot: SessionSnapshot | null = null;
+  try {
+    snapshot = (await sessionSnapshot(options)) as SessionSnapshot;
+  } catch {
+    snapshot = null;
+  }
+  // The git plugin root resolves lazily — only when a pane actually
+  // needs a `status` fetch — and at most once per invocation.
+  let gitRootPromise: ReturnType<typeof resolveGitPluginRoot> | null = null;
+  const resolveGitRoot = (): ReturnType<typeof resolveGitPluginRoot> => {
+    gitRootPromise ??= resolveGitPluginRoot();
+    return gitRootPromise;
+  };
+  // Once the session socket proves unreachable, later members reuse the
+  // same honest error instead of repeating a doomed socket call.
+  let deadSocketError: { reason: string; detail?: string } | null = null;
+  const worktreeSkips: WorktreeAssociationSkip[] = [];
+
   const repos: Record<string, unknown>[] = [];
   const skipped: { root: string; reason: string }[] = [];
   for (const member of (project as Project).repos) {
@@ -562,6 +628,12 @@ async function cmdReposList(options: CliOptions): Promise<void> {
       branch: null,
       dirty: null,
       has_submodules: null,
+      // Read-only advisory from the repo's t3.json (#184 MAY per
+      // ADR-0029 §3): the parsed `worktreeSubmodules` value nothing
+      // consumes yet — display data, not enforcement.
+      worktree_submodules: null,
+      worktrees: null,
+      worktrees_error: null,
     };
     try {
       const live = await inspectRepo(member.root, { timeoutMs });
@@ -572,6 +644,31 @@ async function cmdReposList(options: CliOptions): Promise<void> {
       if (!(err instanceof GitError)) throw err;
       skipped.push({ root: member.root, reason: err.kind });
     }
+    try {
+      entry.worktree_submodules =
+        (await loadT3ProjectFile(member.root))?.worktreeSubmodules ?? null;
+    } catch {
+      // Advisory only: an invalid t3.json never fails `repos list`.
+    }
+    if (deadSocketError !== null) {
+      entry.worktrees_error = deadSocketError;
+    } else {
+      const association = await associateRepoWorktrees(member.root, {
+        call: options,
+        timeoutMs,
+        snapshot,
+        resolveGitRoot,
+      });
+      if (association.ok) {
+        entry.worktrees = association.worktrees;
+        worktreeSkips.push(...association.skipped);
+      } else {
+        entry.worktrees_error = association.error;
+        if (association.error.reason === "session_unreachable") {
+          deadSocketError = association.error;
+        }
+      }
+    }
     repos.push(entry);
   }
   emit({
@@ -580,6 +677,7 @@ async function cmdReposList(options: CliOptions): Promise<void> {
     project_id: (project as Project).id,
     repos,
     skipped,
+    worktrees_skipped: worktreeSkips,
     generated_at: now(),
   });
 }
@@ -1103,12 +1201,20 @@ async function cmdCapability(): Promise<void> {
         mechanism:
           "manifest [[events]] hook → pending mark → lazy drain on scripts tick|run|stop|results|logs",
       },
+      {
+        event: "inbox.settled",
+        script_flags: ["runOnSettle", "stopOnSettle"],
+        mechanism:
+          "rebuildup.inbox transitions CLI (ADR-0013) → per-session seq cursor → lazy drain on scripts tick|run|stop|results|logs",
+      },
     ],
     requires: {
       git: true,
       bun: true,
       herdr:
-        "session snapshot (discover + trigger drain preflight); pane execution (scripts run/stop/results/logs)",
+        "session snapshot (discover + trigger drain preflight + repos list worktree panes); worktree.list (repos list association, read-only); pane execution (scripts run/stop/results/logs)",
+      git_plugin:
+        "optional sibling rebuildup.git CLI (herdr-plugins.git/v1) for pane-addressed status summaries on open worktrees; absent → status_error plugin_unavailable, pointers still emitted",
     },
     defaults: { timeoutMs: config.timeoutMs ?? DEFAULT_TIMEOUT_MS },
   });

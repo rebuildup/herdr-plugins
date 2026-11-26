@@ -1,8 +1,8 @@
 id = "rebuildup.inbox"
 name = "Inbox"
-version = "0.3.0"
+version = "0.4.0"
 min_herdr_version = "0.9.0"
-description = "Work inbox for agent panes: settle, snooze, pin, archive, manual ordering, search/filter, explicit PR/Issue links, and restore with persistent user-side organize state."
+description = "Work inbox for agent panes: settle, snooze, pin, archive, manual ordering, search/filter, explicit PR/Issue links, restore with persistent user-side organize state, and a read-only organize-transition log (contract herdr-plugins.inbox/v1, stable; additive v0.4.0)."
 platforms = ["linux", "macos", "windows"]
 
 # No build step: the plugin is dependency-free TypeScript executed by Bun

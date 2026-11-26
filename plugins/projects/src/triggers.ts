@@ -21,7 +21,9 @@
  * - Marks for unreachable sessions stay pending; evaluated-and-skipped
  *   marks are consumed and reported.
  * - Duplicate deliveries of the same worktree collapse to ONE fire.
- * - `runOnSettle`/`stopOnSettle` are NOT handled here (#181/#182).
+ * - `runOnSettle`/`stopOnSettle` drain the rebuildup.inbox organize-
+ *   transition log instead (#182, ADR-0029) — see the settle section
+ *   below; they never ride the hook-event path.
  */
 
 import { existsSync } from "node:fs";
@@ -34,11 +36,19 @@ import {
 import {
   type CallOptions,
   HerdrRpcError,
+  resolveSocketPath,
   sessionSnapshot,
 } from "../../../packages/herdr-client/src/index";
+import {
+  type InboxCliCallOptions,
+  inboxTargetArgs,
+  resolveInboxSource,
+  runInboxCli,
+} from "./inbox-source";
 import { canonicalRepoRoot } from "./model";
-import { herdrTransport, type RunnerDeps, startRun } from "./runner";
+import { herdrTransport, type RunnerDeps, startRun, stopRuns } from "./runner";
 import type { ScriptRun } from "./runs";
+import { loadRuns } from "./runs";
 import { BUILTIN_SCRIPTS, type ResolvedScript, resolveScripts, ScriptError } from "./scripts";
 import {
   loadSettings,
@@ -161,13 +171,28 @@ export interface TriggerFire {
   script: string;
   worktree_path: string;
   result: ScriptRun["result"];
+  /** Trigger source; `worktree.created` (default) or `inbox.settled` (#182). */
+  source?: string;
+  /** Settled pane id (inbox.settled fires only). */
+  pane_id?: string;
+  /** Inbox transition seq that fired the run (inbox.settled only). */
+  transition_seq?: number;
 }
 
 export interface TriggerSkip {
-  worktree_path: string;
-  socket_path: string;
+  /** Present for worktree.created skips; absent for inbox.settled skips. */
+  worktree_path?: string;
+  /** Settled pane cwd (inbox.settled skips only). */
+  cwd?: string;
+  /** Settled pane id (inbox.settled skips only). */
+  pane_id?: string;
+  /** Inbox transition seq (inbox.settled skips only). */
+  transition_seq?: number;
+  socket_path?: string;
   reason: string;
   detail?: string;
+  /** Trigger source; `worktree.created` (default) or `inbox.settled` (#182). */
+  source?: string;
 }
 
 export interface TriggerDrainReport {
@@ -181,6 +206,27 @@ export interface TriggerDrainReport {
   pending_remaining: number;
   /** True when at least one emitting session socket was unreachable. */
   session_unreachable?: boolean;
+  /** True when the inbox plugin could not be resolved or queried (#182). */
+  inbox_unavailable?: boolean;
+  /** Settle-drain cursor bookkeeping, present when a drain ran (#182). */
+  settle?: {
+    session_key: string;
+    cursor_before: number;
+    cursor_after: number;
+    cursor_expired: boolean;
+  };
+  /** Runs stopped by stopOnSettle selections (#182). */
+  stopped?: SettleStop[];
+}
+
+/** One run stopped by a `stopOnSettle` selection (#182). */
+export interface SettleStop {
+  run_id: string;
+  project_id: string;
+  script: string;
+  pane_id: string;
+  action: "stopped" | "already_finished" | "pane_gone";
+  transition_seq: number;
 }
 
 interface DrainConfig {
@@ -367,6 +413,7 @@ export async function drainWorktreeTriggers(
       worktree_path: mark.worktree_path,
       socket_path: mark.socket_path,
       reason: "session_unreachable",
+      source: WORKTREE_CREATED_EVENT,
     });
   }
 
@@ -392,6 +439,7 @@ export async function drainWorktreeTriggers(
         worktree_path: mark.worktree_path,
         socket_path: mark.socket_path,
         reason,
+        source: WORKTREE_CREATED_EVENT,
         ...(detail !== undefined ? { detail } : {}),
       });
     };
@@ -472,6 +520,7 @@ export async function drainWorktreeTriggers(
           script: script.name,
           worktree_path: mark.worktree_path,
           result: run.result,
+          source: WORKTREE_CREATED_EVENT,
         });
       } catch (err) {
         if (isConnectionError(err)) {
@@ -488,5 +537,384 @@ export async function drainWorktreeTriggers(
 
   const remaining = await loadState();
   report.pending_remaining = (remaining.pending_triggers ?? []).length;
+  return report;
+}
+
+// --- Settle triggers (#182, ADR-0029) ---------------------------------------
+//
+// `runOnSettle`/`stopOnSettle` consume rebuildup.inbox's organize-
+// transition log through its public `transitions` CLI (ADR-0013 pattern —
+// never inbox state files). Settle is user organize state, NOT agent
+// execution state: this drain fires only on recorded `settled`
+// transitions and reports every skip honestly.
+
+/** Canonical trigger-source label for settle-drain fires/skips. */
+export const INBOX_SETTLED_SOURCE = "inbox.settled";
+
+/** Page size for the `--after` drain; equals the inbox per-session cap. */
+const SETTLE_DRAIN_LIMIT = 500;
+
+/** Wire shape of one `inbox transitions` item (validated loosely). */
+interface InboxTransitionItem {
+  seq: number;
+  at: string;
+  kind: string;
+  pane_id: string;
+  cwd?: string;
+  workspace_id?: string;
+  agent_status?: string;
+}
+
+function isTransitionItem(value: unknown): value is InboxTransitionItem {
+  if (typeof value !== "object" || value === null) return false;
+  const t = value as Record<string, unknown>;
+  return (
+    typeof t.seq === "number" &&
+    typeof t.kind === "string" &&
+    typeof t.pane_id === "string" &&
+    typeof t.at === "string"
+  );
+}
+
+export interface SettleDrainReport {
+  /** False when the inbox plugin was absent/unrunnable — nothing consumed. */
+  available: boolean;
+  session_key?: string;
+  head_seq?: number;
+  cursor_before?: number;
+  cursor_after?: number;
+  cursor_expired?: boolean;
+  fired: TriggerFire[];
+  skipped: TriggerSkip[];
+  stopped: SettleStop[];
+}
+
+function settleSkip(
+  report: SettleDrainReport,
+  t: InboxTransitionItem,
+  reason: string,
+  detail?: string,
+): void {
+  report.skipped.push({
+    pane_id: t.pane_id,
+    ...(t.cwd !== undefined ? { cwd: t.cwd } : {}),
+    transition_seq: t.seq,
+    reason,
+    source: INBOX_SETTLED_SOURCE,
+    ...(detail !== undefined ? { detail } : {}),
+  });
+}
+
+/**
+ * Drain new inbox organize transitions into `runOnSettle` fires and
+ * `stopOnSettle` stops. Called at the top of `scripts`-family CLI
+ * commands next to `drainWorktreeTriggers` (same no-daemon discipline).
+ *
+ * - Source: `rebuildup.inbox transitions` via the public CLI; the
+ *   `session_key` in the response is stored verbatim as the cursor key —
+ *   projects never recomputes inbox's `hostname + canonical socket` key.
+ * - Cursor: `state.settle_cursors[session_key]` advances to `head_seq`
+ *   only after the batch is processed; a mid-batch crash replays the
+ *   tail, absorbed by the `transition_seq` run-record dedupe.
+ * - Collapse: within the drained batch a later `cleared`/`restored` for
+ *   the same `pane_id` supersedes an earlier `settled` →
+ *   `settle_superseded`.
+ * - stopOnSettle stops ONLY `running` runs whose recorded `repo.root`
+ *   canonicalizes to the settled pane's worktree root AND whose script —
+ *   re-resolved via the #50 layers — has `stopOnSettle === true`. Runs of
+ *   sibling worktrees in the same repo group are never touched.
+ */
+export async function drainSettleTriggers(
+  options: CallOptions,
+  config: DrainConfig = {},
+  envDefault?: unknown,
+  inboxRoot?: string,
+): Promise<SettleDrainReport> {
+  const report: SettleDrainReport = { available: true, fired: [], skipped: [], stopped: [] };
+  const timeoutMs = options.timeoutMs;
+  const gitOptions = timeoutMs === undefined ? {} : { timeoutMs };
+
+  const resolved = await resolveInboxSource(inboxRoot);
+  if (!resolved.ok) {
+    report.available = false;
+    return report;
+  }
+  const source = resolved.source;
+  // Pin the child to the SAME socket this invocation resolved (explicit
+  // --socket > HERDR_SOCKET_PATH > --session/HERDR_SESSION > default) —
+  // the ambient env must never let the inbox CLI drift to a different
+  // session than the one projects is draining for.
+  const socketPath = options.socketPath ?? resolveSocketPath({ session: options.session });
+  const call: InboxCliCallOptions = {
+    session: options.session,
+    socketPath,
+    timeoutMs,
+  };
+
+  // Phase 1: head metadata only — establishes the session_key (stored
+  // verbatim) and whether anything new exists past our cursor.
+  const meta = await runInboxCli(
+    source,
+    ["transitions", "--limit", "1", ...inboxTargetArgs(call)],
+    call,
+  );
+  const metaJson = meta.json;
+  if (
+    meta.status !== 0 ||
+    metaJson === null ||
+    metaJson.command !== "transitions" ||
+    typeof metaJson.session_key !== "string" ||
+    typeof metaJson.head_seq !== "number"
+  ) {
+    // Absent plugin, unreachable session, or contract drift — all honest
+    // `inbox_unavailable`, never an error that fails `scripts`.
+    report.available = false;
+    return report;
+  }
+  const sessionKey = metaJson.session_key;
+  const headSeq = metaJson.head_seq;
+  const oldestSeq = typeof metaJson.oldest_seq === "number" ? metaJson.oldest_seq : null;
+
+  const state = await loadState();
+  const cursorBefore = state.settle_cursors?.[sessionKey] ?? 0;
+  report.session_key = sessionKey;
+  report.cursor_before = cursorBefore;
+
+  if (headSeq <= cursorBefore) {
+    report.cursor_after = cursorBefore;
+    report.cursor_expired = false;
+    return report;
+  }
+
+  // Phase 2: the full drained batch, ascending seq, exclusive --after.
+  const page = await runInboxCli(
+    source,
+    [
+      "transitions",
+      "--after",
+      String(cursorBefore),
+      "--limit",
+      String(SETTLE_DRAIN_LIMIT),
+      ...inboxTargetArgs(call),
+    ],
+    call,
+  );
+  const pageJson = page.json;
+  if (
+    page.status !== 0 ||
+    pageJson === null ||
+    pageJson.command !== "transitions" ||
+    !Array.isArray(pageJson.transitions)
+  ) {
+    report.available = false;
+    return report;
+  }
+  const items = (pageJson.transitions as unknown[]).filter(isTransitionItem);
+  const headSeqAfter = typeof pageJson.head_seq === "number" ? pageJson.head_seq : headSeq;
+  report.head_seq = headSeqAfter;
+  report.cursor_expired = oldestSeq !== null && cursorBefore + 1 < oldestSeq;
+
+  // Runs snapshot BEFORE this drain fires anything: stopOnSettle selects
+  // from pre-existing running runs only — a script flagged both ways is
+  // never stopped by the run it just started.
+  const runsBefore = await loadRuns();
+  const firedTransitionSeqs = new Set(
+    Object.values(runsBefore.runs)
+      .filter((r) => r.trigger?.kind === INBOX_SETTLED_SOURCE)
+      .map((r) => r.trigger?.transition_seq)
+      .filter((s): s is number => typeof s === "number"),
+  );
+
+  // Collapse: latest cleared/restored seq per pane within THIS batch.
+  const supersedeSeq = new Map<string, number>();
+  for (const t of items) {
+    if (t.kind === "cleared" || t.kind === "restored") {
+      supersedeSeq.set(t.pane_id, Math.max(supersedeSeq.get(t.pane_id) ?? 0, t.seq));
+    }
+  }
+
+  const deps: RunnerDeps = {
+    transport: herdrTransport(options),
+    waitTimeoutMs: config.waitTimeoutMs,
+    logMaxBytes: config.logMaxBytes,
+    stopGraceMs: config.stopGraceMs,
+  };
+
+  // stopOnSettle script resolution is cached per (worktree root,
+  // project id) — candidates are grouped before resolving.
+  const stopResolutionCache = new Map<string, ResolvedScript[] | { error: string }>();
+
+  for (const t of items) {
+    if (t.kind !== "settled") continue;
+
+    // Within-batch collapse: a later cleared/restored for the same pane
+    // means the net effect is un-settled.
+    if ((supersedeSeq.get(t.pane_id) ?? 0) > t.seq) {
+      settleSkip(report, t, "settle_superseded");
+      continue;
+    }
+
+    // Idempotency: a run already fired for this exact transition seq
+    // (crash between execute and cursor advance) is never re-fired.
+    if (firedTransitionSeqs.has(t.seq)) {
+      settleSkip(report, t, "already_fired");
+      continue;
+    }
+
+    // 1. cwd → repo group identity (the #180 path).
+    const cwd = t.cwd;
+    if (cwd === undefined || cwd === "") {
+      settleSkip(report, t, "cwd_unavailable");
+      continue;
+    }
+    if (!existsSync(cwd)) {
+      settleSkip(report, t, "cwd_gone", cwd);
+      continue;
+    }
+    let info: RepoInfo;
+    try {
+      info = await resolveRepo(cwd, gitOptions);
+    } catch (err) {
+      settleSkip(report, t, err instanceof GitError ? err.kind : "repo_unreachable");
+      continue;
+    }
+    const worktreeRoot = canonicalRepoRoot(info.root);
+    const commonDir = canonicalRepoRoot(info.gitCommonDir);
+
+    const fresh = await loadState();
+    const match = await matchProject(fresh, commonDir, timeoutMs);
+    if ("reason" in match) {
+      settleSkip(report, t, match.reason, match.detail);
+      continue;
+    }
+    const project = match.project;
+
+    // 2. Layered script resolution on the settled pane's worktree root —
+    //    upstream runs the script in the settled thread's checkout.
+    const resolved = await resolveScriptsSafe(worktreeRoot, project.id, envDefault);
+    if (!resolved.ok) {
+      settleSkip(report, t, resolved.kind, resolved.message);
+      continue;
+    }
+
+    // 3. stopOnSettle FIRST (pre-drain run snapshot): running runs on
+    //    the SAME worktree root whose re-resolved script has the flag.
+    const stopCandidates = Object.values(runsBefore.runs).filter(
+      (r) => r.result === "running" && canonicalRepoRoot(r.repo.root) === worktreeRoot,
+    );
+    const byProject = new Map<string, ScriptRun[]>();
+    for (const r of stopCandidates) {
+      const list = byProject.get(r.project_id) ?? [];
+      list.push(r);
+      byProject.set(r.project_id, list);
+    }
+    for (const [projectId, runs] of byProject) {
+      const cacheKey = `${worktreeRoot} ${projectId}`;
+      let scripts = stopResolutionCache.get(cacheKey);
+      if (scripts === undefined) {
+        const again = await resolveScriptsSafe(worktreeRoot, projectId, envDefault);
+        scripts = again.ok ? again.scripts : { error: `${again.kind}: ${again.message}` };
+        stopResolutionCache.set(cacheKey, scripts);
+      }
+      if (!Array.isArray(scripts)) {
+        settleSkip(report, t, "stop_script_resolution_failed", scripts.error);
+        continue;
+      }
+      for (const run of runs) {
+        const script =
+          scripts.find((s) => s.id === run.script.id) ??
+          scripts.find((s) => s.name === run.script.name);
+        if (script?.stopOnSettle !== true) continue;
+        try {
+          const outcomes = await stopRuns(run.run_id, deps);
+          for (const outcome of outcomes) {
+            report.stopped.push({
+              run_id: outcome.run.run_id,
+              project_id: outcome.run.project_id,
+              script: outcome.run.script.name,
+              pane_id: outcome.run.pane_id,
+              action: outcome.action,
+              transition_seq: t.seq,
+            });
+          }
+        } catch (err) {
+          settleSkip(report, t, "stop_failed", err instanceof Error ? err.message : String(err));
+        }
+      }
+    }
+
+    // 4. runOnSettle fires through the unchanged ADR-0010 runner.
+    const flagged = resolved.scripts.filter((s) => s.runOnSettle === true);
+    if (flagged.length === 0) {
+      settleSkip(report, t, "no_run_on_settle_scripts");
+      continue;
+    }
+    let remote: string | null = null;
+    try {
+      remote = await repoRemoteIdentity(worktreeRoot, gitOptions);
+    } catch {
+      remote = null;
+    }
+    for (const script of flagged) {
+      try {
+        const run = await startRun(
+          {
+            project,
+            script: {
+              id: script.id,
+              name: script.name,
+              command: script.command,
+              source: script.source,
+            },
+            repoRoot: worktreeRoot,
+            remote,
+            trigger: {
+              kind: INBOX_SETTLED_SOURCE,
+              pane_id: t.pane_id,
+              transition_seq: t.seq,
+              transition_at: t.at,
+            },
+          },
+          deps,
+        );
+        firedTransitionSeqs.add(t.seq);
+        report.fired.push({
+          run_id: run.run_id,
+          project_id: project.id,
+          script: script.name,
+          worktree_path: worktreeRoot,
+          result: run.result,
+          source: INBOX_SETTLED_SOURCE,
+          pane_id: t.pane_id,
+          transition_seq: t.seq,
+        });
+      } catch (err) {
+        if (isConnectionError(err)) {
+          settleSkip(
+            report,
+            t,
+            "session_unreachable",
+            err instanceof Error ? err.message : String(err),
+          );
+        } else {
+          settleSkip(
+            report,
+            t,
+            "run_start_failed",
+            err instanceof Error ? err.message : String(err),
+          );
+        }
+      }
+    }
+  }
+
+  // Cursor advances to head ONLY after the batch is processed. A
+  // mid-batch crash replays the un-acked tail; the transition_seq dedupe
+  // above absorbs the replay.
+  await updateState((s) => {
+    if (s.settle_cursors === undefined) s.settle_cursors = {};
+    s.settle_cursors[sessionKey] = headSeqAfter;
+  });
+  report.cursor_after = headSeqAfter;
   return report;
 }
