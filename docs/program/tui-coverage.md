@@ -41,6 +41,20 @@ implement against is [`docs/contracts/tui-v1.md`](../contracts/tui-v1.md).
 | rebuildup.machines | machines/v1 draft | #233 | 3 | 0 | inventory table + probe; lifecycle stays `herdr machine` |
 | rebuildup.mcp | mcp/v1 stable | #233 | 3 CLI + 24 tools | 0 | diagnostics only — the stdio server is NOT screen-ified |
 
+## Foundation row (#236)
+
+The shared zero-dependency TUI core `packages/tui` (raw-mode input,
+diff renderer, shared components, task runner, safety helpers per
+ADR-0032/ADR-0033 and `tui-v1.md`) is implemented and recorded in the
+machine-readable ledger under `foundation`. Verification: dedicated unit
+suites (`tests/tui-*.test.ts`) plus a real-PTY smoke of
+`packages/tui/examples/demo.ts` via `script(1)`.
+
+Deferred to #237 pilot: install-mode reachability of `../packages/tui`
+relative imports from an installed plugin checkout (ADR-0032 open
+item). Repo-checkout `bun run` reachability is verified; managed-checkout
+behavior is untested by design.
+
 ## Cross-cutting notes
 
 - **Daemon/agent-only surfaces stay out of interactive TUI**: `watch`,

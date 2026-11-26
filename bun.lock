@@ -18,6 +18,10 @@
       "name": "@herdr-plugins/client",
       "version": "0.1.0",
     },
+    "packages/tui": {
+      "name": "@herdr-plugins/tui",
+      "version": "0.1.0",
+    },
     "plugins/artifacts": {
       "name": "@herdr-plugins/artifacts",
       "version": "0.2.0",
@@ -123,6 +127,8 @@
     "@herdr-plugins/secrets": ["@herdr-plugins/secrets@workspace:plugins/secrets"],
 
     "@herdr-plugins/textgen": ["@herdr-plugins/textgen@workspace:plugins/textgen"],
+
+    "@herdr-plugins/tui": ["@herdr-plugins/tui@workspace:packages/tui"],
 
     "@herdr-plugins/usage": ["@herdr-plugins/usage@workspace:plugins/usage"],
 
