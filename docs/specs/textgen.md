@@ -139,6 +139,13 @@ Reserved, always `unsupported` — see ADR-0017.
   at `min(maxListItems, candidates)`.
 - `pr_content`: JSON `{title, body}` preferred; first-line-title
   fallback; title ≤300 chars; body ≤ `maxOutputChars`.
+- JSON shapes (`text_list` arrays, `pr_content` objects) parse strictly
+  first; on failure a conservative second pass extracts the first
+  balanced block and escapes raw `\n`/`\r`/`\t` inside JSON string
+  literals only (provider agents wrap long string values across
+  terminal lines — #186/#132). Truncated, unbalanced, multi-value, or
+  non-JSON output still fails `output_invalid_json`; nothing is
+  guess-repaired.
 
 ## Config
 
@@ -251,10 +258,11 @@ residuals are recorded in
   `next_prompt`; `--git-pane` end-to-end generation verified.
 - `agent:claude` fails honestly (`output_unmarked`) while its
   subscription is unusable — same condition as #107.
-- `pr_content` on `agent:codex` consistently fails
+- `pr_content` on `agent:codex` consistently failed
   `output_invalid_json` (provider wraps JSON string values across
-  lines); tracked as rebuildup/herdr-plugins#132, manual fallback
-  unaffected.
+  lines); resolved by #186 via conservative in-string-literal
+  normalization — contract tests cover the observed shape, live
+  re-verification is a residual.
 - The api path was verified against a loopback fake endpoint
   (opt-in gating, credential header, response parsing); no real paid
   API credentials exist on the verification machine, so live

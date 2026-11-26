@@ -55,6 +55,124 @@ function checkClean(text: string, spec: TaskSpec, label: string): string {
   return text;
 }
 
+/** Locate the first balanced block; returns the block and its end offset. */
+function extractFirstBalancedBlock(
+  text: string,
+  opener: "{" | "[",
+  closer: "}" | "]",
+): { text: string; end: number } | null {
+  const start = text.indexOf(opener);
+  if (start === -1) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i += 1) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === opener) depth += 1;
+    else if (ch === closer) {
+      depth -= 1;
+      if (depth === 0) return { text: text.slice(start, i + 1), end: i + 1 };
+    }
+  }
+  return null;
+}
+
+/**
+ * Escape raw `\n`/`\r`/`\t` that appear inside JSON string literals.
+ * Characters outside strings (legal JSON whitespace) are untouched.
+ */
+function escapeRawControlsInStrings(text: string): string {
+  let out = "";
+  let inString = false;
+  let escaped = false;
+  for (const ch of text) {
+    if (!inString) {
+      if (ch === '"') inString = true;
+      out += ch;
+      continue;
+    }
+    if (escaped) {
+      out += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      out += ch;
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = false;
+      out += ch;
+      continue;
+    }
+    if (ch === "\n") {
+      out += "\\n";
+    } else if (ch === "\r") {
+      out += "\\r";
+    } else if (ch === "\t") {
+      out += "\\t";
+    } else {
+      out += ch;
+    }
+  }
+  return out;
+}
+
+/**
+ * Parse provider JSON output (Issue #186 / #132).
+ *
+ * Strict `JSON.parse` runs first and is unchanged; only on its failure
+ * do we apply a conservative second chance:
+ *
+ * 1. extract the FIRST balanced `{...}`/`[...]` block, scanning with
+ *    string-literal and escape awareness (never guessing at missing or
+ *    extra structure),
+ * 2. require the block to be followed by whitespace only — trailing
+ *    content such as a second JSON value stays an error,
+ * 3. escape raw control characters (`\n`, `\r`, `\t`) that appear INSIDE
+ *    JSON string literals only — whitespace between tokens is already
+ *    legal JSON and is untouched,
+ * 4. re-parse strictly.
+ *
+ * Anything still unparseable — truncated JSON, unbalanced braces,
+ * multiple top-level values, non-JSON prose — fails with the same
+ * `output_invalid_json` error as before. This is additive tolerance
+ * under contract `herdr-plugins.textgen/v1`: the accepted result shape
+ * and error taxonomy are unchanged.
+ */
+function parseJsonOutput(
+  text: string,
+  opener: "{" | "[",
+  closer: "}" | "]",
+  task: TaskSpec,
+): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    // fall through to tolerant path
+  }
+  const block = extractFirstBalancedBlock(text, opener, closer);
+  if (block === null || text.slice(block.end).trim() !== "") {
+    fail("output_invalid_json", `task ${task.kind} output is not valid JSON`);
+  }
+  try {
+    return JSON.parse(escapeRawControlsInStrings(block.text));
+  } catch {
+    fail("output_invalid_json", `task ${task.kind} output is not valid JSON`);
+  }
+}
+
 function validateText(spec: TaskSpec, raw: string): string {
   const trimmed = raw.trim();
   if (trimmed === "") fail("output_empty", `task ${spec.kind} produced empty output`);
@@ -77,12 +195,7 @@ function validateTextList(spec: TaskSpec, raw: string, requested: number): strin
   let candidates: string[];
   const jsonStart = trimmed.startsWith("[");
   if (jsonStart) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(trimmed);
-    } catch {
-      fail("output_invalid_json", `task ${spec.kind} list output is not valid JSON`);
-    }
+    const parsed = parseJsonOutput(trimmed, "[", "]", spec);
     if (!Array.isArray(parsed) || parsed.some((v) => typeof v !== "string")) {
       fail("output_invalid_json", `task ${spec.kind} list output must be a JSON string array`);
     }
@@ -124,12 +237,7 @@ function validatePrContent(spec: TaskSpec, raw: string): PrContentResult {
   const unfenced = unwrapFence(trimmed);
   const candidate = unfenced.text.trim();
   if (candidate.startsWith("{")) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(candidate);
-    } catch {
-      fail("output_invalid_json", `task ${spec.kind} PR content is not valid JSON`);
-    }
+    const parsed = parseJsonOutput(candidate, "{", "}", spec);
     const obj = parsed as Record<string, unknown>;
     if (typeof obj.title === "string" && typeof obj.body === "string") {
       title = obj.title.trim();
