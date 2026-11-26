@@ -8,9 +8,33 @@ platforms = ["linux", "macos", "windows"]
 # No build step: the plugin is dependency-free TypeScript executed by Bun
 # (runtime prerequisite, see plugins/mcp/README.md).
 #
-# No [[actions]] / [[events]] / [[startup]]: the plugin is a per-client
+# No [[events]] / [[startup]] hooks: the plugin is a per-client
 # stdio MCP server spawned by the MCP client config (ADR-0002 — no
 # resident process). T4 (#140) added the event surface as in-process
 # tool subscriptions (`events_subscribe`/`events_poll`/`events_wait`/
 # `events_unsubscribe`) — still no daemon; subscriptions die with the
 # client process.
+#
+# Interactive TUI surface (#248, contract docs/contracts/tui-v1.md,
+# ADR-0031/0032/0033): one tab-placed pane entrypoint plus an `open`
+# action that pins the origin context and calls `plugin.pane.open`.
+# DIAGNOSTICS ONLY — the stdio MCP server is never screen-ified
+# (ADR-0025/0033): capability report, access levels, session/socket
+# resolution, tool table, per-plugin availability, upstream gaps. Every
+# read goes through the plugin's own `capability` CLI; there are no
+# mutations and no `serve` invocation.
+
+[[panes]]
+id = "main"
+title = "MCP: diagnostics"
+description = "Read-only MCP diagnostics: capability report, access levels, session resolution, tool table, plugin availability."
+platforms = ["linux", "macos", "windows"]
+placement = "tab"
+command = ["bun", "run", "src/tui.ts", "main"]
+
+[[actions]]
+id = "open"
+title = "MCP: open diagnostics UI"
+description = "Open the MCP diagnostics TUI in a new tab."
+contexts = ["pane", "workspace"]
+command = ["bun", "run", "src/tui.ts", "open"]
