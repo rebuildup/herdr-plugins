@@ -16,8 +16,8 @@ implement against is [`docs/contracts/tui-v1.md`](../contracts/tui-v1.md).
 | field | meaning |
 | --- | --- |
 | `cli` | `implemented` — contract-covered CLI command exists |
-| `tui_action` | `declared:<id>` — a manifest `[[actions]]` entry exists today (inbox ×8, git ×6 incl. `open`, checkpoints ×1, projects ×1, conversations ×1, usage ×1); `none` — no action yet |
-| `interactive_tui` | `planned:#NNN` — scheduled in that implementation ticket (#230 Inbox, #231 Scripts/Checkpoints/Automations, #232 Conversations/Usage/Controls/Handoff/TextGen, #233 Artifacts/Secrets/Machines/MCP diagnostics, #239 Git forge); `implemented:#NNN` — shipped in that ticket (#238 Git, #240 Projects, #244 Conversations/Usage); `n/a` — daemon-, agent-, or diagnostic-only surface with no interactive TUI planned |
+| `tui_action` | `declared:<id>` — a manifest `[[actions]]` entry exists today (inbox ×9 incl. `open`, git ×6 incl. `open`, checkpoints ×1, projects ×1, conversations ×1, usage ×1); `none` — no action yet |
+| `interactive_tui` | `implemented:#NNN` — interactive TUI shipped in that ticket (#237 Inbox pilot, #238 Git, #240 Projects, #244 Conversations/Usage); `planned:#NNN` — scheduled in that implementation ticket (#239 Git forge, #231 Scripts/Checkpoints/Automations, #232 Controls/Handoff/TextGen, #233 Artifacts/Secrets/Machines/MCP diagnostics); `n/a` — daemon-, agent-, or diagnostic-only surface with no interactive TUI planned |
 | `gui` | GUI is owned by herdr-t3 (#7). This repo records consumption intent only — **GUI-done never implies TUI-done** |
 | `real_machine_evidence` | `docs/research/` paths recording live verification; absence means no recorded real-machine run, not necessarily untested |
 | `upstream_gap` | non-null = blocked on herdr/T3Code upstream; never worked around by PTY guessing |
@@ -26,8 +26,8 @@ implement against is [`docs/contracts/tui-v1.md`](../contracts/tui-v1.md).
 
 | plugin | contract | ticket | commands | declared actions | interactive-TUI plan |
 | --- | --- | --- | --- | --- | --- |
-| rebuildup.inbox | inbox/v1 stable | #230 | 17 | 8 | inbox browser + organize verbs + links/transitions |
-| rebuildup.git (+forge) | git/v1 stable | #230 | 17 | 6 | status/files/diff/log/compare browser + stage/commit/branch/push **implemented (#238)**; PR/issue workflows planned #239 |
+| rebuildup.inbox | inbox/v1 stable | #230 | 17 | 9 | **implemented #237**: inbox browser + organize verbs + links/transitions + explicit reconcile |
+| rebuildup.git (+forge) | git/v1 stable | #230 | 17 | 6 | **implemented #238**: status/files/diff/log/compare browser + stage/commit/branch/push; PR/issue workflows planned #239 |
 | rebuildup.projects | projects/v1 stable | #231 | 13 | 1 (`open`) | implemented #240 — registry browser + repos membership + settings + scripts/run/stop + worktree info |
 | rebuildup.checkpoints | checkpoints/v1 stable | #231 | 12 | 1 | list/show/diff/plan + guarded restore/delete/gc |
 | rebuildup.automations | automations/v1 stable | #231 | 14 | 0 | task CRUD + schedule + runs + driver diagnostics |
@@ -50,10 +50,25 @@ machine-readable ledger under `foundation`. Verification: dedicated unit
 suites (`tests/tui-*.test.ts`) plus a real-PTY smoke of
 `packages/tui/examples/demo.ts` via `script(1)`.
 
-Deferred to #237 pilot: install-mode reachability of `../packages/tui`
-relative imports from an installed plugin checkout (ADR-0032 open
-item). Repo-checkout `bun run` reachability is verified; managed-checkout
-behavior is untested by design.
+## TUI pilot row (#237)
+
+`rebuildup.inbox` v0.7.0 ships the first interactive surface: manifest
+`[[panes]] main` (`placement = "tab"`) + `[[actions]] open` (`--open`
+helper → `plugin.pane.open` via `HERDR_BIN_PATH`), implemented in
+`plugins/inbox/src/tui.ts` on `packages/tui`. All 14 human-facing inbox
+commands are `implemented:#237` in the ledger (watch/watch-pr/capability
+stay `n/a`); mutations are confirm-gated and run through `cli.ts`, open
+is read-only, and reconcile runs only via the explicit `c` key.
+
+**Install-mode reachability: PASS.** `herdr plugin install
+rebuildup/herdr-plugins/plugins/inbox --ref 237` produces a full-repo
+managed checkout, so `../../../packages/tui` resolves and the pane
+renders on herdr 0.9.5 — the ADR-0032 relative-import approach needs no
+vendored copy. Live evidence:
+`docs/research/inbox-tui-v237-live-verification.md` (isolated session
+`verify237`; pane open via entrypoint and via `open` action, `?`/`f`/`s`/
+`r`/`q` keys, confirm-gated settle→restore round-trip, clean exit,
+focus return).
 
 ## Git TUI surface (#238)
 
