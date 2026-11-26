@@ -45,6 +45,7 @@ bun run src/cli.ts archive <pane_id>
 bun run src/cli.ts unarchive <pane_id>
 bun run src/cli.ts order <pane_id> --first|--last|--before <pane>|--after <pane>
 bun run src/cli.ts reconcile
+bun run src/cli.ts transitions [--after <seq>] [--limit <n>]
 bun run src/cli.ts watch [--interval SECONDS]
 bun run src/cli.ts capability
 ```
@@ -55,6 +56,11 @@ plugin resolves it from `HERDR_PANE_ID` / `HERDR_PLUGIN_CONTEXT_JSON`.
 `watch` is an opt-in long-running reconciler (subscription + periodic
 expiry). Without it or an event, snooze expiry materializes lazily on the
 next command invocation — see `docs/specs/inbox.md` for the constraint.
+
+`transitions` is a read-only page over the per-session organize-transition
+log (ADR-0029): every settle/snooze/restore/clear is recorded with a
+monotonic `seq`, and consumers drain it via `--after <seq>` —
+`rebuildup.projects` uses it for `runOnSettle`/`stopOnSettle` triggers.
 
 ## State
 

@@ -1,8 +1,8 @@
 id = "rebuildup.projects"
 name = "Projects"
-version = "0.2.0"
+version = "0.3.0"
 min_herdr_version = "0.9.0"
-description = "Project registry for herdr panes: multi-repo grouping, pin/archive, settings overrides, project-defined scripts, and runOnWorktreeCreate auto-triggers via the worktree.created hook event (contract herdr-plugins.projects/v1, stable; additive v0.2.0)."
+description = "Project registry for herdr panes: multi-repo grouping, pin/archive, settings overrides, project-defined scripts, and auto-triggers via the worktree.created hook and the inbox organize-transition log (contract herdr-plugins.projects/v1, stable; additive v0.3.0)."
 platforms = ["linux", "macos", "windows"]
 
 # No build step: the plugin is dependency-free TypeScript executed by Bun

@@ -171,6 +171,29 @@ would conflict with other plugins and herdr-t3's own views. See ADR-0004.
 
 Hook failures are logged to the plugin command log and never affect herdr.
 
+## Organize-transition log and `transitions` command (#182, ADR-0029)
+
+Every real organize mutation appends one `InboxTransition` to a
+per-session log in `state.json` (`transitions` key, schema-v2
+namespaced like entries): `seq` (monotonic per session), `at`, `kind`
+(`settled`/`snoozed`/`restored`/`cleared`), `pane_id`, and context
+fields captured from the snapshot the mutating command already loaded
+(`workspace_id`, `cwd`, `agent_status`, `state_change_seq`,
+`agent_session`). `cleared` transitions carry `cause`
+(`expired`/`generation`/`session_mismatch`/`pane_closed`/`pruned`) and
+are recorded by reconcile, the `agent_status_changed`/`pane.closed`
+hooks, and retention pruning — never by pin/order (layout hints).
+
+`transitions [--after <seq>] [--limit <n>]` is the read-only drain
+surface (contract `herdr-plugins.inbox/v1`, additive in 0.3.0): it
+returns `{session_key, head_seq, oldest_seq, dropped, transitions[]}`
+with `--after` exclusive. Retention caps the log at 500 items per
+session; evicted items increment `dropped` so a consumer can detect a
+cursor older than the retained window (`cursor_expired`) instead of
+assuming a gapless history. `rebuildup.projects` `runOnSettle`/
+`stopOnSettle` (#182) drains this log lazily — inbox never pushes and
+never fabricates herdr events.
+
 ## Manifest actions
 
 `settle`, `restore`, `snooze`, `pin`, `unpin`, `archive`, `unarchive`

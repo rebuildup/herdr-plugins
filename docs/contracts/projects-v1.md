@@ -388,17 +388,19 @@ rename, dedicated `runs.json.lock`):
   "result": "success",
   "log_path": "runs/run-mj3k2x-9f3ab1.log",
   "error": null,
-  "trigger": { "kind": "worktree.created", "worktree_path": "/abs/wt", "event_received_at": "…" }
+  "trigger": { "kind": "inbox.settled", "pane_id": "w1:p2", "transition_seq": 41, "transition_at": "…" }
 }
 ```
 
 `result` ∈ `running | success | failed | stopped | unknown`.
 `running` means the marker was not observed within the wait — it does
 NOT assert the process is alive. `log_path`/`script_path` are relative
-to the plugin state dir (`null` when absent). `trigger` (#180,
+to the plugin state dir (`null` when absent). `trigger` (#180, #182,
 additive, absent on records predating it) records the run origin:
-`{kind:"manual"}` for `scripts run`, `{kind:"worktree.created",
-worktree_path, event_received_at}` for auto-triggered runs.
+`{kind:"manual"}` for `scripts run`,
+`{kind:"worktree.created", worktree_path, event_received_at}` for
+worktree-create auto-triggers, and `{kind:"inbox.settled", pane_id,
+transition_seq, transition_at}` for settle auto-triggers.
 
 ## `scripts stop <run-id|project>`
 
@@ -493,22 +495,89 @@ no polling, no `events.subscribe` watch process (ADR-0002).
   execution so concurrent drains cannot double-fire.
 - **Honesty:** skipped marks are reported, never silent; run results
   keep the `running|success|failed|stopped|unknown` semantics — no
-  fabricated success. `runOnSettle`/`stopOnSettle` remain
-  unimplemented pending #181/#182.
+  fabricated success.
+
+## Auto triggers — `runOnSettle` / `stopOnSettle` (#182, ADR-0029)
+
+Settle is plugin-owned organize state (`rebuildup.inbox`), not a herdr
+event, so there is no `[[events]]` manifest hook. Instead, inbox records
+its own organize transitions in a per-session seq log and exposes them
+read-only via `inbox transitions --after <seq>`
+(`herdr-plugins.inbox/v1`, inbox 0.3.0+). Projects drains that log lazily
+— same no-daemon discipline as the worktree drain — and consumes only
+`kind:"settled"` transitions (`snoozed`/`restored`/`cleared` are recorded
+by inbox but ignored by projects).
+
+- **Inbox resolution (ADR-0013 public-CLI pattern):** the drain locates
+  the installed inbox plugin the same way other plugins do — explicit
+  override first (`--inbox-root` flag on draining commands, then
+  `inboxRoot` in the plugin config dir's `config.json`), then the
+  `../inbox` sibling checkout, then `herdr plugin list` — and invokes
+  `<plugin_root>/src/cli.ts transitions` with `bun run`. The child
+  environment is pinned (`HERDR_PLUGIN_STATE_DIR`/`_CONFIG_DIR` pointed
+  at the resolved inbox dirs, all other `HERDR_*` stripped) so the inbox
+  CLI reads its own state, never projects'. `--socket`/`--session` are
+  forwarded so the drain always reads the session the invoking command
+  resolved. An absent/unrunnable inbox never fails the calling command:
+  the drain reports `inbox_unavailable` and consumes nothing.
+- **Cursor:** the response's `session_key` is stored verbatim as the
+  cursor key in `state.settle_cursors` (projects never recomputes
+  inbox's `hostname + canonical socket` key). The cursor advances to the
+  response `head_seq` only after the batch is processed; a mid-batch
+  crash replays the un-acked tail, absorbed by `transition_seq`
+  dedupe (below). A stored cursor below the log's retained window
+  (`oldest_seq`/`dropped`) sets `cursor_expired` in the report — the
+  consumer is told transitions were lost rather than silently skipped.
+- **Collapse:** within a drained batch, a later `cleared` or `restored`
+  transition for the same `pane_id` supersedes an earlier `settled`
+  (reported `settle_superseded`) — settle→restore is not a net settle.
+  Only transitions that survived collapse reach script resolution.
+- **Repo + script resolution:** the settled pane's `cwd` (captured on
+  the transition by inbox) resolves via `resolveRepo` → canonical
+  worktree root → `git-common-dir` project match (the #180 path) →
+  layered `resolveScripts` on that worktree root. Only scripts with
+  `runOnSettle === true` fire, through the unchanged ADR-0010 runner;
+  `ScriptRun.trigger` records `{kind:"inbox.settled", pane_id,
+  transition_seq, transition_at}`.
+- **stopOnSettle:** for each settled transition, `running` runs whose
+  recorded `repo.root` canonicalizes to the SAME worktree root AND whose
+  script — re-resolved through the same layers — has
+  `stopOnSettle === true` are stopped via the existing `stopRuns` path
+  (recorded `pane_id` only). Sibling worktrees of the same repo group
+  are never touched, and runs started by this very drain are excluded
+  (the pre-drain run snapshot is taken before any fire). Stopped runs
+  are reported in `triggers.stopped[]` with `{run_id, project_id,
+  script, pane_id, action, transition_seq}`.
+- **Idempotency:** a run record whose `trigger.transition_seq` equals
+  the drained transition's `seq` means that transition already fired —
+  reported `already_fired`, never re-fired.
+- **Drain report:** merged into the invoking command's payload as
+  `triggers: {fired[], skipped[], stopped?, duplicates,
+  pending_remaining, inbox_unavailable?, settle?, session_unreachable?}`
+  when non-empty. Settle `fired[]`/`skipped[]` entries carry
+  `source:"inbox.settled"` plus `pane_id`/`transition_seq`
+  (skipped also `cwd?`). `settle` reports `{session_key, cursor_before,
+  cursor_after, cursor_expired}`. Skip reasons include
+  `settle_superseded`, `already_fired`, `cwd_unavailable`, `cwd_gone`,
+  `repo_not_registered`, `ambiguous_project`, `no_run_on_settle_scripts`,
+  `stop_script_resolution_failed`, `stop_failed`,
+  `session_unreachable`, `run_start_failed`, plus git-contract kinds.
 
 ## `scripts tick`
 
 `{contract, command:"scripts tick", triggers?, generated_at}` —
-drains pending `worktree.created` marks (see above). Exit 0 on success;
-the drain itself never fails the command (per-mark outcomes are
-reported in `triggers.skipped`).
+drains pending `worktree.created` marks AND new inbox organize
+transitions (see above). `--inbox-root <path>` overrides inbox plugin
+resolution for this invocation. Exit 0 on success; the drain itself
+never fails the command (per-item outcomes are reported in
+`triggers.skipped`).
 
-## Remaining auto-trigger gap
+## Remaining auto-trigger gaps
 
-`runOnSettle`/`stopOnSettle` have no faithful trigger source yet —
-settle is plugin-owned organize state (inbox), not a herdr event.
-Tracked by #181 (design) / #182 (implementation). #32 automations own
-scheduled/event-driven execution generally.
+`runOnSettle`/`stopOnSettle` cover the settle transition only —
+`snoozed`/`restored`/`cleared` transitions are recorded by inbox but
+have no projects-side semantics (by design, ADR-0029). #32 automations
+own scheduled/event-driven execution generally.
 
 ## Errors
 

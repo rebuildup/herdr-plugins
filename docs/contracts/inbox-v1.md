@@ -33,11 +33,11 @@ An external client resolves the CLI as follows:
 {
   "contract": "herdr-plugins.inbox/v1",
   "plugin": "rebuildup.inbox",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "commands": [
     "list", "settle", "snooze", "restore",
     "pin", "unpin", "archive", "unarchive", "order",
-    "reconcile", "watch", "capability"
+    "reconcile", "transitions", "watch", "capability"
   ],
   "actions": ["settle", "restore", "snooze", "pin", "unpin", "archive", "unarchive"],
   "events": ["pane.agent_status_changed", "pane.closed"],
@@ -92,6 +92,7 @@ not globally unique.
 | `unarchive` | `pane_id?` | Clear the archive mark; other organize state is kept. |
 | `order` | `pane_id? --first\|--last\|--before <pane>\|--after <pane>` | Set manual order rank within the pane's display group. |
 | `reconcile` | — | Resolve expirations/generation changes, prune stale entries, repair metadata. |
+| `transitions` | `--after <seq>` `--limit <n>` | Read-only page over the per-session organize-transition log (below). |
 | `watch` | `--interval SEC` | JSONL event stream + periodic reconcile (below). |
 | `capability` | — | Discovery document (above). |
 
@@ -188,6 +189,49 @@ already succeeded; a later `reconcile`/`watch` repairs projections.
   organized panes get `inbox_state`/`inbox_snoozed_until`/`inbox_pinned`,
   cleared panes get tokens cleared. Re-running `reconcile` is the repair
   path for any partial projection failure.
+
+## `transitions` output (ADR-0029, #182)
+
+Inbox records every real organize transition in a per-session log inside
+the plugin state file (`transitions` key — internal, not part of this
+contract). `transitions` is the read-only drain surface external consumers
+use to observe settle/restore/clear activity; it never fabricates herdr
+events and never exposes the state file directly.
+
+```json
+{
+  "contract": "herdr-plugins.inbox/v1",
+  "command": "transitions",
+  "generated_at": "…",
+  "session_key": "hostname:socket-path",
+  "head_seq": 42,
+  "oldest_seq": 7,
+  "dropped": 3,
+  "transitions": [ { "seq": 8, "…": "…" } ]
+}
+```
+
+- `session_key` echoes the session namespace the page belongs to.
+- `head_seq` is the per-session monotonic head (0 when no log exists);
+  `oldest_seq` is the smallest retained `seq` (`null` when empty); `dropped`
+  counts transitions evicted by the 500-per-session retention cap. A
+  consumer whose stored cursor is below `oldest_seq`/`seq - dropped`
+  window MUST treat it as expired — transitions were lost — rather than
+  assume a gapless history.
+- `transitions` items carry `{seq, at, kind, pane_id}` plus context fields
+  captured from the same snapshot the mutating command already loaded:
+  `workspace_id`, `cwd`, `agent_status`, `state_change_seq`,
+  `agent_session` (fingerprint or `null`). `kind` is `settled` | `snoozed`
+  | `restored` | `cleared`; `cleared` items add `cause`:
+  `expired` | `generation` | `session_mismatch` | `pane_closed` | `pruned`.
+- Flags: `--after <seq>` is an **exclusive** cursor (only `seq > after`);
+  omit it to read the newest page (`--limit`, default 200, max 500). A
+  consumer drains by storing `head_seq` after each batch; replaying a
+  partially-processed batch is safe because `seq` is unique per session.
+- `transitions` is read-only: expiry/generation resolution is the same
+  deterministic in-memory path as `list`; nothing is persisted that `list`
+  would not already resolve identically. Pin/order changes are layout
+  hints and do **not** produce transitions.
 
 ## `watch` output and stop conditions
 
