@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -27,7 +27,7 @@ import {
   resolveRepo,
   sanitizeRemoteUrl,
 } from "../plugins/git/src/git";
-import { testEnv } from "./helpers/test-env";
+import { normalizePath, testEnv } from "./helpers/test-env";
 
 const dirs: string[] = [];
 function tempDir(): string {
@@ -90,9 +90,9 @@ describe("resolveRepo", () => {
   test("resolves repo root from a nested subdirectory", async () => {
     const repo = initRepo();
     const nested = path.join(repo, "sub", "dir");
-    spawnSync("mkdir", ["-p", nested]);
+    mkdirSync(nested, { recursive: true });
     const info = await resolveRepo(nested);
-    expect(info.root).toBe(repo);
+    expect(normalizePath(info.root)).toBe(normalizePath(repo));
     expect(info.bare).toBe(false);
   });
 
@@ -111,7 +111,7 @@ describe("collectStatus", () => {
     writeFileSync(path.join(repo, "a.txt"), "one\ntwo\n"); // unstaged modify
     writeFileSync(path.join(repo, "b.txt"), "new\n"); // untracked
     const status = await collectStatus(repo);
-    expect(status.repo.root).toBe(repo);
+    expect(normalizePath(status.repo.root)).toBe(normalizePath(repo));
     expect(status.branch.name).toBe("main");
     expect(status.branch.detached).toBe(false);
     expect(status.changes.unstaged).toBe(1);

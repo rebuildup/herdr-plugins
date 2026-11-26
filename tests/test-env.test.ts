@@ -4,7 +4,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { herdrSocketEndpoint, socketConsistentEnv, testEnv } from "./helpers/test-env";
+import { envValue, herdrSocketEndpoint, socketConsistentEnv, testEnv } from "./helpers/test-env";
 
 /**
  * Guard tests for the shared test-environment/scrub infrastructure
@@ -66,7 +66,7 @@ describe("testEnv scrub (#199)", () => {
       expect(env[key], `${key} must be scrubbed`).toBeUndefined();
     }
     // Non-herdr environment still passes through.
-    expect(env.PATH).toBe(process.env.PATH);
+    expect(envValue(env, "PATH")).toBe(envValue(process.env, "PATH"));
   });
 
   test("explicit extra is the only opt-in channel", () => {

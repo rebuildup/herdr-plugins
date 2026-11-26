@@ -415,13 +415,17 @@ async function runPluginCli(
 describe.skipIf(IS_WINDOWS)("CLI target isolation (fake herdr sessions)", () => {
   // macOS caps AF_UNIX paths at 104 chars; $TMPDIR is already too deep, so
   // anchor under /tmp directly.
-  const workdir = mkdtempSync(path.join("/tmp", "ht-target-"));
-  const xdgConfig = path.join(workdir, "xdg-config");
-  const xdgState = path.join(workdir, "xdg-state");
-  const sockAPath = path.join(xdgConfig, "herdr", "sessions", "aaa", "herdr.sock");
-  const sockBPath = path.join(xdgConfig, "herdr", "sessions", "bbb", "herdr.sock");
-  const defaultSockPath = path.join(xdgConfig, "herdr", "herdr.sock");
-  const stateFile = path.join(xdgState, "herdr", "plugins", "rebuildup.inbox", "state.json");
+  // NB: bun:test evaluates this callback even when skipIf skips the suite,
+  // so every filesystem touch is deferred into beforeAll — otherwise
+  // mkdtempSync("/tmp/…") throws ENOENT on Windows at collection time
+  // (issue #225).
+  let workdir = "";
+  let xdgConfig = "";
+  let xdgState = "";
+  let sockAPath = "";
+  let sockBPath = "";
+  let defaultSockPath = "";
+  let stateFile = "";
   const INBOX_CLI = path.join(import.meta.dir, "..", "plugins", "inbox", "src", "cli.ts");
   const GIT_CLI = path.join(import.meta.dir, "..", "plugins", "git", "src", "cli.ts");
 
@@ -432,12 +436,6 @@ describe.skipIf(IS_WINDOWS)("CLI target isolation (fake herdr sessions)", () => 
     HOME: workdir,
   });
 
-  async function setup() {
-    servers.push(await startFakeHerdr(sockAPath, sessionSnapshot("aaa")));
-    servers.push(await startFakeHerdr(sockBPath, sessionSnapshot("bbb")));
-    servers.push(await startFakeHerdr(defaultSockPath, sessionSnapshot("default")));
-  }
-
   function stateEntries(): Record<string, unknown> {
     if (!existsSync(stateFile)) return {};
     const parsed = JSON.parse(readFileSync(stateFile, "utf8")) as {
@@ -446,7 +444,18 @@ describe.skipIf(IS_WINDOWS)("CLI target isolation (fake herdr sessions)", () => 
     return parsed.sessions ?? {};
   }
 
-  beforeAll(setup);
+  beforeAll(async () => {
+    workdir = mkdtempSync(path.join("/tmp", "ht-target-"));
+    xdgConfig = path.join(workdir, "xdg-config");
+    xdgState = path.join(workdir, "xdg-state");
+    sockAPath = path.join(xdgConfig, "herdr", "sessions", "aaa", "herdr.sock");
+    sockBPath = path.join(xdgConfig, "herdr", "sessions", "bbb", "herdr.sock");
+    defaultSockPath = path.join(xdgConfig, "herdr", "herdr.sock");
+    stateFile = path.join(xdgState, "herdr", "plugins", "rebuildup.inbox", "state.json");
+    servers.push(await startFakeHerdr(sockAPath, sessionSnapshot("aaa")));
+    servers.push(await startFakeHerdr(sockBPath, sessionSnapshot("bbb")));
+    servers.push(await startFakeHerdr(defaultSockPath, sessionSnapshot("default")));
+  });
 
   test("ambient A + explicit --session B: conflict, zero side effects on A", async () => {
     const before = JSON.stringify(stateEntries());

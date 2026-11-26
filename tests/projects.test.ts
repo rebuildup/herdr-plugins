@@ -19,7 +19,8 @@ import {
   updateSettings,
   updateState,
 } from "../plugins/projects/src/state";
-import { testEnv } from "./helpers/test-env";
+import { installStub } from "./helpers/stub-bin";
+import { joinPathEnv, pathEnvValue, testEnv } from "./helpers/test-env";
 
 const dirs: string[] = [];
 const savedStateDir = process.env.HERDR_PLUGIN_STATE_DIR;
@@ -95,9 +96,12 @@ describe("state", () => {
 describe("repoIndex / projectIdFromRoot", () => {
   test("indexes canonical repo roots", () => {
     const state = emptyState();
-    state.projects["a"] = makeProject("a", ["/tmp/repo"]);
+    // tmpdir()-based so canonicalRepoRoot resolves identically on Windows
+    // (a "/tmp" literal resolves against the current drive there).
+    const repoRoot = path.join(tmpdir(), "repo");
+    state.projects["a"] = makeProject("a", [repoRoot]);
     const index = repoIndex(state);
-    expect(index.get("/tmp/repo")).toBe("a");
+    expect(index.get(repoRoot)).toBe("a");
   });
 
   test("projectIdFromRoot slugifies", () => {
@@ -531,21 +535,34 @@ describe("submodule detection", () => {
     // Shim `git` so only `submodule` invocations fail; rev-parse/status
     // still succeed, isolating the best-effort probe.
     const shimDir = tempDir();
-    const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
-    writeFileSync(
-      path.join(shimDir, "git"),
-      `#!/bin/sh\nif [ "$1" = "submodule" ]; then exit 1; fi\nexec ${realGit} "$@"\n`,
-      { mode: 0o755 },
-    );
-    const savedPath = process.env.PATH;
-    process.env.PATH = `${shimDir}${path.delimiter}${savedPath ?? ""}`;
+    const realGit = Bun.which("git");
+    if (realGit === null) throw new Error("git not found on PATH");
+    const GIT_SHIM_TS = `import { spawnSync } from "node:child_process";
+
+const REAL_GIT = ${JSON.stringify(realGit)};
+const args = process.argv.slice(2);
+if (args[0] === "submodule") {
+  process.exitCode = 1;
+} else {
+  const r = spawnSync(REAL_GIT, args, { stdio: "inherit" });
+  process.exitCode = r.status ?? 1;
+}
+`;
+    installStub(shimDir, {
+      name: "git",
+      posix: `#!/bin/sh\nif [ "$1" = "submodule" ]; then exit 1; fi\nexec ${realGit} "$@"\n`,
+      windows: GIT_SHIM_TS,
+    });
+    const savedPath = pathEnvValue();
+    process.env.PATH = joinPathEnv(shimDir);
     try {
       const info = await inspectRepo(realpathSync(repo));
       expect(info.branch).toBe("main");
       expect(info.dirty).toBe(false);
       expect(info.has_submodules).toBeNull();
     } finally {
-      process.env.PATH = savedPath;
+      if (savedPath === undefined) delete process.env.PATH;
+      else process.env.PATH = savedPath;
     }
   });
 });

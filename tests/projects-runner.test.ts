@@ -365,8 +365,8 @@ describe("marker helpers", () => {
   test("buildCommandLine writes per-family script files for multiline/long commands", async () => {
     const dir = tempDir();
     const sh = await buildCommandLine("run-t2", "echo one\necho two", dir, "sh");
-    expect(sh.scriptPath).toBe(`${dir}/run-t2.sh`);
-    expect(sh.lines[0]).toBe(`sh '${dir}/run-t2.sh'`);
+    expect(sh.scriptPath).toBe(path.join(dir, "run-t2.sh"));
+    expect(sh.lines[0]).toBe(`sh '${path.join(dir, "run-t2.sh")}'`);
     expect(sh.lines[1]).toBe("echo __HERDR_DONE_run-t2__=$?");
     expect(readFileSync(sh.scriptPath as string, "utf8")).toContain("echo one\necho two");
 
