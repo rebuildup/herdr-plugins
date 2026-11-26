@@ -73,7 +73,8 @@ async function main(): Promise<void> {
       entry.snoozed !== undefined ||
       entry.archived !== undefined ||
       entry.pinned !== undefined ||
-      entry.order !== undefined;
+      entry.order !== undefined ||
+      (entry.links?.length ?? 0) > 0;
     if (!hasState) {
       delete entries[paneId];
     }
