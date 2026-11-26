@@ -27,6 +27,7 @@ import {
   resolveRepo,
   sanitizeRemoteUrl,
 } from "../plugins/git/src/git";
+import { testEnv } from "./helpers/test-env";
 
 const dirs: string[] = [];
 function tempDir(): string {
@@ -39,7 +40,7 @@ afterAll(() => {
 });
 
 function git(cwd: string, args: string[]): string {
-  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  const result = spawnSync("git", args, { cwd, encoding: "utf8", env: testEnv() });
   if (result.status !== 0) {
     throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
   }
@@ -221,7 +222,7 @@ describe("collectFiles", () => {
     git(repo, ["checkout", "-q", "main"]);
     writeFileSync(path.join(repo, "a.txt"), "main-c\n");
     git(repo, ["commit", "-qam", "c"]);
-    spawnSync("git", ["merge", "side"], { cwd: repo });
+    spawnSync("git", ["merge", "side"], { cwd: repo, env: testEnv() });
     const { files } = await collectFiles(repo);
     const conflicted = files.find((f) => f.path === "a.txt");
     expect(conflicted?.kind).toBe("conflicted");
@@ -422,7 +423,7 @@ describe("mutations", () => {
 
     // upstream against a real remote-tracking ref (bare remote + push)
     const bare = tempDir();
-    spawnSync("git", ["init", "--bare", "-q", bare]);
+    spawnSync("git", ["init", "--bare", "-q", bare], { env: testEnv() });
     git(repo, ["remote", "add", "origin", bare]);
     git(repo, ["push", "-q", "origin", "feature"]);
     const out = await collectUpstream(repo, { upstream: "origin/feature" });
@@ -443,10 +444,10 @@ describe("remote operations", () => {
   function repoWithRemote(): { repo: string; bare: string } {
     const repo = initRepo();
     const bare = tempDir();
-    spawnSync("git", ["init", "--bare", "-q", bare]);
+    spawnSync("git", ["init", "--bare", "-q", bare], { env: testEnv() });
     // Pin HEAD so clones check out main regardless of the host's
     // init.defaultBranch (Linux CI defaults differ from macOS).
-    spawnSync("git", ["-C", bare, "symbolic-ref", "HEAD", "refs/heads/main"]);
+    spawnSync("git", ["-C", bare, "symbolic-ref", "HEAD", "refs/heads/main"], { env: testEnv() });
     git(repo, ["remote", "add", "origin", bare]);
     return { repo, bare };
   }
@@ -467,7 +468,7 @@ describe("remote operations", () => {
 
     // Advance the bare remote from a second clone, then fetch.
     const clone = tempDir();
-    spawnSync("git", ["clone", "-q", bare, clone]);
+    spawnSync("git", ["clone", "-q", bare, clone], { env: testEnv() });
     git(clone, ["config", "user.email", "t@t"]);
     git(clone, ["config", "user.name", "t"]);
     writeFileSync(path.join(clone, "b.txt"), "remote\n");
@@ -592,15 +593,7 @@ describe("collectDiff", () => {
 const GIT_CLI = path.join(import.meta.dir, "..", "plugins", "git", "src", "cli.ts");
 
 function runCli(args: string[]): { status: number; error: { code?: string; message?: string } } {
-  const env = { ...process.env };
-  for (const key of [
-    "HERDR_PANE_ID",
-    "HERDR_PLUGIN_CONTEXT_JSON",
-    "HERDR_SOCKET_PATH",
-    "HERDR_SESSION",
-  ]) {
-    delete env[key];
-  }
+  const env = testEnv();
   const result = spawnSync(process.execPath, ["run", GIT_CLI, ...args], {
     encoding: "utf8",
     env,

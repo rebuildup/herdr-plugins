@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import net from "node:net";
 import path from "node:path";
+import { herdrSocketEndpoint, testEnv } from "./helpers/test-env";
 
 // ---------------------------------------------------------------------------
 // CLI contract tests for `git issue` (Issue #174): fake herdr session on an
@@ -85,7 +86,7 @@ async function startFakeHerdr(
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
-    server.listen(socketPath, () => resolve());
+    server.listen(herdrSocketEndpoint(socketPath), () => resolve());
   });
   return {
     socketPath,
@@ -98,7 +99,7 @@ async function startFakeHerdr(
 }
 
 function git(cwd: string, args: string[]): void {
-  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  const result = spawnSync("git", args, { cwd, encoding: "utf8", env: testEnv() });
   if (result.status !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
 }
 
@@ -111,18 +112,7 @@ interface CliRun {
 }
 
 async function runCli(args: string[], env: Record<string, string>): Promise<CliRun> {
-  const childEnv: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (
-      value !== undefined &&
-      !key.startsWith("HERDR_") &&
-      key !== "XDG_CONFIG_HOME" &&
-      key !== "XDG_STATE_HOME"
-    ) {
-      childEnv[key] = value;
-    }
-  }
-  Object.assign(childEnv, env);
+  const childEnv = testEnv(env);
   const result = await new Promise<{
     status: number | null;
     stdout: string;

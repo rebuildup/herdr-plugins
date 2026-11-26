@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { loadConfig } from "../plugins/secrets/src/config";
 import { parseInfisicalRef, validateBinding } from "../plugins/secrets/src/model";
+import { herdrSocketEndpoint, testEnv } from "./helpers/test-env";
 
 const CLI = path.join(import.meta.dir, "../plugins/secrets/src/cli.ts");
 
@@ -172,20 +173,7 @@ interface CliResult {
 }
 
 function baseEnv(extra?: Record<string, string>): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value === undefined) continue;
-    if (
-      key.startsWith("HERDR_") &&
-      key !== "HERDR_PLUGIN_STATE_DIR" &&
-      key !== "HERDR_PLUGIN_CONFIG_DIR"
-    ) {
-      continue;
-    }
-    env[key] = value;
-  }
-  if (extra) Object.assign(env, extra);
-  return env;
+  return testEnv(extra);
 }
 
 function runCli(args: string[], extraEnv: Record<string, string>): Promise<CliResult> {
@@ -401,7 +389,7 @@ async function fakeHerdr(): Promise<{
     });
   });
   await new Promise<void>((resolveListen) => {
-    server.listen(socketPath, () => resolveListen());
+    server.listen(herdrSocketEndpoint(socketPath), () => resolveListen());
   });
   return {
     socketPath,

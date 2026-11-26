@@ -11,6 +11,7 @@ import {
   canonicalTriggerEventName,
   extractWorktreePath,
 } from "../plugins/projects/src/triggers";
+import { herdrSocketEndpoint, testEnv } from "./helpers/test-env";
 
 const dirs: string[] = [];
 const savedStateDir = process.env.HERDR_PLUGIN_STATE_DIR;
@@ -38,7 +39,7 @@ function useStateDir(): string {
 }
 
 function git(cwd: string, args: string[]): string {
-  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  const result = spawnSync("git", args, { cwd, encoding: "utf8", env: testEnv() });
   if (result.status !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
   return result.stdout;
 }
@@ -246,7 +247,7 @@ async function fakeHerdr(exitCode = 0): Promise<FakeHerdr> {
   });
   await new Promise<void>((resolveListen, rejectListen) => {
     server.once("error", rejectListen);
-    server.listen(socketPath, () => resolveListen());
+    server.listen(herdrSocketEndpoint(socketPath), () => resolveListen());
   });
   return {
     socketPath,
@@ -263,28 +264,26 @@ const HOOK = path.join(PLUGIN, "src", "hook.ts");
 const CLI = path.join(PLUGIN, "src", "cli.ts");
 
 let deadSocketPath: string | null = null;
+function deadSocket(): string {
+  if (deadSocketPath === null) deadSocketPath = path.join(tempDir(), "no-such-herdr.sock");
+  return deadSocketPath;
+}
 
 function baseEnv(extra?: Record<string, string>): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value === undefined) continue;
-    if (
-      key.startsWith("HERDR_") &&
-      key !== "HERDR_PLUGIN_STATE_DIR" &&
-      key !== "HERDR_PLUGIN_CONFIG_DIR"
-    ) {
-      continue;
-    }
-    env[key] = value;
-  }
+  // Plugin dirs are the explicit opt-in channel: tests set them on
+  // process.env per-case via useStateDir(); everything else HERDR_* stays
+  // scrubbed by testEnv (#199).
+  //
   // #199 hygiene: the settle-trigger drain resolves a socket on EVERY
   // scripts-family call. Default to a dead socket so tests that do not
   // pass one can never reach the developer's live herdr session; tests
   // that need a socket pass HERDR_SOCKET_PATH via `extra`.
-  if (deadSocketPath === null) deadSocketPath = path.join(tempDir(), "no-such-herdr.sock");
-  env.HERDR_SOCKET_PATH = deadSocketPath;
-  if (extra) Object.assign(env, extra);
-  return env;
+  return testEnv({
+    HERDR_PLUGIN_STATE_DIR: process.env.HERDR_PLUGIN_STATE_DIR,
+    HERDR_PLUGIN_CONFIG_DIR: process.env.HERDR_PLUGIN_CONFIG_DIR,
+    HERDR_SOCKET_PATH: deadSocket(),
+    ...extra,
+  });
 }
 
 interface ProcResult {

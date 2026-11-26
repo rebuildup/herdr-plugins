@@ -6,6 +6,7 @@ import path from "node:path";
 import type { Subprocess } from "bun";
 import { TOOL_TABLE } from "../plugins/mcp/src/model";
 import { resolveTarget } from "../plugins/mcp/src/session";
+import { herdrSocketEndpoint, testEnv } from "./helpers/test-env";
 
 const CLI = path.join(import.meta.dir, "../plugins/mcp/src/cli.ts");
 
@@ -130,7 +131,7 @@ async function fakeHerdr(): Promise<{ socketPath: string; close: () => Promise<v
   });
   await new Promise<void>((resolveListen, rejectListen) => {
     server.once("error", rejectListen);
-    server.listen(socketPath, () => resolveListen());
+    server.listen(herdrSocketEndpoint(socketPath), () => resolveListen());
   });
   return {
     socketPath,
@@ -165,7 +166,7 @@ function serveClient(
 } {
   const proc = Bun.spawn(["bun", "run", CLI, "serve", ...args], {
     cwd: path.resolve(import.meta.dir, ".."),
-    env: { ...process.env, ...env },
+    env: testEnv(env, { keepEnvPrefixes: ["HERDR_MCP_ROOT_"] }),
     stdin: "pipe",
     stdout: "pipe",
     stderr: "pipe",

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { InboxState } from "../plugins/inbox/src/state";
 import { appendTransition, MAX_TRANSITIONS_PER_SESSION } from "../plugins/inbox/src/transitions";
+import { herdrSocketEndpoint, testEnv } from "./helpers/test-env";
 
 /**
  * Contract tests for the `transitions` read surface added in #182
@@ -75,7 +76,7 @@ async function fakeHerdr(): Promise<FakeHerdr> {
   });
   await new Promise<void>((resolveListen, rejectListen) => {
     server.once("error", rejectListen);
-    server.listen(socketPath, () => resolveListen());
+    server.listen(herdrSocketEndpoint(socketPath), () => resolveListen());
   });
   return {
     socketPath,
@@ -100,14 +101,10 @@ interface CliResult {
 }
 
 function cliEnv(stateDir: string, configDir: string): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (key.startsWith("HERDR_") || value === undefined) continue;
-    env[key] = value;
-  }
-  env.HERDR_PLUGIN_STATE_DIR = stateDir;
-  env.HERDR_PLUGIN_CONFIG_DIR = configDir;
-  return env;
+  return testEnv({
+    HERDR_PLUGIN_STATE_DIR: stateDir,
+    HERDR_PLUGIN_CONFIG_DIR: configDir,
+  });
 }
 
 async function runCli(args: string[], env: Record<string, string>): Promise<CliResult> {

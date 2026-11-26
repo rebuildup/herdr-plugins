@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { herdrSocketEndpoint, testEnv } from "./helpers/test-env";
 
 const dirs: string[] = [];
 const savedStateDir = process.env.HERDR_PLUGIN_STATE_DIR;
@@ -34,7 +35,7 @@ function useStateDir(): string {
 }
 
 function git(cwd: string, args: string[]): string {
-  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  const result = spawnSync("git", args, { cwd, encoding: "utf8", env: testEnv() });
   if (result.status !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
   return result.stdout;
 }
@@ -172,7 +173,7 @@ async function fakeHerdr(options: FakeHerdrOptions = {}): Promise<FakeHerdr> {
   });
   await new Promise<void>((resolveListen, rejectListen) => {
     server.once("error", rejectListen);
-    server.listen(socketPath, () => resolveListen());
+    server.listen(herdrSocketEndpoint(socketPath), () => resolveListen());
   });
   return {
     socketPath,
@@ -244,22 +245,17 @@ function readGitCalls(root: string): Array<Record<string, unknown>> {
 const PLUGIN = path.join(__dirname, "..", "plugins", "projects");
 const CLI = path.join(PLUGIN, "src", "cli.ts");
 
-/** Strip every ambient HERDR_* except the two plugin dir pins (issue #199). */
+/**
+ * HERDR_* scrubbed by testEnv (issue #199); the two plugin dir pins are
+ * the explicit opt-in channel — tests set them on process.env per-case
+ * via useStateDir().
+ */
 function baseEnv(extra?: Record<string, string>): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value === undefined) continue;
-    if (
-      key.startsWith("HERDR_") &&
-      key !== "HERDR_PLUGIN_STATE_DIR" &&
-      key !== "HERDR_PLUGIN_CONFIG_DIR"
-    ) {
-      continue;
-    }
-    env[key] = value;
-  }
-  if (extra) Object.assign(env, extra);
-  return env;
+  return testEnv({
+    HERDR_PLUGIN_STATE_DIR: process.env.HERDR_PLUGIN_STATE_DIR,
+    HERDR_PLUGIN_CONFIG_DIR: process.env.HERDR_PLUGIN_CONFIG_DIR,
+    ...extra,
+  });
 }
 
 interface ProcResult {

@@ -11,6 +11,7 @@ import {
   pollBackoffMs,
   pruneWatchSession,
 } from "../plugins/inbox/src/watchpr";
+import { herdrSocketEndpoint, testEnv } from "./helpers/test-env";
 
 /**
  * Tests for `inbox watch-pr` (Issue #178):
@@ -212,7 +213,7 @@ async function fakeHerdr(
   });
   await new Promise<void>((resolveListen, rejectListen) => {
     server.once("error", rejectListen);
-    server.listen(socketPath, () => resolveListen());
+    server.listen(herdrSocketEndpoint(socketPath), () => resolveListen());
   });
   return {
     socketPath,
@@ -229,20 +230,17 @@ async function fakeHerdr(
   };
 }
 
-/** Env for spawned inbox CLIs: HERDR_* stripped, dirs + gh stub pinned. */
+/** Env for spawned inbox CLIs: HERDR_* scrubbed by testEnv, dirs + gh stub pinned. */
 function cliEnv(
   stateDir: string,
   configDir: string,
   extra: Record<string, string> = {},
 ): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (key.startsWith("HERDR_") || value === undefined) continue;
-    env[key] = value;
-  }
-  env.HERDR_PLUGIN_STATE_DIR = stateDir;
-  env.HERDR_PLUGIN_CONFIG_DIR = configDir;
-  return { ...env, ...extra };
+  return testEnv({
+    HERDR_PLUGIN_STATE_DIR: stateDir,
+    HERDR_PLUGIN_CONFIG_DIR: configDir,
+    ...extra,
+  });
 }
 
 interface CliResult {
@@ -419,7 +417,7 @@ async function harness(opts: { agentSession?: boolean } = {}): Promise<Harness> 
   const configDir = tempDir("inbox-watchpr-config-");
   const repoDir = tempDir("inbox-watchpr-repo-");
   // The git plugin resolves the pane cwd to a repo root via real git.
-  const init = Bun.spawnSync(["git", "init", "-q", repoDir]);
+  const init = Bun.spawnSync(["git", "init", "-q", repoDir], { env: testEnv() });
   if (init.exitCode !== 0) throw new Error(`git init failed: ${init.stderr.toString()}`);
 
   const stub = installGhStub();

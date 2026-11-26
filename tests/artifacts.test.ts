@@ -14,6 +14,7 @@ import {
   PLUGIN_VERSION,
   STORAGE_MODES,
 } from "../plugins/artifacts/src/model";
+import { testEnv } from "./helpers/test-env";
 
 const dirs: string[] = [];
 const savedEnv: Record<string, string | undefined> = {};
@@ -44,24 +45,11 @@ const PLUGIN = path.join(__dirname, "..", "plugins", "artifacts");
 const CLI = path.join(PLUGIN, "src", "cli.ts");
 
 function cliEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
-  const stateDir = tempDir();
-  const configDir = tempDir();
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    HERDR_PLUGIN_STATE_DIR: stateDir,
-    HERDR_PLUGIN_CONFIG_DIR: configDir,
-  };
-  for (const key of Object.keys(env)) {
-    if (
-      key.startsWith("HERDR_PANE") ||
-      key.startsWith("HERDR_WORKSPACE") ||
-      key.startsWith("HERDR_TAB")
-    ) {
-      delete env[key];
-    }
-  }
-  if (extra) Object.assign(env, extra);
-  return env;
+  return testEnv({
+    HERDR_PLUGIN_STATE_DIR: tempDir(),
+    HERDR_PLUGIN_CONFIG_DIR: tempDir(),
+    ...extra,
+  });
 }
 
 interface CliResult {

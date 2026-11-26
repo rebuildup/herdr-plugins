@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { herdrSocketEndpoint, testEnv } from "./helpers/test-env";
 
 const dirs: string[] = [];
 const savedEnv: Record<string, string | undefined> = {};
@@ -101,7 +102,7 @@ async function fakeHerdrSocket(options: {
   });
   await new Promise<void>((resolveListen, rejectListen) => {
     server.once("error", rejectListen);
-    server.listen(socketPath, () => resolveListen());
+    server.listen(herdrSocketEndpoint(socketPath), () => resolveListen());
   });
   return {
     socketPath,
@@ -141,7 +142,7 @@ function runCli(
 ): Promise<CliResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [CLI, ...args], {
-      env: { ...process.env, ...env },
+      env: testEnv(env),
     });
     let stdout = "";
     let stderr = "";

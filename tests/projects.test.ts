@@ -19,6 +19,7 @@ import {
   updateSettings,
   updateState,
 } from "../plugins/projects/src/state";
+import { testEnv } from "./helpers/test-env";
 
 const dirs: string[] = [];
 const savedStateDir = process.env.HERDR_PLUGIN_STATE_DIR;
@@ -40,7 +41,7 @@ function useStateDir(): void {
 }
 
 function git(cwd: string, args: string[]): string {
-  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  const result = spawnSync("git", args, { cwd, encoding: "utf8", env: testEnv() });
   if (result.status !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
   return result.stdout;
 }
@@ -55,7 +56,7 @@ function initRepo(withRemote = false): string {
   git(dir, ["commit", "-qm", "init"]);
   if (withRemote) {
     const bare = tempDir();
-    spawnSync("git", ["init", "--bare", "-q", bare]);
+    spawnSync("git", ["init", "--bare", "-q", bare], { env: testEnv() });
     git(dir, ["remote", "add", "origin", `git@github.com:Octo/Widgets.git`]);
   }
   return dir;
@@ -205,7 +206,10 @@ interface CliResult {
 function runCli(args: string[]): CliResult {
   const result = spawnSync(process.execPath, [CLI, ...args], {
     encoding: "utf8",
-    env: { ...process.env },
+    env: testEnv({
+      HERDR_PLUGIN_STATE_DIR: process.env.HERDR_PLUGIN_STATE_DIR,
+      HERDR_PLUGIN_CONFIG_DIR: process.env.HERDR_PLUGIN_CONFIG_DIR,
+    }),
     timeout: 15_000,
   });
   let json: Record<string, unknown> | null = null;

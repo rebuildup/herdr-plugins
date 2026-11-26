@@ -5,6 +5,7 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { loadRuns, updateRuns } from "../plugins/projects/src/runs";
+import { herdrSocketEndpoint, testEnv } from "./helpers/test-env";
 
 /**
  * Contract tests for the #182 settle triggers: projects drains
@@ -51,7 +52,7 @@ const CLI = path.join(PLUGIN, "src", "cli.ts");
 const INBOX_CLI = path.join(INBOX_PLUGIN, "src", "cli.ts");
 
 function git(cwd: string, args: string[]): string {
-  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  const result = spawnSync("git", args, { cwd, encoding: "utf8", env: testEnv() });
   if (result.status !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
   return result.stdout;
 }
@@ -336,7 +337,7 @@ async function fakeHerdr(opts: {
   });
   await new Promise<void>((resolveListen, rejectListen) => {
     server.once("error", rejectListen);
-    server.listen(socketPath, () => resolveListen());
+    server.listen(herdrSocketEndpoint(socketPath), () => resolveListen());
   });
 
   const inboxStateDir = path.join(xdgState, "herdr", "plugins", "rebuildup.inbox");
@@ -367,19 +368,8 @@ interface ProcResult {
   json: Record<string, unknown> | null;
 }
 
-function stripHerdr(env: Record<string, string>): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value === undefined) continue;
-    if (key.startsWith("HERDR_")) continue;
-    out[key] = value;
-  }
-  Object.assign(out, env);
-  return out;
-}
-
 function projectsEnv(fx: Fixture): Record<string, string> {
-  return stripHerdr({
+  return testEnv({
     XDG_STATE_HOME: fx.xdgState,
     XDG_CONFIG_HOME: fx.xdgConfig,
     HERDR_SOCKET_PATH: fx.socketPath,
@@ -389,7 +379,7 @@ function projectsEnv(fx: Fixture): Record<string, string> {
 }
 
 function inboxEnv(fx: Fixture): Record<string, string> {
-  return stripHerdr({
+  return testEnv({
     HERDR_SOCKET_PATH: fx.socketPath,
     HERDR_PLUGIN_STATE_DIR: fx.inboxStateDir,
     HERDR_PLUGIN_CONFIG_DIR: fx.inboxConfigDir,
@@ -403,7 +393,7 @@ function inboxEnv(fx: Fixture): Record<string, string> {
  * to exercise the settle-drain `target_required` gate (O2).
  */
 function projectsEnvNoTarget(fx: Fixture): Record<string, string> {
-  return stripHerdr({
+  return testEnv({
     XDG_STATE_HOME: fx.xdgState,
     XDG_CONFIG_HOME: fx.xdgConfig,
     HERDR_PLUGIN_STATE_DIR: fx.projStateDir,
