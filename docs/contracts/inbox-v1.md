@@ -33,12 +33,12 @@ An external client resolves the CLI as follows:
 {
   "contract": "herdr-plugins.inbox/v1",
   "plugin": "rebuildup.inbox",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "commands": [
     "list", "settle", "snooze", "restore",
     "pin", "unpin", "archive", "unarchive", "order",
     "link", "unlink", "links",
-    "reconcile", "watch", "capability"
+    "reconcile", "watch", "watch-pr", "capability"
   ],
   "actions": ["settle", "restore", "snooze", "pin", "unpin", "archive", "unarchive"],
   "events": ["pane.agent_status_changed", "pane.closed"],
@@ -97,6 +97,7 @@ not globally unique.
 | `links` | `pane_id?` | Read the pane's declared links (staleness resolved). |
 | `reconcile` | — | Resolve expirations/generation changes, prune stale entries, repair metadata. |
 | `watch` | `--interval SEC` | JSONL event stream + periodic reconcile (below). |
+| `watch-pr` | `[pane_id] [--interval SEC] [--once] [--git-root PATH]` | Opt-in PR-update watcher: polls declared PR links via the git plugin and restores attention on qualifying transitions (below). |
 | `capability` | — | Discovery document (above). |
 
 Global flags (after the command): `--session NAME`, `--socket PATH`,
@@ -260,6 +261,102 @@ deadline and runs one reconcile — this keeps pane metadata tokens fresh on
 the herdr host without user action (ADR-0005). `watch`/startup reconcile
 remain the repair paths for any missed wake.
 
+## `watch-pr` output and semantics (added in plugin v0.4.0)
+
+`watch-pr` is the opt-in PR-update attention watcher (Issue #178). It is a
+plain opt-in process — **no resident daemon, no webhook** (webhook/inbound
+delivery is an upstream gap, ADR-0026). When it is not running, PR updates
+are simply not observed; nothing promises automatic attention return.
+
+**Scope**: every declared `kind: "pr"` tracker link in the session (or only
+the pane given as the optional positional `pane_id`). `issue` links are
+not watched — the git plugin exposes no public issue-read surface; this is
+a recorded limitation, not silent behavior. Only links that survive the
+normal staleness rules (agent-session fingerprint, seq regression, live
+pane) are polled.
+
+**Poll source**: each watched PR is read exclusively through the
+`rebuildup.git` plugin's **public CLI** (`git pr view`, `git pr comments`,
+`git pr checks`) — never gh internals, never tokens, never the git
+plugin's state files (ADR-0013 pattern). The git plugin root resolves via
+`--git-root` → `config.json gitPluginRoot` → sibling `../git` →
+`herdr plugin list --json`; the child's `HERDR_PLUGIN_*` env is scrubbed
+and pinned to the git plugin's own dirs.
+
+**Freshness and cost bounds**:
+
+- Poll interval: `--interval SEC` (default 120, matching the T3 Code
+  2-minute cadence). One tick polls each eligible link once (3 git-CLI
+  reads per link); links are processed sequentially.
+- Per-link freshness is recorded in plugin state (`watch` map):
+  `last_checked_at` (last *successful* poll), `last_error`,
+  `consecutive_failures`, `next_poll_at`. Failed polls never overwrite the
+  last good observation — staleness is reported, never fabricated.
+- Failure backoff: `interval × 2^failures` capped at 30 minutes; deferred
+  links are skipped until `next_poll_at`.
+- Rate-limit/unreachable gh surfaces as `watch-pr.error` events with
+  `consecutive_failures`, `next_poll_at`, and the age of the last good
+  `last_checked_at` — an explicit state, not silence.
+
+**JSONL events** (stdout, one compact object per line):
+
+- `{"type":"watch-pr.started","interval_ms","pane_filter","once",
+  "git_root","git_root_via","git_error","at"}` once at startup.
+- `{"type":"watch-pr.poll","pane_id","ref","ok":true,"baseline",
+  "triggers","new_failing_checks","new_review_count","new_comment_count",
+  "terminal","observation","last_checked_at","at"}` per successful poll.
+  `baseline: true` means this poll established the first observation (no
+  diff is computed — linking an already-merged/closed PR records
+  `terminal` silently and cannot fabricate attention). `observation`
+  summarizes `{state, is_draft, merge_state_status, mergeable, updated_at,
+  failing_checks, review_count, comment_count}`.
+- `{"type":"watch-pr.error","pane_id","ref","ok":false,"error",
+  "consecutive_failures","next_poll_at","last_checked_at","at"}` per
+  failed poll.
+- `{"type":"watch-pr.attention","pane_id","triggers","links":[{ref,
+  triggers, new_failing_checks, new_review_count, new_comment_count}],
+  "cleared","warnings","at"}` when a poll diff qualifies for attention
+  return. `cleared` lists the hide-kind marks removed
+  (`settled`/`snoozed`/`archived`); it may be empty when the pane carried
+  no marks (already visible — a no-op).
+- `{"type":"watch-pr.tick","interval_ms","pane_filter","git_root",
+  "git_root_via","targets","absent_panes","polled","deferred","failed",
+  "triggered","terminal","at"}` per pass.
+- `{"type":"watch-pr.stopped","reason","at"}` on exit; `reason` is
+  `signal` (SIGINT/SIGTERM), `once` (`--once` with pending work),
+  `no_links` (no declared PR links in scope), or `all_terminal` (every
+  declared PR link reached MERGED/CLOSED or its pane is gone — matching
+  the T3 "watch ends on merge/close" semantics per link).
+
+**Trigger conditions** (diff vs the stored baseline observation only —
+never PTY text or guessed state):
+
+- `merged` / `closed` — PR lifecycle transition into MERGED/CLOSED;
+  the link becomes `terminal` and is never polled again.
+- `check_failed` — a check newly appears in a failing bucket
+  (`fail`/`cancel` via `gh pr checks`).
+- `merge_conflict` — `mergeStateStatus` transitions into `DIRTY`.
+  Other `mergeStateStatus` churn (BLOCKED↔UNSTABLE↔BEHIND↔CLEAN) is
+  volatile and deliberately does not wake.
+- `review` — new submitted review not authored by the PR author (the
+  author is the self proxy; true viewer-login detection is not
+  implemented).
+- `comment` — new issue or line comment not authored by the PR author.
+
+**Attention return semantics**: a qualifying diff clears the pane's
+hide-kind organize marks (`settled`/`snoozed`/`archived`) under the state
+lock and re-projects metadata — the same "restore attention" direction
+as `restore`, but `pin`, `order`, and declared links are preserved and
+agent execution state is never touched. `blocked` and other attention
+statuses were never hidden and are unaffected. Diffs are computed against
+the last *successful* observation only, so a flapping or unreachable
+forge cannot re-trigger: after a trigger the baseline is updated in the
+same commit, and terminal links stop polling.
+
+Baseline pruning: watch records for unlinked refs, stale links, and
+closed panes are dropped (`unlink`, `pane.closed`, reconcile-time prune);
+recorded baselines never resurrect for a recycled pane/agent identity.
+
 ## State and config locations
 
 - State: `<plugin state dir>/state.json` — `HERDR_PLUGIN_STATE_DIR` under
@@ -267,7 +364,13 @@ remain the repair paths for any missed wake.
   external clients (`~/.local/state/herdr/...`, `$XDG_STATE_HOME` aware).
   Schema v2 namespaces entries per `hostname + canonical socket path`;
   organize state never crosses sessions or hosts.
-- Config: `<plugin config dir>/config.json` (`defaultSnooze`).
+- Config: `<plugin config dir>/config.json` (`defaultSnooze`,
+  `gitPluginRoot` — explicit `rebuildup.git` plugin root override for
+  `watch-pr`).
+- `state.json` additionally carries an optional top-level `watch` map
+  (session → pane → link ref → poll baseline/freshness record) used only
+  by `watch-pr`; it is internal bookkeeping, not part of the read
+  contract.
 - Updates preserve both: they live outside the installed checkout.
 
 ## Versioning
