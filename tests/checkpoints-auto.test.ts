@@ -296,7 +296,9 @@ describe("checkpoints auto-capture", () => {
       expect(git(repo, ["for-each-ref", "refs/herdr-plugins/checkpoints"]).trim()).toBe("");
 
       // Next CLI invocation drains: list captures the work unit.
-      const listed = await runCliAsync(["list", "--socket", fake.socketPath], { HERDR_SOCKET_PATH: fake.socketPath });
+      const listed = await runCliAsync(["list", "--socket", fake.socketPath], {
+        HERDR_SOCKET_PATH: fake.socketPath,
+      });
       const payload = listed.json as Record<string, unknown>;
       expect(listed.status).toBe(0);
       const autoCaptures = payload.auto_captures as Record<string, unknown>;
@@ -401,7 +403,9 @@ describe("checkpoints auto-capture", () => {
       // Generation advanced without a hook delivery (seq 2 → 4): the
       // mark is stale and must not produce a checkpoint.
       setAgent(fake, "w1:p1", { agent_status: "idle", state_change_seq: 4 });
-      const listed = await runCliAsync(["list", "--socket", fake.socketPath], { HERDR_SOCKET_PATH: fake.socketPath });
+      const listed = await runCliAsync(["list", "--socket", fake.socketPath], {
+        HERDR_SOCKET_PATH: fake.socketPath,
+      });
       expect(listed.status).toBe(0);
       const autoCaptures = listed.json?.auto_captures as Record<string, unknown>;
       expect(autoCaptures.captured).toHaveLength(0);
@@ -439,7 +443,9 @@ describe("checkpoints auto-capture", () => {
         state_change_seq: 2,
         agent_session: { ...AGENT_SESSION, value: "s2" },
       });
-      const listed = await runCliAsync(["list", "--socket", fake.socketPath], { HERDR_SOCKET_PATH: fake.socketPath });
+      const listed = await runCliAsync(["list", "--socket", fake.socketPath], {
+        HERDR_SOCKET_PATH: fake.socketPath,
+      });
       const autoCaptures = listed.json?.auto_captures as Record<string, unknown>;
       expect(autoCaptures.captured).toHaveLength(0);
       expect(autoCaptures.skipped).toEqual([{ pane_id: "w1:p1", reason: "stale_generation" }]);
@@ -508,7 +514,9 @@ describe("checkpoints auto-capture", () => {
       // Snapshot failing: drain reports session_unreachable, mark survives.
       const state = fakeStates.get(fake.socketPath);
       if (state) state.failSnapshot = true;
-      const unreachable = await runCliAsync(["list", "--socket", fake.socketPath], { HERDR_SOCKET_PATH: fake.socketPath });
+      const unreachable = await runCliAsync(["list", "--socket", fake.socketPath], {
+        HERDR_SOCKET_PATH: fake.socketPath,
+      });
       expect(unreachable.status).toBe(0);
       const unreachableAuto = unreachable.json?.auto_captures as Record<string, unknown>;
       expect(unreachableAuto.session_unreachable).toBe(true);
@@ -516,7 +524,9 @@ describe("checkpoints auto-capture", () => {
 
       // Snapshot back: the same mark drains normally.
       if (state) state.failSnapshot = false;
-      const listed = await runCliAsync(["list", "--socket", fake.socketPath], { HERDR_SOCKET_PATH: fake.socketPath });
+      const listed = await runCliAsync(["list", "--socket", fake.socketPath], {
+        HERDR_SOCKET_PATH: fake.socketPath,
+      });
       const autoCaptures = listed.json?.auto_captures as Record<string, unknown>;
       expect(autoCaptures.captured).toHaveLength(1);
     } finally {
