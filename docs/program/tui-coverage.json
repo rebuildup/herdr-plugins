@@ -1568,30 +1568,30 @@
           "mutating": true,
           "class": "mutation",
           "cli": "implemented",
-          "tui_action": "none",
-          "interactive_tui": "planned:#232",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#246",
           "gui": "consumer:herdr-t3 (#7)",
           "real_machine_evidence": [
             "docs/research/textgen-v1-agent-pane-verification.md",
             "docs/research/textgen-v1-real-provider-verification.md"
           ],
           "upstream_gap": null,
-          "notes": "task picker + result review + explicit adopt; generation!=apply"
+          "notes": "task picker + contract input form (@file for long text) + provider/model select + confirm-gated generate; result review/copy only — not persisted (#249), generation!=apply; cancel detaches to preserve agent-path cleanup"
         },
         {
           "command": "git-context",
           "mutating": false,
           "class": "read",
           "cli": "implemented",
-          "tui_action": "none",
-          "interactive_tui": "planned:#232",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#246",
           "gui": "consumer:herdr-t3 (#7)",
           "real_machine_evidence": [
             "docs/research/textgen-v1-agent-pane-verification.md",
             "docs/research/textgen-v1-real-provider-verification.md"
           ],
           "upstream_gap": null,
-          "notes": "context preview feeding generate"
+          "notes": "read-only preview inside the generate flow for --git-pane tasks"
         },
         {
           "command": "watch-next-prompt",
