@@ -13,12 +13,13 @@ platforms = ["linux", "macos", "windows"]
 # Marks drain lazily on the next `scripts`-family CLI call; no daemon,
 # no polling (same mechanism as plugins/automations #146).
 #
-# Interactive TUI surface (#240, contract docs/contracts/tui-v1.md,
-# ADR-0031/0032/0033): one tab-placed pane entrypoint plus an `open`
-# action that pins the origin context and calls `plugin.pane.open`.
-# The UI consumes this plugin's own CLI for every read/mutation, so the
-# public contract stays the single source of truth; mutations are
-# confirm-gated and checked against `capability`/`mutation_commands`.
+# Interactive TUI surface (#240 registry browser, #241 dedicated scripts
+# surface; contract docs/contracts/tui-v1.md, ADR-0031/0032/0033): two
+# tab-placed pane entrypoints plus `open`/`open-scripts` actions that pin
+# the origin context and call `plugin.pane.open`. The UIs consume this
+# plugin's own CLI for every read/mutation, so the public contract stays
+# the single source of truth; mutations are confirm-gated and checked
+# against `capability`/`mutation_commands`.
 
 [[panes]]
 id = "main"
@@ -28,12 +29,27 @@ platforms = ["linux", "macos", "windows"]
 placement = "tab"
 command = ["bun", "run", "src/tui.ts", "main"]
 
+[[panes]]
+id = "scripts"
+title = "Projects: scripts"
+description = "Script browser per project or repo path: list/select, run, stop, results and logs."
+platforms = ["linux", "macos", "windows"]
+placement = "tab"
+command = ["bun", "run", "src/tui-scripts.ts", "main"]
+
 [[actions]]
 id = "open"
 title = "Projects: open registry UI"
 description = "Open the projects registry TUI in a new tab."
 contexts = ["pane", "workspace"]
 command = ["bun", "run", "src/tui.ts", "open"]
+
+[[actions]]
+id = "open-scripts"
+title = "Projects: open scripts UI"
+description = "Open the project scripts TUI in a new tab."
+contexts = ["pane", "workspace"]
+command = ["bun", "run", "src/tui-scripts.ts", "open"]
 
 [[events]]
 on = "worktree.created"
