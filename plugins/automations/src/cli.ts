@@ -1,6 +1,6 @@
 /**
  * rebuildup.automations CLI — versioned structured interface
- * (`herdr-plugins.automations/v1`, DRAFT per Issue #137/#144).
+ * (`herdr-plugins.automations/v1`, STABLE per Issue #137/#144–#147).
  *
  * T2 (#144): task registry core — schedule model (interval /
  * fixed_time / once / event; webhook schema-reserved →
@@ -13,7 +13,9 @@
  * driver reporting. T4 (#146): `event` schedules fired by herdr
  * `[[events]]` hooks (`src/hook.ts` records pending marks; `tick`
  * drains them lazily — no daemon) plus hook-observed run status.
- * Webhook lands in #147.
+ * T5 (#147): webhook triggers resolved as an upstream gap — no
+ * `serve`, `webhook` schedules stay `unsupported_schedule`
+ * (ADR-0026); contract v1 finalized STABLE.
  *
  * Output contract (same shape as other plugins): one JSON document on
  * stdout for success, one JSON error object on stderr, exit 0 / 1 /
@@ -72,13 +74,13 @@ import {
 } from "./state";
 
 export { CONTRACT, PLUGIN_ID };
-export const PLUGIN_VERSION = "0.4.0";
+export const PLUGIN_VERSION = "0.7.0";
 
 export interface CapabilityDocument {
   contract: string;
   plugin: string;
   version: string;
-  contract_status: "draft";
+  contract_status: "stable";
   commands: string[];
   planned_commands: string[];
   schedules: string[];
@@ -95,7 +97,7 @@ export function capabilityDocument(): CapabilityDocument {
     contract: CONTRACT,
     plugin: PLUGIN_ID,
     version: PLUGIN_VERSION,
-    contract_status: "draft",
+    contract_status: "stable",
     commands: [
       "capability",
       "create",
@@ -112,7 +114,7 @@ export function capabilityDocument(): CapabilityDocument {
       "watch",
       "schedule",
     ],
-    planned_commands: ["serve"],
+    planned_commands: [],
     schedules: ["interval", "fixed_time", "once", "event"],
     reserved_schedules: ["webhook"],
     hook_entrypoint: "src/hook.ts",
@@ -807,7 +809,7 @@ async function cmdCapability(): Promise<void> {
 
 function helpText(): string {
   return (
-    "rebuildup.automations — scheduled agent runs (contract herdr-plugins.automations/v1, draft)\n" +
+    "rebuildup.automations — scheduled agent runs (contract herdr-plugins.automations/v1, stable)\n" +
     "commands:\n" +
     "  capability\n" +
     "  create --name N --prompt P --schedule '<json>' --destination '<json>' [--misfire skip|run_once] [--enabled true|false] [--created-by cli]\n" +
@@ -826,7 +828,7 @@ function helpText(): string {
     "global flags: --session NAME --socket PATH --timeout MS\n" +
     "event triggers (#146): manifest [[events]] -> src/hook.ts records pending marks;\n" +
     "  `tick` (OS scheduler/watch/manual) drains them into event runs.\n" +
-    "planned (#147): serve\n" +
+    "webhook schedules: unsupported in v1 (upstream gap, ADR-0026)\n" +
     "see docs/contracts/automations-v1.md and docs/specs/automations.md\n"
   );
 }

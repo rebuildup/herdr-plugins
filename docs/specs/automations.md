@@ -7,7 +7,8 @@ automations, adapted to herdr's no-daemon constraint.
 Parent: #32 (Automations) / #22. Decomposition: #137 (T1, this doc +
 ADR-0022/0023 + contract skeleton), #144 (T2 registry — implemented),
 #145 (T3 firing/delivery — implemented), #146 (T4 event triggers —
-implemented), #147 (T5 webhook).
+implemented), #147 (T5 webhook — resolved as upstream gap, ADR-0026;
+contract v1 finalized STABLE).
 
 ## Sources (upstream inventory — confirmed at t3code @ `9cc4018c`)
 
@@ -69,7 +70,7 @@ missed`, timestamps, `destination_snapshot`, observed-only `result`,
 | `interval` `every_ms ≥ 60000` | in | occurrences anchored at last fired; ≤60 s driver jitter |
 | `fixed_time` `time_of_day` + `weekdays?` + `time_zone?` | in | zone defaults to host-local at evaluation, recorded on run |
 | `once` `run_at` ISO+offset | in | past `run_at` at create → `invalid_schedule` |
-| `webhook` | reserved | rejected `unsupported_schedule` until #147 |
+| `webhook` | unsupported (ADR-0026) | rejected `unsupported_schedule` permanently in v1 — herdr has no inbound HTTP path; opt-in `serve` rejected (ADR-0002) |
 | `event` | in (#146) | `on` + `filter` + `debounce_ms`/`cooldown_ms`/`max_fires`; fired by `[[events]]` hook marks drained on `tick`/`watch` |
 
 ### Firing architecture (ADR-0022) — implemented #145
@@ -173,8 +174,8 @@ failed install → `install_failed`; dead pid/missing entry →
 pause/resume (`set-enabled`)/run-now/delete/runs; idempotent fire,
 misfire policy, missed-run lazy resolution; OS-scheduler + watch
 drivers; pane/launch destinations; `event` schedules via manifest
-`[[events]]` hooks (#146); CLI surface — all implemented through
-#146.
+`[[events]]` hooks (#146); CLI surface — implemented through #146,
+contract finalized STABLE by #147.
 
 **T2 registry semantics (#144, implemented)**:
 
@@ -201,18 +202,23 @@ drivers; pane/launch destinations; `event` schedules via manifest
   `HERDR_PLUGIN_STATE_DIR/state.json` with the standard
   single-writer lock + atomic rename.
 
-**Reserved (schema present, rejected until owning ticket)**:
-`webhook` (#147 — opt-in `serve` vs upstream gap, HMAC/filters/
-dedupe/coalesce decided there).
+**Unsupported (schema reserved, rejected permanently in v1)**:
+`webhook` (#147 / ADR-0026 — herdr has no inbound HTTP or tunnel
+equivalent of T3 Connect, and an opt-in foreground `serve` listener
+would violate the ADR-0002 no-daemon invariant; upstream gap
+recorded, filing deferred — see §Upstream gap candidates). If herdr
+ships an inbound path, `webhook` schedules can be designed without a
+contract break.
 
 **Out of v1**: multi-stage durable workflows and question/approval
 orchestration (T3 orchestrator is a separate system; herdr composes
 via explicit handoff `delegate`/`merge-back` invocations — revisit
 only with a demonstrated unmet requirement); Issue/PR forge events
 (requires polling clock or webhook inbound — both blocked/deferred);
-MCP `schedule_task` surface (CLI-only v1; #30 decides exposure,
-soft non-blocking dependency); automatic retry; store-and-forward
-offline queue.
+inbound webhook triggers (`webhook` schedules and any `serve`-like
+listener — upstream gap, ADR-0026); MCP `schedule_task` surface
+(CLI-only v1; #30 decides exposure, soft non-blocking dependency);
+automatic retry; store-and-forward offline queue.
 
 ## Honesty invariants
 
@@ -247,11 +253,19 @@ the installed source tree.
 - MCP: CLI-only v1; `herdr-plugins.automations/v1` is the contract a
   future #30 `schedule_task` tool would consume.
 
-## Upstream gap candidates (filing deferred to #147)
+## Upstream gap candidates (filing decided in #147 / ADR-0026)
 
 1. herdr timer/scheduled plugin hook (retires OS/watch drivers).
-2. Inbound webhook HTTP path / tunnel equivalent (blocks `webhook`).
+2. Inbound webhook HTTP path / tunnel equivalent (blocks `webhook`;
+   classified upstream-blocked in the feature ledger).
 3. Structured worktree/settle events (shared with #60, #146).
+
+**Filing decision (#147): none filed.** Prior herdrdev/herdr feature
+requests — including #6199 (remote MCP / inbound HTTP) — were closed
+by the rate-limit bot without maintainer review, so filing is
+currently futile. The gaps remain recorded as known-declined; revisit
+when upstream shows maintainer engagement or a concrete blocked use
+case is demonstrated. ADR-0026 is the pointer of record.
 
 ## Non-goals
 

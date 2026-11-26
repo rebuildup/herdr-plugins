@@ -56,10 +56,11 @@ export const RUN_TRIGGERS = ["schedule", "manual", "event", "webhook"] as const;
 export type RunTrigger = (typeof RUN_TRIGGERS)[number];
 
 /**
- * Schedule types accepted for storage. `webhook` remains schema-
- * reserved for #147: it may appear in stored tasks but
- * `create`/`update` MUST reject it with `unsupported_schedule`.
- * `event` is implemented by #146.
+ * Schedule types accepted for storage. `webhook` is permanently
+ * unsupported in v1 (ADR-0026 — herdr has no inbound HTTP path and
+ * an opt-in listener would violate ADR-0002): it may appear in
+ * stored tasks but `create`/`update` MUST reject it with
+ * `unsupported_schedule`. `event` is implemented by #146.
  */
 export const RESERVED_SCHEDULE_TYPES = ["webhook"] as const;
 
@@ -313,8 +314,8 @@ function validTimeZone(name: string): boolean {
 
 /**
  * Schema-validate a schedule. `type` missing/unknown → `invalid_schedule`;
- * reserved types (`webhook`) → `unsupported_schedule` (contract
- * §Error model — reserved until #147).
+ * unsupported types (`webhook` — ADR-0026) → `unsupported_schedule`
+ * (contract §Error model).
  */
 export function parseSchedule(raw: unknown): Schedule {
   if (!isRecord(raw)) {
@@ -327,7 +328,7 @@ export function parseSchedule(raw: unknown): Schedule {
   if ((RESERVED_SCHEDULE_TYPES as readonly string[]).includes(type)) {
     throw new AutomationsError(
       "unsupported_schedule",
-      `schedule type '${type}' is reserved for a later ticket (#147) and cannot be created or updated in v1`,
+      `schedule type '${type}' is unsupported in v1 (webhook is an upstream gap, ADR-0026) and cannot be created or updated`,
     );
   }
   switch (type) {
