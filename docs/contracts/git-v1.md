@@ -6,7 +6,7 @@ Read commands (`status`, `files`, `diff`, `log`, `compare`, `remote`,
 `pr checks`, `pr logs`, `project`) are side-effect free;
 mutation commands (`stage`, `unstage`, `commit`, `branch`, `upstream`,
 `fetch`, `push`, `pr create`, `pr review`, `pr comment`, `pr reply`,
-`pr reviewers`) change the pane repository's index/refs/
+`pr reviewers`, `pr merge`) change the pane repository's index/refs/
 remotes or the forge on the herdr host. Follows the same conventions as `herdr-plugins.inbox/v1`
 (`docs/contracts/inbox-v1.md`).
 
@@ -44,7 +44,7 @@ bun run src/cli.ts pr list|status|create|view|reviews|comments|checks|logs
     <pane_id> [args] [--repo owner/name]
     pr reviews|comments|checks <pane> <number>
     pr logs <pane> <number> [--run ID | --job ID [--lines N]]
-bun run src/cli.ts pr review|comment|reply|reviewers <pane_id> [args]
+bun run src/cli.ts pr review|comment|reply|reviewers|merge <pane_id> [args]
     [--repo owner/name] --expect-head <full-sha>   (required)
     pr review <pane> <number> --approve|--request-changes|--comment
         [--body B | --body-file PATH|-]
@@ -53,6 +53,8 @@ bun run src/cli.ts pr review|comment|reply|reviewers <pane_id> [args]
     pr reply <pane> <number> <comment-id> --body B|--body-file PATH|-
     pr reviewers <pane> <number>
         [--add-reviewer LOGIN[,LOGIN]...] [--remove-reviewer LOGIN...]
+    pr merge <pane> <number> [--squash|--merge|--rebase]
+        [--auto | --disable-auto]
 bun run src/cli.ts project <pane_id> [--session NAME]
 bun run src/cli.ts capability
 ```
@@ -429,29 +431,69 @@ rejected before any `gh` call.
   (`--add-reviewer LOGIN[,LOGIN]...`, `--remove-reviewer …`, at least
   one required; comma-separated or repeated). The payload echoes the
   post-mutation `review_requests` re-fetched from the PR.
+- `pr merge <number>` — merge or arm/disarm GitHub auto-merge (Issue
+  #173, ADR-0030). Three modes:
+  - immediate merge — `PUT pulls/{n}/merge` with `sha` pinned to the
+    verified head; optional `--squash|--merge|--rebase` (`merge_method`,
+    omitted → repo default).
+  - `--auto` — `POST pulls/{n}/auto-merge`; a method flag is required.
+    GitHub merges later when branch protection clears; the PR is **not**
+    merged by this call.
+  - `--disable-auto` — `DELETE pulls/{n}/auto-merge`; method flags are
+    rejected.
+  Immediately before the write the plugin re-fetches
+  `gh pr view --json` (`mergeStateStatus`, `reviewDecision`,
+  `isDraft`, `headRefOid`, …) on top of the usual `--expect-head`
+  stale-head guard. Immediate merge proceeds only for
+  `mergeStateStatus` `CLEAN`/`UNSTABLE`; `BLOCKED`, `DIRTY`, `BEHIND`,
+  `UNKNOWN`, `DRAFT`, `HAS_HOOKS`, drafts, and non-`OPEN` states are
+  refused with `error.kind: "merge_blocked"` and a message carrying the
+  observed state values. Auto-merge refuses only `DIRTY`/`DRAFT`/
+  `UNKNOWN` — `BLOCKED` (pending/failed required checks) is exactly
+  what auto-merge exists for, and the result reports the armed
+  `auto_merge_request` rather than claiming a merge. gh HTTP
+  405/409/422 write refusals also map to `merge_blocked`; other gh
+  failures stay `gh_error`.
+  The success payload echoes `head`/`base`, the pre-merge
+  `merge_state_status`/`review_decision`/`mergeable`, the REST
+  response under `merge`, the post-write `state`/`is_draft`/
+  `auto_merge_request` (re-fetched — merge-queue/pending semantics are
+  reported as GitHub states them, never guessed), and `result` ∈
+  `merged` | `pending` | `auto_merge_enabled` | `auto_merge_disabled`.
+  `result: "merged"` is emitted only when GitHub's merge response says
+  `merged: true`; a `merged: false`/still-open response is `pending`.
 - **Stale-head guard (mandatory on every `pr` mutation).**
-  `review`/`comment`/`reply`/`reviewers` all require
+  `review`/`comment`/`reply`/`reviewers`/`merge` all require
   `--expect-head <full sha>` (40- or 64-hex; short shas rejected with a
-  usage error). Immediately before writing, the plugin re-fetches
+  usage error). For review/comment/reply/reviewers the plugin re-fetches
   `GET pulls/{n}` and refuses with `error.kind: "stale_head"` when the
   live `head.sha` differs — a review/comment can never land on a commit
-  the caller did not last read. Callers obtain the sha from `head.sha`
-  in any `pr` read payload (`view`/`reviews`/`comments`/`checks`/
-  `logs`). A missing/unreadable head sha is `gh_error`, never a
-  proceed.
+  the caller did not last read. `pr merge` performs the equivalent
+  check against `headRefOid` from the merge-state fetch and additionally
+  pins `sha` in the REST merge body. Callers obtain the sha from
+  `head.sha` (REST-shaped reads) or `headRefOid` (`pr view` merge
+  fields) in any `pr` read payload (`view`/`reviews`/`comments`/
+  `checks`/`logs`). A missing/unreadable head sha is `gh_error`, never
+  a proceed.
 - **github-delivery boundary.** These commands exist for explicit
-  user/agent invocations only. There is no automation path that
+  user/agent invocations only; there is no automation path that
   submits reviews, posts comments, requests reviewers, merges, or
-  auto-merges — in particular the plugin never approves its own
-  release PR or merges a `release-* -> main` PR; release approval stays
-  a maintainer decision per the github-delivery skill.
+  auto-merges. `pr merge` hard-refuses any PR whose **head** branch
+  matches the release-train pattern `release-<digits>(-<digits>)*`
+  with `error.kind: "release_boundary"` — for both merge and
+  auto-merge — because `release-* -> main` approval is a maintainer
+  decision per the github-delivery skill and the plugin must never
+  automate or proxy it. Ticket PRs that target a release branch as
+  *base* are unaffected (the guard keys on the head ref only). The
+  plugin never approves its own release PR.
 - `pr` appears in `mutation_commands` because `pr create`/`review`/
-  `comment`/`reply`/`reviewers` mutate the forge; `list`/`status`/
-  `view`/`reviews`/`comments`/`checks`/`logs` are read-only. PR state
-  is never used to bypass merge/review gates — the plugin exposes
-  state, it does not act on it. Merge/auto-merge, editing or deleting
-  existing reviews/comments, and non-GitHub forges are out of scope
-  (later tickets).
+  `comment`/`reply`/`reviewers`/`merge` mutate the forge; `list`/
+  `status`/`view`/`reviews`/`comments`/`checks`/`logs` are read-only.
+  PR state is never used to bypass merge/review gates — the plugin
+  exposes state, it does not act on it. Editing or deleting existing
+  reviews/comments, merge-queue manipulation, GitHub stack merges,
+  agent credits, and non-GitHub forges are out of scope (later
+  tickets).
 - gh error messages echo only the subcommand words, never argv content
   (titles/bodies may be sensitive); `gh api` mutation payloads travel
   on stdin (`--input -`) for the same reason.
@@ -477,7 +519,7 @@ the status data remains authoritative.
 {
   "contract": "herdr-plugins.git/v1",
   "plugin": "rebuildup.git",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "commands": [
     "capability", "status", "files", "diff", "log", "compare",
     "stage", "unstage", "commit", "branch", "upstream", "fetch",
