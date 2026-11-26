@@ -1,4 +1,4 @@
-# Contract: `herdr-plugins.mcp/v1` (draft — read surface stable)
+# Contract: `herdr-plugins.mcp/v1` (draft — read + mutation surfaces stable)
 
 Versioned structured interface for the `rebuildup.mcp` plugin — a
 **local stdio MCP server** that exposes herdr sessions and sibling
@@ -7,8 +7,8 @@ Boundary, access levels, session resolution, and the remote/HTTP/OAuth
 upstream gap are fixed by ADR-0025; the upstream inventory is canonized
 in `docs/research/mcp-upstream-inventory.md`.
 
-**Status: draft overall; the read surface is stable as of T2 (#138).**
-The mutation surface lands in T3 (#139), the event surface in T4
+**Status: draft overall; the read surface is stable as of T2 (#138) and
+the mutation surface as of T3 (#139).** The event surface lands in T4
 (#140). `capability` (CLI and `herdr_capability` tool) reports
 `contract_status` plus a per-surface `surfaces` map and per-tool
 `status` so clients can detect what is implemented.
@@ -98,11 +98,11 @@ Per-plugin root overrides for tests/managed installs:
 Each entry: MCP tool name · required access level · read-only
 annotation (`readOnlyHint`) · backing implementation · status.
 Names are snake_case per MCP convention; `t3_*`-style prefixes are not
-used — the server IS the herdr surface. **Implemented (stable, T2
-#138):** all tools in the Capability/discovery and Plugin contract
-reads tables below. Planned tools remain listed by `tools/list` and
-fail honestly with `unsupported` (or `capability_denied` below their
-access floor) until T3/T4.
+used — the server IS the herdr surface. **Implemented (stable):** all
+tools in the Capability/discovery, Plugin contract reads, and Mutations
+tables below (reads T2 #138, mutations T3 #139). Planned tools remain
+listed by `tools/list` and fail honestly with `unsupported` (or
+`capability_denied` below their access floor) until T4.
 
 Tool results are wrapped as
 `{contract, ok:true, tool, result}` in `structuredContent`; plugin-CLI
@@ -132,15 +132,74 @@ with `stale_generation`.
 | `projects_list` | read-only | yes | `rebuildup.projects` CLI |
 | `usage_report` | read-only | yes | `rebuildup.usage` CLI |
 
-### Mutations (require `supervised`+)
+### Mutations (implemented, T3 #139)
+
+All mutation tools are gated server-side by the access level before
+dispatch (`capability_denied` below the floor, changing nothing) and
+share the mutation result shape: the sibling plugin's contract
+document (or the direct herdr result) under `result`, the contract
+`identity` block, and an `effects` array recording the exact herdr API
+method / sibling CLI command that ran — the summary never replaces
+herdr as the authority. Agent-target mutations accept the same
+`expect_pane`/`expect_state_seq`/`expect_agent_session` arguments as
+the read tools and forward them to `rebuildup.controls` `--expect-*`
+guards, so the generation check runs again at mutation time.
 
 | Tool | Level | Read-only | Backs onto |
 | --- | --- | --- | --- |
-| `agent_prompt` | supervised | no | `rebuildup.controls` `send` (identity echo + `--expect-*` guards; `blocked` → `requires_interactive_input`) |
+| `agent_prompt` | supervised | no | `rebuildup.controls` `send` (identity echo + `--expect-*` guards; `blocked` → `upstream_gap` with `details.plugin_kind: "requires_interactive_input"`) |
 | `agent_wait` | read-only | yes (blocking observation, no mutation) | `rebuildup.controls` `wait` |
-| `agent_interrupt` | supervised | no | `rebuildup.controls` `interrupt` — PTY-level `send_keys`, documented as such |
-| `agent_start` / `workspace_create` | supervised | no | `rebuildup.controls` `start` / herdr `workspace.create`+`agent.start`; provider permission mode capped |
-| `handoff_invoke` | supervised | no | `rebuildup.handoff` `execute`/`delegate`/`merge-back` CLI (ADR-0021 boundaries apply) |
+| `agent_interrupt` | supervised | no | `rebuildup.controls` `interrupt` — PTY-level `send_keys`, documented as such in the tool description |
+| `agent_start` | supervised | no | `rebuildup.controls` `start`; provider `permission_mode` is capped by the access level (below) |
+| `workspace_create` | supervised | no | herdr `workspace.create` (herdr-client) |
+| `handoff_invoke` | supervised | no | `rebuildup.handoff` `execute`/`delegate`/`merge-back` CLI (ADR-0021 boundaries apply; `--remote` is not exposed in v1) |
+
+`agent_prompt` args: `target`, `text` (must not start with `--` — the
+controls CLI would parse it as a flag), optional `wait`,
+`wait_until[]`, `timeout_ms`.
+
+`agent_wait` args: `target`, optional `until[]`, `timeout_ms`.
+
+`agent_interrupt` args: `target`, optional `keys[]` (default `["esc"]`).
+
+`agent_start` args: `pane_id` (must exist in the live snapshot),
+`agent` (provider kind), optional `name`, `model`, `reasoning`,
+`permission_mode`, `resume` | `resume_from` (mutually exclusive),
+`extra_args[]` (provider passthrough — the controls privilege
+denylist applies; there is no `--unsafe-args` equivalent), `timeout_ms`,
+`wait`, `wait_until[]`, `wait_timeout_ms`, `expect_*`.
+
+`workspace_create` args: optional `cwd`, `label`, `focus`. No `env`
+passthrough in v1 — tool arguments must never carry secrets.
+
+`handoff_invoke` args: `operation` (`execute`|`delegate`|`merge-back`),
+`id`, plus a per-operation allowlist of the handoff CLI flags
+(`target_pane`, `target_workspace`, `new_workspace`, `worktree`,
+`worktree_branch`, `worktree_base`, `provider`, `model`, `strategy`,
+`task`, `note`, `requirement[]`, `conversation[]`, `checkpoint[]`,
+`external[]`, `handoff[]`, `link_note`, `wait_ms`,
+`cleanup_on_failure`, `no_execute`, `dry_run`). Arguments outside the
+operation's surface are refused `invalid_params`, never silently
+dropped.
+
+**Permission-mode cap (`agent_start`).** The negotiated access level
+bounds the provider permission mode an MCP-started agent may run with:
+`supervised` accepts only `permission_mode: "supervised"` and pins it
+explicitly when the caller omits the argument (a provider default can
+never silently exceed the level); requesting a higher mode
+(`auto-accept-edits`/`auto`/`full-access`) fails `capability_denied`
+before any socket call. `full` passes the caller's choice through
+unrestricted. Providers without a verified `supervised` launch mapping
+fail honestly via controls `unsupported_launch_option` → `unsupported`.
+
+**Error mapping.** Sibling-CLI failure `kind`s map onto the contract
+codes (`stale_*` → `stale_generation`, `*_not_found`/`*_missing` →
+`not_found`, `unsupported_*`/`*_busy` → `unsupported`,
+`requires_interactive_input`/`agent_blocked` → `upstream_gap`, usage/
+invalid kinds → `invalid_params`, transport kinds →
+`session_unreachable`, unmapped kinds (e.g. transient
+`agent_not_ready` while agent registration settles) → `internal`); the
+original kind is always preserved in `error.details.plugin_kind`.
 
 ### Events (T4, #140 — planned)
 
@@ -216,6 +275,6 @@ fields and new tools may appear; renaming/removing tools, changing
 access-level semantics, or altering the error model requires v2.
 Stability is declared per surface via `surfaces` in `capability`:
 `read` is **stable** (T2, #138 — protocol methods, read tools,
-identity echo, error model), `mutation` and `events` remain `planned`
-until #139/#140 land. The read surface may still gain additive
-optional arguments; breaking changes to it require v2.
+identity echo, error model), `mutation` is **stable** (T3, #139 — the
+six mutation tools, access gating, permission-mode cap, `effects`
+echo), and `events` remains `planned` until #140 lands.

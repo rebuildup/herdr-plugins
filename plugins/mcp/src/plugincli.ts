@@ -35,13 +35,13 @@ export const READ_PLUGIN_CONTRACTS = {
   "rebuildup.usage": "herdr-plugins.usage/v1",
 } as const;
 
-/** Plugin contracts referenced by planned (T3/T4) tools — probed for capability. */
-export const PLANNED_PLUGIN_CONTRACTS = {
+/** Plugin contracts consumed by the MCP mutation surface (T3, #139). */
+export const MUTATION_PLUGIN_CONTRACTS = {
   "rebuildup.controls": "herdr-plugins.controls/v1",
   "rebuildup.handoff": "herdr-plugins.handoff/v1",
 } as const;
 
-export type PluginId = keyof typeof READ_PLUGIN_CONTRACTS | keyof typeof PLANNED_PLUGIN_CONTRACTS;
+export type PluginId = keyof typeof READ_PLUGIN_CONTRACTS | keyof typeof MUTATION_PLUGIN_CONTRACTS;
 
 /** `rebuildup.<name>` → sibling directory `plugins/<name>`. */
 function pluginDirName(pluginId: string): string {

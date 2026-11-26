@@ -424,15 +424,25 @@ describe("rebuildup.mcp stdio server (T2, #138)", () => {
         expect(doc.error.code).toBe("capability_denied");
         expect(doc.error.details?.negotiated).toBe("read-only");
       }
-      // A planned read-only tool is reachable but honestly unsupported.
+      // agent_wait is a read-level blocking observation (T3, #139): it
+      // runs at read-only and consumes rebuildup.controls wait.
       const wait = toolPayload(
         await client.request("tools/call", {
           name: "agent_wait",
           arguments: { target: "pane-1" },
         }),
       );
-      expect(wait.isError).toBe(true);
-      expect((wait.structuredContent as { error: { code: string } }).error.code).toBe(
+      expect(wait.isError).toBeUndefined();
+      expect((wait.structuredContent as { ok: boolean }).ok).toBe(true);
+      // Events remain planned until T4 (#140) and fail honestly.
+      const events = toolPayload(
+        await client.request("tools/call", {
+          name: "events_subscribe",
+          arguments: {},
+        }),
+      );
+      expect(events.isError).toBe(true);
+      expect((events.structuredContent as { error: { code: string } }).error.code).toBe(
         "unsupported",
       );
     } finally {
@@ -441,7 +451,7 @@ describe("rebuildup.mcp stdio server (T2, #138)", () => {
     }
   });
 
-  test("supervised server still refuses nothing at read level but reports planned tools unsupported", async () => {
+  test("supervised server dispatches agent_prompt to rebuildup.controls", async () => {
     const fake = await fakeHerdr();
     const client = serveClient(["--socket", fake.socketPath, "--access-level", "supervised"]);
     try {
@@ -452,8 +462,18 @@ describe("rebuildup.mcp stdio server (T2, #138)", () => {
           arguments: { target: "pane-1", text: "hi" },
         }),
       );
-      // supervised clears the access gate; the tool itself is T3 scope.
-      expect((res.structuredContent as { error: { code: string } }).error.code).toBe("unsupported");
+      // T3 (#139): agent_prompt is implemented — it spawns the sibling
+      // rebuildup.controls CLI, which the fake socket answers with {}
+      // for agent.prompt, yielding a controls success document.
+      const doc = res.structuredContent as {
+        ok: boolean;
+        error?: { code: string };
+        result?: { identity?: Record<string, unknown>; effects?: unknown[] };
+      };
+      expect(doc.error).toBeUndefined();
+      expect(doc.ok).toBe(true);
+      expect(doc.result?.identity?.pane_id).toBe("pane-1");
+      expect(Array.isArray(doc.result?.effects)).toBe(true);
     } finally {
       await client.close();
       await fake.close();
@@ -489,7 +509,7 @@ describe("rebuildup.mcp stdio server (T2, #138)", () => {
       expect(doc.result.resolved_session.socket).toBe(fake.socketPath);
       expect(doc.result.plugins.length).toBeGreaterThan(0);
       const implemented = doc.result.tools.filter((t) => t.status === "implemented");
-      expect(implemented.length).toBe(14);
+      expect(implemented.length).toBe(20); // T2 reads (#138) + T3 mutations (#139)
     } finally {
       await client.close();
       await fake.close();

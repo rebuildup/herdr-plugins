@@ -2,7 +2,7 @@
 
 Scope: local stdio MCP server exposing herdr sessions and sibling
 plugin contracts to outside agents. Contract:
-`herdr-plugins.mcp/v1` (**draft — read surface stable**, T2 #138;
+`herdr-plugins.mcp/v1` (**draft — read + mutation surfaces stable**;
 `docs/contracts/mcp-v1.md`). Boundary ADR: ADR-0025. Upstream
 inventory: `docs/research/mcp-upstream-inventory.md`. Decomposition of
 #30: T1 boundary/contract (#135), T2 stdio core + read tools (#138),
@@ -35,9 +35,14 @@ this plugin is a *protocol adapter*, not a second control plane.
 `supervised`+ and are refused with structured `capability_denied`
 below it (T3 `McpToolAccess` semantics). `supervised` mutations carry
 the same identity echo and stale-generation guards as
-`rebuildup.controls`, and provider permission mode is capped through
-the controls launch-args mechanism (ADR-0018) so an MCP-spawned agent
-never runs with more permission than the selected level.
+`rebuildup.controls` — `expect_*` args are checked live before dispatch
+AND forwarded to the controls `--expect-*` guards — and provider
+permission mode is capped through the controls launch-args mechanism
+(ADR-0018): `agent_start` pins `permission_mode: "supervised"` at the
+`supervised` level (over-cap requests fail `capability_denied` before
+any socket call) and passes the caller's choice through at `full`.
+Every mutation result echoes `identity` plus an `effects` summary of
+the herdr API / sibling CLI call that ran.
 
 ## Session resolution
 
@@ -76,7 +81,11 @@ applied to reused pane ids. See contract "Session resolution".
   stale-generation refusal, `plugin_unavailable`) in
   `tests/mcp-server.test.ts`; isolated-session live check of ≥1 read
   tool.
-- T3: mutation gating tests (read-only denial, stale generation,
-  reused pane id) + isolated-session prompt→wait→read.
+- T3 (#139): mutation gating tests (read-only denial, stale generation,
+  reused pane id, permission-mode cap, `plugin_unavailable`, sibling
+  error-kind mapping) in `tests/mcp-mutations.test.ts` over a stateful
+  fake herdr socket + real `rebuildup.controls` / fake
+  `rebuildup.handoff` CLIs; isolated-session live check of
+  prompt→wait→read recorded for T4.
 - T4: filter/reconnect/resync tests + live verification record in
   `docs/research/mcp-v1-live-verification.md`.

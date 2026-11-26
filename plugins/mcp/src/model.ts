@@ -3,25 +3,25 @@
  *
  * T1 (#135) fixes the boundary (ADR-0025), access levels, the planned
  * tool table, and the error model. T2 (#138) implements the stdio
- * server + read tools, T3 (#139) mutations, T4 (#140) events.
+ * server + read tools, T3 (#139) the mutation tools, T4 (#140) events.
  */
 
 export const CONTRACT = "herdr-plugins.mcp/v1";
 export const PLUGIN_ID = "rebuildup.mcp";
 export const PLUGIN_VERSION = "0.1.0";
 
-/** Contract lifecycle: draft until the T3/T4 surfaces land. */
+/** Contract lifecycle: draft until the T4 event surface lands. */
 export const CONTRACT_STATUS = "draft" as const;
 
 /**
  * Per-surface stability (contract "Versioning"): the read surface is
- * stable as of T2 (#138); mutations land in T3 (#139), events in T4
- * (#140). `capability` reports this map so clients can detect what is
- * implemented without parsing the tool table.
+ * stable as of T2 (#138) and the mutation surface as of T3 (#139);
+ * events land in T4 (#140). `capability` reports this map so clients
+ * can detect what is implemented without parsing the tool table.
  */
 export const SURFACE_STATUS = {
   read: "stable",
-  mutation: "planned",
+  mutation: "stable",
   events: "planned",
 } as const;
 
@@ -154,47 +154,48 @@ export const TOOL_TABLE: readonly ToolSpec[] = [
     status: "implemented",
     backs_onto: "rebuildup.usage CLI (env-pinned spawn)",
   },
-  // Mutations (supervised+)
+  // Mutations (supervised+; agent_wait is a read-level blocking observation)
   {
     name: "agent_prompt",
     access: "supervised",
     readOnly: false,
-    status: "planned",
+    status: "implemented",
     backs_onto: "rebuildup.controls send (identity echo + --expect-* guards)",
   },
   {
     name: "agent_wait",
     access: "read-only",
     readOnly: true,
-    status: "planned",
+    status: "implemented",
     backs_onto: "rebuildup.controls wait (blocking observation)",
   },
   {
     name: "agent_interrupt",
     access: "supervised",
     readOnly: false,
-    status: "planned",
+    status: "implemented",
     backs_onto: "rebuildup.controls interrupt (PTY-level send_keys)",
   },
   {
     name: "agent_start",
     access: "supervised",
     readOnly: false,
-    status: "planned",
-    backs_onto: "rebuildup.controls start / workspace.create+agent.start; permission mode capped",
+    status: "implemented",
+    backs_onto:
+      "rebuildup.controls start; provider permission mode capped to the negotiated access level",
   },
   {
     name: "workspace_create",
     access: "supervised",
     readOnly: false,
-    status: "planned",
+    status: "implemented",
     backs_onto: "herdr workspace.create (herdr-client)",
   },
   {
     name: "handoff_invoke",
     access: "supervised",
     readOnly: false,
-    status: "planned",
+    status: "implemented",
     backs_onto: "rebuildup.handoff execute/delegate/merge-back CLI (ADR-0021 boundaries)",
   },
   // Events (T4, #140)
