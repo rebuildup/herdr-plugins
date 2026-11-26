@@ -26,6 +26,7 @@ clients through one versioned contract.
 | [textgen](plugins/textgen/) | `rebuildup.textgen` | Text generation (`herdr-plugins.textgen/v1`): six tasks over dedicated agent panes or opt-in API generators, with strict input/output boundaries. Generation only — execution stays with the caller. |
 | [mcp](plugins/mcp/) | `rebuildup.mcp` | Outside-agent MCP surface (`herdr-plugins.mcp/v1`, draft): local stdio MCP server exposing herdr sessions + plugin contracts with read-only/supervised/full access levels; remote HTTP/OAuth is upstream gap herdrdev/herdr#6199 (#30 T1). |
 | [machines](plugins/machines/) | `rebuildup.machines` | Remote machines inventory (`herdr-plugins.machines/v1`, draft): read-only `list`/`probe`/`capability` over herdr saved machines — reachability, remote version/protocol, plugin surface via the `SavedSshApiBridge` path. Lifecycle stays with `herdr machine`; no credentials (ADR-0028, #161). |
+| [secrets](plugins/secrets/) | `rebuildup.secrets` | Secret reference resolution and env injection (`herdr-plugins.secrets/v1`): Infisical-only declared bindings resolved per invocation into child-process env (`run`) or surface-create `env` params (`inject`) — values never persisted, logged, or emitted (ADR-0027). |
 
 ## Development
 
