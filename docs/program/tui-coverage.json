@@ -1873,12 +1873,12 @@
           "mutating": false,
           "class": "diagnostic",
           "cli": "implemented",
-          "tui_action": "none",
-          "interactive_tui": "planned:#233",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#248",
           "gui": "consumer:herdr-t3 (#7)",
           "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
           "upstream_gap": null,
-          "notes": "access level + tool list + per-plugin availability"
+          "notes": "access level + tool list + per-plugin availability; diagnostics TUI (read-only, server not screen-ified)"
         },
         {
           "command": "serve",
