@@ -66,6 +66,11 @@ upstream initialization prompt here.
   directories (`HERDR_PLUGIN_CONFIG_DIR` / `HERDR_PLUGIN_STATE_DIR`,
   resolved equivalently for external clients). Never inside the installed
   source tree.
+- The herdr TUI is a first-class plugin surface (program #228): every new
+  human-facing feature MUST consider its TUI/GUI coverage, record gaps in
+  `docs/program/tui-coverage.json`, and implement interactive surfaces
+  against `docs/contracts/tui-v1.md` (ADRs 0031–0033). CLI or GUI
+  completion alone never counts as TUI coverage.
 - Real-herdr verification uses an isolated named session only; never touch
   the user's live session, agents, or worktrees.
 
