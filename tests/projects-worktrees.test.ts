@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { herdrSocketEndpoint, testEnv } from "./helpers/test-env";
+import { herdrSocketEndpoint, normalizePath, samePath, testEnv } from "./helpers/test-env";
 
 const dirs: string[] = [];
 const savedStateDir = process.env.HERDR_PLUGIN_STATE_DIR;
@@ -402,7 +402,7 @@ describe("repos list worktree association (#184)", () => {
       const wts = entry.worktrees as WorktreeEntry[];
       expect(wts).toHaveLength(2);
 
-      const open = wts.find((w) => w.path === openWt);
+      const open = wts.find((w) => samePath(w.path, openWt));
       expect(open).toBeDefined();
       expect(open?.branch).toBe("feature-open");
       expect(open?.is_linked_worktree).toBe(true);
@@ -424,7 +424,7 @@ describe("repos list worktree association (#184)", () => {
       });
       expect(p1?.status_error).toBeNull();
 
-      const closed = wts.find((w) => w.path === closedWt);
+      const closed = wts.find((w) => samePath(w.path, closedWt));
       expect(closed).toBeDefined();
       expect(closed?.branch).toBe("feature-closed");
       expect(closed?.open_workspace_id).toBeNull();
@@ -433,7 +433,12 @@ describe("repos list worktree association (#184)", () => {
       expect(JSON.stringify(closed)).not.toContain("herdr-plugins.git/v1");
 
       // Foreign-repo worktree is skipped honestly, never attributed.
-      expect(worktrees_skipped).toEqual([{ path: foreignWt, reason: "not_member_repo" }]);
+      // git reports worktree paths with forward slashes; normalize both
+      // sides for the win32 separator/case difference (issue #225).
+      const skippedPaths = (worktrees_skipped as Array<{ path: string; reason: string }>).map(
+        (s) => ({ ...s, path: normalizePath(s.path) }),
+      );
+      expect(skippedPaths).toEqual([{ path: normalizePath(foreignWt), reason: "not_member_repo" }]);
 
       // Env-pin: the git child saw the GIT plugin's dirs/id/socket and no
       // ambient HERDR_* leaks (issue #199).

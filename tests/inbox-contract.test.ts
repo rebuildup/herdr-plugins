@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { herdrSocketEndpoint, testEnv } from "./helpers/test-env";
+import { installStub } from "./helpers/stub-bin";
+import { envValue, herdrSocketEndpoint, testEnv } from "./helpers/test-env";
 
 /**
  * Contract tests for rebuildup.inbox v0.2.0 (pin / archive / manual order)
@@ -483,37 +484,47 @@ describe("inbox contract v1 (filters and tracker links)", () => {
     expect(unique).toEqual(["session.snapshot"]);
   });
 
+  // Fake `gh` for the --verify env-sanitization test. POSIX sh on
+  // macOS/Linux; on Windows installStub compiles GH_VERIFY_TS to gh.exe
+  // (issue #225) — Bun/libuv cannot exec extensionless shell stubs there.
+  const GH_VERIFY_POSIX = `#!/bin/sh
+# Unset vars expand to empty under plain sh (no \`set -u\`), so
+# \`[ -n "$VAR" ]\` doubles as an unset check — and keeps the
+# script free of \`\${}\` for the linter.
+if [ -n "$GH_DEBUG" ] || [ -n "$GH_REPO" ] || [ -n "$GH_FORCE_TTY" ] || [ -n "$GIT_DIR" ] || [ -n "$GIT_CONFIG_COUNT" ] || [ -n "$GIT_CONFIG_PARAMETERS" ]; then
+  echo "env-leak-marker" >&2
+  exit 1
+fi
+if [ "$FAKE_GH_FAIL" = "1" ]; then
+  echo "credential-marker-9f8e7d6c" >&2
+  exit 1
+fi
+exit 0
+`;
+  // TypeScript twin of GH_VERIFY_POSIX — no backticks/`${`/literal-newline
+  // escapes so it survives the outer template literal verbatim.
+  const GH_VERIFY_TS = `const NL = String.fromCharCode(10);
+const poisoned = ["GH_DEBUG", "GH_REPO", "GH_FORCE_TTY", "GIT_DIR", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"].some((k) => process.env[k]);
+if (poisoned) {
+  process.stderr.write("env-leak-marker" + NL);
+  process.exit(1);
+}
+if (process.env.FAKE_GH_FAIL === "1") {
+  process.stderr.write("credential-marker-9f8e7d6c" + NL);
+  process.exit(1);
+}
+process.exit(0);
+`;
+
   test("link --verify sanitizes gh env and never echoes gh stderr (#216)", async () => {
-    // The fake `gh` is a POSIX sh script; skip where it cannot run.
-    if (process.platform === "win32") return;
     const ghBin = mkdtempSync(path.join(tmpdir(), "inbox-fake-gh-"));
     try {
-      const ghPath = path.join(ghBin, "gh");
-      writeFileSync(
-        ghPath,
-        [
-          "#!/bin/sh",
-          // Unset vars expand to empty under plain sh (no `set -u`), so
-          // `[ -n "$VAR" ]` doubles as an unset check — and keeps the
-          // script free of `${}` for the linter.
-          'if [ -n "$GH_DEBUG" ] || [ -n "$GH_REPO" ] || [ -n "$GH_FORCE_TTY" ] || [ -n "$GIT_DIR" ] || [ -n "$GIT_CONFIG_COUNT" ] || [ -n "$GIT_CONFIG_PARAMETERS" ]; then',
-          '  echo "env-leak-marker" >&2',
-          "  exit 1",
-          "fi",
-          'if [ "$FAKE_GH_FAIL" = "1" ]; then',
-          '  echo "credential-marker-9f8e7d6c" >&2',
-          "  exit 1",
-          "fi",
-          "exit 0",
-          "",
-        ].join("\n"),
-      );
-      chmodSync(ghPath, 0o755);
+      installStub(ghBin, { name: "gh", posix: GH_VERIFY_POSIX, windows: GH_VERIFY_TS });
 
       // Ambient poison vars that ghChildEnv must strip before spawn.
       const verifyEnv: Record<string, string> = {
         ...env,
-        PATH: `${ghBin}${path.delimiter}${env.PATH ?? ""}`,
+        PATH: `${ghBin}${path.delimiter}${envValue(env, "PATH") ?? ""}`,
         GH_DEBUG: "api",
         GH_REPO: "evil/repo",
         GH_FORCE_TTY: "1",

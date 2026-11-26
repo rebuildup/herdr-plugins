@@ -1,9 +1,10 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { testEnv } from "./helpers/test-env";
+import { installStub } from "./helpers/stub-bin";
+import { joinPathEnv, testEnv } from "./helpers/test-env";
 
 /**
  * Negative fixture for issue #170 contract re-check / #209 fix:
@@ -34,19 +35,30 @@ afterAll(() => {
 });
 
 /** Fake `infisical` that fails while echoing secret-shaped stderr. */
-function writeLeakyInfisical(dir: string): string {
-  const binDir = path.join(dir, "bin");
-  mkdirSync(binDir, { recursive: true });
-  const script = path.join(binDir, "infisical");
-  writeFileSync(
-    script,
-    `#!/bin/sh
+const LEAKY_INFI_POSIX = `#!/bin/sh
 if [ "$1" = "--version" ]; then echo "infisical 0.0.0-fake"; exit 0; fi
 echo "provider error: token=${LEAK_MARKER} request dump" >&2
 exit 9
-`,
-  );
-  chmodSync(script, 0o755);
+`;
+
+/** Windows twin compiled to `infisical.exe` by `installStub` (issue #225). */
+const LEAKY_INFI_TS = `const NL = String.fromCharCode(10);
+const args = process.argv.slice(2);
+if (args[0] === "--version") {
+  process.stdout.write("infisical 0.0.0-fake" + NL);
+} else {
+  process.stderr.write("provider error: token=${LEAK_MARKER} request dump" + NL);
+  process.exitCode = 9;
+}
+`;
+
+function writeLeakyInfisical(dir: string): string {
+  const binDir = path.join(dir, "bin");
+  installStub(binDir, {
+    name: "infisical",
+    posix: LEAKY_INFI_POSIX,
+    windows: LEAKY_INFI_TS,
+  });
   return binDir;
 }
 
@@ -81,7 +93,7 @@ function harness(): { configDir: string; env: Record<string, string> } {
   );
   const binDir = writeLeakyInfisical(dir);
   const env = testEnv({
-    PATH: `${binDir}:${process.env.PATH ?? ""}`,
+    PATH: joinPathEnv(binDir),
     HERDR_PLUGIN_CONFIG_DIR: configDir,
     HERDR_PLUGIN_STATE_DIR: path.join(dir, "state"),
   });

@@ -1,5 +1,5 @@
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -27,6 +27,8 @@ import {
   updatePrReviewers,
   versionAtLeast,
 } from "../plugins/git/src/gh";
+import { installStub } from "./helpers/stub-bin";
+import { joinPathEnv } from "./helpers/test-env";
 
 const dirs: string[] = [];
 const savedEnv: Record<string, string | undefined> = {};
@@ -216,13 +218,217 @@ esac
 exit 1
 `;
 
+/**
+ * TypeScript twin of {@link STUB} for Windows (issue #225). On win32 the
+ * extensionless shell script can never be exec'd by argv-only spawn, so
+ * `installStub` compiles this source to `gh.exe` via `bun build --compile`.
+ *
+ * Written without template literals, backslashes, or `${` so it can live
+ * inside the outer template literal verbatim; `NL` stands in for "\n".
+ * Semantics mirror the bash stub branch-for-branch.
+ */
+const GH_STUB_TS = `import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+
+const NL = String.fromCharCode(10);
+const env = (n: string): string => process.env[n] ?? "";
+const envOr = (n: string, d: string): string => {
+  const v = process.env[n];
+  return v === undefined || v === "" ? d : v;
+};
+const line = (s: string): void => {
+  process.stdout.write(s + NL);
+};
+const err = (s: string): void => {
+  process.stderr.write(s + NL);
+};
+const catPath = (p: string): void => {
+  try {
+    process.stdout.write(readFileSync(p, "utf8"));
+  } catch {
+    err("cat: " + p + ": No such file or directory");
+  }
+};
+const catEnv = (n: string): void => {
+  const f = process.env[n];
+  if (f === undefined || f === "") return;
+  catPath(f);
+};
+const catEnvOr = (n: string, fallback: string): void => {
+  const f = process.env[n];
+  if (f === undefined || f === "") return;
+  try {
+    process.stdout.write(readFileSync(f, "utf8"));
+  } catch {
+    line(fallback);
+  }
+};
+const catEnvQuiet = (n: string): void => {
+  const f = process.env[n];
+  if (f === undefined || f === "") return;
+  try {
+    process.stdout.write(readFileSync(f, "utf8"));
+  } catch {
+    /* cat ... 2>/dev/null || true */
+  }
+};
+
+const args = process.argv.slice(2);
+const joined = args.join(" ");
+const logFile = process.env.GH_STUB_LOG;
+if (logFile !== undefined && logFile !== "") {
+  try {
+    appendFileSync(logFile, joined + NL);
+  } catch {
+    /* log write must never fail the stub */
+  }
+}
+const stdinRaw = await Bun.stdin.text();
+const stdinData = stdinRaw.replace(new RegExp(NL + "+$"), "");
+const cmd = args[0] ?? "";
+const sub = args[1] ?? "";
+const has = (re: string): boolean => new RegExp(re).test(joined);
+let code = 0;
+const writeStdinFile = (): void => {
+  const f = process.env.GH_STUB_STDIN_FILE;
+  if (f !== undefined && f !== "") writeFileSync(f, stdinRaw);
+};
+
+if (cmd === "--version") {
+  line("gh version " + envOr("GH_STUB_VERSION", "2.105.0"));
+} else if (cmd === "auth") {
+  if (env("GH_STUB_AUTH_FAIL") === "1") {
+    err("not logged in");
+    code = 1;
+  } else {
+    line("github.com");
+  }
+} else if (cmd === "repo") {
+  line(envOr("GH_STUB_REPO", "octo/widgets"));
+} else if (cmd === "api") {
+  const mutation =
+    has("--method[^]*POST") ||
+    has("--method[^]*PUT") ||
+    has("--method[^]*DELETE") ||
+    joined.includes("--input");
+  if (mutation) {
+    const postLog = process.env.GH_STUB_POST_STDIN_LOG;
+    if (stdinData !== "" && postLog !== undefined && postLog !== "") {
+      try {
+        appendFileSync(postLog, stdinData + NL);
+      } catch {
+        /* ignore */
+      }
+    }
+    if (has("pulls/[^]*/comments/[^]*/replies")) catEnv("GH_STUB_REPLY_POST_JSON");
+    else if (has("pulls/[^]*/reviews")) catEnv("GH_STUB_REVIEW_POST_JSON");
+    else if (has("issues/[^]*/comments")) catEnv("GH_STUB_ISSUE_COMMENT_POST_JSON");
+    else if (has("pulls/[^]*/auto-merge")) {
+      if (env("GH_STUB_MERGE_API_FAIL") === "1") {
+        err("auto-merge refused (HTTP 422)");
+        code = 1;
+      } else if (has("--method[^]*DELETE")) catEnvQuiet("GH_STUB_AUTO_MERGE_DELETE_JSON");
+      else catEnv("GH_STUB_AUTO_MERGE_POST_JSON");
+    } else if (has("pulls/[^]*/merge")) {
+      if (env("GH_STUB_MERGE_API_FAIL") === "1") {
+        err("Merge is not possible (HTTP 405)");
+        code = 1;
+      } else catEnv("GH_STUB_MERGE_PUT_JSON");
+    } else {
+      err("unexpected POST endpoint: " + joined);
+      code = 1;
+    }
+  } else if (has("pulls/[^]*/reviews")) catEnv("GH_STUB_REVIEWS_JSON");
+  else if (has("issues/[^]*/comments")) catEnv("GH_STUB_ISSUE_COMMENTS_JSON");
+  else if (has("pulls/[^]*/comments")) catEnv("GH_STUB_LINE_COMMENTS_JSON");
+  else if (has("pulls/")) catEnv("GH_STUB_PR_DETAIL_JSON");
+  else code = 1;
+} else if (cmd === "pr") {
+  if (sub === "list") catEnvOr("GH_STUB_LIST_JSON", "[]");
+  else if (sub === "view") {
+    const post = process.env.GH_STUB_MERGE_VIEW_JSON_POST;
+    let done = false;
+    if (
+      post !== undefined &&
+      post !== "" &&
+      logFile !== undefined &&
+      logFile !== "" &&
+      existsSync(logFile)
+    ) {
+      try {
+        if (new RegExp("--method PUT|auto-merge").test(readFileSync(logFile, "utf8"))) {
+          catPath(post);
+          done = true;
+        }
+      } catch {
+        /* grep failure falls through to the static fixtures */
+      }
+    }
+    if (!done) {
+      const mv = process.env.GH_STUB_MERGE_VIEW_JSON;
+      if (mv !== undefined && mv !== "") catPath(mv);
+      else catEnv("GH_STUB_VIEW_JSON");
+    }
+  } else if (sub === "checks") {
+    if (env("GH_STUB_CHECKS_FAIL") === "1") {
+      err("no checks reported on the 'feature' branch");
+      code = 1;
+    } else catEnv("GH_STUB_CHECKS_JSON");
+  } else if (sub === "create") {
+    writeStdinFile();
+    if (env("GH_STUB_CREATE_FAIL") === "1") {
+      err("gh pr create failed");
+      if (env("GH_STUB_CREATE_PARTIAL") === "1") {
+        line(envOr("GH_STUB_CREATE_URL", "https://github.com/octo/widgets/pull/42"));
+      }
+      code = 1;
+    } else {
+      line(envOr("GH_STUB_CREATE_URL", "https://github.com/octo/widgets/pull/42"));
+    }
+  } else if (sub === "edit") {
+    line("https://github.com/octo/widgets/pull/7");
+  } else code = 1;
+} else if (cmd === "issue") {
+  if (sub === "list") catEnvOr("GH_STUB_ISSUE_LIST_JSON", "[]");
+  else if (sub === "view") catEnv("GH_STUB_ISSUE_VIEW_JSON");
+  else if (sub === "create") {
+    if (env("GH_STUB_ISSUE_CREATE_FAIL") === "1") {
+      err("gh issue create failed");
+      code = 1;
+    } else {
+      writeStdinFile();
+      line(envOr("GH_STUB_ISSUE_CREATE_URL", "https://github.com/octo/widgets/issues/9"));
+    }
+  } else if (sub === "edit") {
+    writeStdinFile();
+    if (env("GH_STUB_ISSUE_EDIT_FAIL") === "1") {
+      err("gh issue edit failed");
+      code = 1;
+    } else line("edited");
+  } else if (sub === "close") {
+    if (env("GH_STUB_ISSUE_CLOSE_FAIL") === "1") {
+      err("gh issue close failed");
+      code = 1;
+    } else line("closed");
+  } else if (sub === "reopen") line("reopened");
+  else if (sub === "comment") line("https://github.com/octo/widgets/issues/3#issuecomment-1");
+  else code = 1;
+} else if (cmd === "run") {
+  if (sub === "list") catEnv("GH_STUB_RUNS_JSON");
+  else if (sub === "view") {
+    if (joined.includes("--log")) catEnv("GH_STUB_JOB_LOG");
+    else catEnv("GH_STUB_RUN_VIEW_JSON");
+  } else code = 1;
+} else code = 1;
+
+process.exitCode = code;
+`;
+
 function installGhStub(): { binDir: string; logFile: string; work: string } {
   const binDir = tempDir();
   const work = tempDir();
   const logFile = path.join(work, "gh.log");
-  writeFileSync(path.join(binDir, "gh"), STUB);
-  chmodSync(path.join(binDir, "gh"), 0o755);
-  setEnv("PATH", `${binDir}:${process.env.PATH ?? ""}`);
+  installStub(binDir, { name: "gh", posix: STUB, windows: GH_STUB_TS });
+  setEnv("PATH", joinPathEnv(binDir));
   setEnv("GH_STUB_LOG", logFile);
   return { binDir, logFile, work };
 }

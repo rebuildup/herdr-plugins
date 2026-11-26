@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -11,7 +11,8 @@ import {
   pollBackoffMs,
   pruneWatchSession,
 } from "../plugins/inbox/src/watchpr";
-import { herdrSocketEndpoint, testEnv } from "./helpers/test-env";
+import { installStub } from "./helpers/stub-bin";
+import { herdrSocketEndpoint, joinPathEnv, testEnv } from "./helpers/test-env";
 
 /**
  * Tests for `inbox watch-pr` (Issue #178):
@@ -321,6 +322,78 @@ esac
 exit 1
 `;
 
+/**
+ * TypeScript twin of {@link GH_STUB} for Windows (issue #225) — compiled
+ * to `gh.exe` by `installStub`. No backslashes/backticks/`${` so it can
+ * sit inside the template literal; `NL` stands in for "\n".
+ */
+const GH_STUB_TS = `import { appendFileSync, readFileSync } from "node:fs";
+import path from "node:path";
+
+const NL = String.fromCharCode(10);
+const args = process.argv.slice(2);
+const joined = args.join(" ");
+const cmd = args[0] ?? "";
+const sub = args[1] ?? "";
+const has = (re: string): boolean => new RegExp(re).test(joined);
+const DIR = process.env.GH_STUB_DIR;
+let code = 0;
+
+if (DIR === undefined || DIR === "") {
+  process.stderr.write("GH_STUB_DIR: parameter null or not set" + NL);
+  code = 1;
+} else {
+  const logFile = process.env.GH_STUB_LOG;
+  if (logFile !== undefined && logFile !== "") {
+    try {
+      appendFileSync(logFile, joined + NL);
+    } catch {
+      /* ignore */
+    }
+  }
+  const catFixture = (name: string): void => {
+    try {
+      process.stdout.write(readFileSync(path.join(DIR, name), "utf8"));
+    } catch {
+      process.stderr.write("cat: " + path.join(DIR, name) + ": No such file or directory" + NL);
+    }
+  };
+  const catFixtureOrEmpty = (name: string): void => {
+    try {
+      process.stdout.write(readFileSync(path.join(DIR, name), "utf8"));
+    } catch {
+      process.stdout.write("[]" + NL);
+    }
+  };
+  const fail = (): void => {
+    process.stderr.write("HTTP 403: API rate limit exceeded" + NL);
+    code = 1;
+  };
+
+  if (cmd === "--version") {
+    const v = process.env.GH_STUB_VERSION;
+    process.stdout.write("gh version " + (v === undefined || v === "" ? "2.105.0" : v) + NL);
+  } else if (cmd === "auth") {
+    if (process.env.GH_STUB_AUTH_FAIL === "1") {
+      process.stderr.write("not logged in" + NL);
+      code = 1;
+    } else process.stdout.write("github.com" + NL);
+  } else if (cmd === "api") {
+    if (process.env.GH_STUB_FAIL === "1") fail();
+    else if (has("issues/[^]*/comments")) catFixtureOrEmpty("issue-comments.json");
+    else if (has("pulls/[^]*/comments")) catFixtureOrEmpty("line-comments.json");
+    else if (has("pulls/")) catFixture("pulls.json");
+    else code = 1;
+  } else if (cmd === "pr") {
+    if (process.env.GH_STUB_FAIL === "1") fail();
+    else if (sub === "view") catFixture("view.json");
+    else if (sub === "checks") catFixture("checks.json");
+    else code = 1;
+  } else code = 1;
+}
+process.exitCode = code;
+`;
+
 interface GhStub {
   binDir: string;
   stubDir: string;
@@ -334,15 +407,13 @@ function installGhStub(): GhStub {
   const binDir = tempDir("inbox-watchpr-bin-");
   const stubDir = tempDir("inbox-watchpr-gh-");
   const logFile = path.join(tempDir("inbox-watchpr-log-"), "gh.log");
-  const ghPath = path.join(binDir, "gh");
-  writeFileSync(ghPath, GH_STUB);
-  chmodSync(ghPath, 0o755);
+  installStub(binDir, { name: "gh", posix: GH_STUB, windows: GH_STUB_TS });
   const stub: GhStub = {
     binDir,
     stubDir,
     logFile,
     env: {
-      PATH: `${binDir}:${process.env.PATH ?? ""}`,
+      PATH: joinPathEnv(binDir),
       GH_STUB_DIR: stubDir,
       GH_STUB_LOG: logFile,
     },

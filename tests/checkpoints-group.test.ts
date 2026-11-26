@@ -2,6 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
@@ -11,7 +12,7 @@ import {
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { herdrSocketEndpoint, testEnv } from "./helpers/test-env";
+import { herdrSocketEndpoint, normalizePath, samePath, testEnv } from "./helpers/test-env";
 
 const dirs: string[] = [];
 const savedStateDir = process.env.HERDR_PLUGIN_STATE_DIR;
@@ -261,7 +262,7 @@ describe("checkpoints multi-repo save/restore-group", () => {
     const repoB = initRepo();
     const plainDir = tempDir();
     const repoASub = path.join(repoA, "subdir");
-    spawnSync("mkdir", ["-p", repoASub]);
+    mkdirSync(repoASub, { recursive: true });
     writeFileSync(path.join(repoA, "a.txt"), "alpha\n");
     writeFileSync(path.join(repoB, "b.txt"), "beta\n");
 
@@ -282,8 +283,8 @@ describe("checkpoints multi-repo save/restore-group", () => {
       expect(payload.succeeded).toBe(2);
       const skipped = payload.skipped_panes as Array<Record<string, unknown>>;
       expect(skipped.map((s) => s.pane_id).sort()).toEqual(["w3:p1", "w4:p1"]);
-      const roots = new Set(saveResults(payload).map((r) => r.repo_root));
-      expect(roots).toEqual(new Set([repoA, repoB]));
+      const roots = new Set(saveResults(payload).map((r) => normalizePath(String(r.repo_root))));
+      expect(roots).toEqual(new Set([repoA, repoB].map(normalizePath)));
     } finally {
       await fake.close();
     }
@@ -308,7 +309,7 @@ describe("checkpoints multi-repo save/restore-group", () => {
     // The good repo's checkpoint was still captured and persisted.
     const entries = Object.values(readState(stateDir).checkpoints);
     expect(entries).toHaveLength(1);
-    expect(entries[0]?.repo_root).toBe(repoA);
+    expect(normalizePath(String(entries[0]?.repo_root))).toBe(normalizePath(repoA));
     expect(entries[0]?.group_id).toBe(String(saved.json?.group));
   });
 
@@ -362,8 +363,8 @@ describe("checkpoints multi-repo save/restore-group", () => {
     // Delete repoB's checkpoint ref out-of-band: its member must fail
     // while repoA still restores.
     const stateDir = process.env.HERDR_PLUGIN_STATE_DIR as string;
-    const entryB = Object.values(readState(stateDir).checkpoints).find(
-      (e) => e.repo_root === repoB,
+    const entryB = Object.values(readState(stateDir).checkpoints).find((e) =>
+      samePath(String(e.repo_root), repoB),
     );
     expect(entryB).toBeDefined();
     git(repoB, ["update-ref", "-d", String(entryB?.ref)]);
@@ -379,9 +380,9 @@ describe("checkpoints multi-repo save/restore-group", () => {
     expect(restored.error?.kind).toBe("partial_restore");
 
     const results = restored.json?.results as Array<Record<string, unknown>>;
-    const byRepo = new Map(results.map((r) => [String(r.repo_root), r]));
-    expect(byRepo.get(repoA)?.ok).toBe(true);
-    const failB = byRepo.get(repoB);
+    const byRepo = new Map(results.map((r) => [normalizePath(String(r.repo_root)), r]));
+    expect(byRepo.get(normalizePath(repoA))?.ok).toBe(true);
+    const failB = byRepo.get(normalizePath(repoB));
     expect(failB?.ok).toBe(false);
     expect((failB?.error as Record<string, unknown>).kind).toBe("checkpoint_ref_missing");
 

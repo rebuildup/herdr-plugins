@@ -1,12 +1,13 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { loadConfig } from "../plugins/secrets/src/config";
 import { parseInfisicalRef, validateBinding } from "../plugins/secrets/src/model";
-import { herdrSocketEndpoint, testEnv } from "./helpers/test-env";
+import { installStub } from "./helpers/stub-bin";
+import { herdrSocketEndpoint, joinPathEnv, testEnv } from "./helpers/test-env";
 
 const CLI = path.join(import.meta.dir, "../plugins/secrets/src/cli.ts");
 
@@ -121,13 +122,7 @@ describe("loadConfig", () => {
 const FAKE_VALUE = "fake-secret-value-160-do-not-leak";
 
 /** Stub `infisical` CLI: JSON output for known names, sentinels/errors otherwise. */
-function writeFakeInfisical(dir: string): string {
-  const binDir = path.join(dir, "bin");
-  mkdirSync(binDir, { recursive: true });
-  const script = path.join(binDir, "infisical");
-  writeFileSync(
-    script,
-    `#!/bin/sh
+const INFISICAL_POSIX = `#!/bin/sh
 # fake infisical for tests — never emits real secrets
 if [ "$1" = "--version" ]; then echo "infisical version 0.0.0-fake"; exit 0; fi
 # args: secrets get <name> --env ... --path ... --projectId ... --domain ... -o json --silent
@@ -138,9 +133,38 @@ case "$name" in
   *MISSING*) printf '[{"secretKey":"%s","secretValue":"*not found*"}]' "$name"; exit 0 ;;
   *) printf '[{"secretKey":"%s","secretValue":"%s-%s"}]' "$name" "${FAKE_VALUE}" "$name"; exit 0 ;;
 esac
-`,
+`;
+
+/**
+ * TypeScript twin of {@link INFISICAL_POSIX} for Windows (issue #225) —
+ * compiled to `infisical.exe` by `installStub`. No backslashes/backticks/
+ * `${` so it can sit inside a template literal; `NL` stands in for "\n".
+ */
+const INFISICAL_TS = `const NL = String.fromCharCode(10);
+const FAKE_VALUE = ${JSON.stringify(FAKE_VALUE)};
+const args = process.argv.slice(2);
+const name = args[2] ?? "";
+
+if (args[0] === "--version") {
+  process.stdout.write("infisical version 0.0.0-fake" + NL);
+} else if (name.includes("UNREACHABLE")) {
+  process.stderr.write("connect ECONNREFUSED 10.0.0.1:443" + NL);
+  process.exitCode = 7;
+} else if (name.includes("NOAUTH")) {
+  process.stderr.write("error: 401 unauthorized: invalid token" + NL);
+  process.exitCode = 8;
+} else if (name.includes("MISSING")) {
+  process.stdout.write(JSON.stringify([{ secretKey: name, secretValue: "*not found*" }]));
+} else {
+  process.stdout.write(
+    JSON.stringify([{ secretKey: name, secretValue: FAKE_VALUE + "-" + name }]),
   );
-  chmodSync(script, 0o755);
+}
+`;
+
+function writeFakeInfisical(dir: string): string {
+  const binDir = path.join(dir, "bin");
+  installStub(binDir, { name: "infisical", posix: INFISICAL_POSIX, windows: INFISICAL_TS });
   return binDir;
 }
 
@@ -209,7 +233,7 @@ function harness(): { configDir: string; env: Record<string, string>; socketPath
     configDir,
     socketPath,
     env: {
-      PATH: `${binDir}:${process.env.PATH ?? ""}`,
+      PATH: joinPathEnv(binDir),
       HERDR_PLUGIN_CONFIG_DIR: configDir,
       HERDR_PLUGIN_STATE_DIR: path.join(dir, "state"),
       HERDR_SOCKET_PATH: socketPath,
@@ -418,7 +442,7 @@ describe("inject", () => {
           "--surface",
           "workspace",
           "--cwd",
-          "/tmp",
+          tmpdir(),
         ],
         { ...env, HERDR_SOCKET_PATH: herdr.socketPath },
       );
@@ -521,7 +545,7 @@ describe("config", () => {
     const env = baseEnv({
       HERDR_PLUGIN_CONFIG_DIR: configDir,
       HERDR_PLUGIN_STATE_DIR: path.join(dir, "state"),
-      PATH: `${writeFakeInfisical(dir)}:${process.env.PATH ?? ""}`,
+      PATH: joinPathEnv(writeFakeInfisical(dir)),
     });
     const first = await runCli(["config", "--init"], env);
     expect(first.status).toBe(0);
