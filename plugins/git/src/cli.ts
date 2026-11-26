@@ -19,8 +19,12 @@ import {
   sessionSnapshot,
 } from "../../../packages/herdr-client/src/index";
 import {
+  collectPrChecks,
+  collectPrComments,
   collectPrCreate,
   collectPrList,
+  collectPrLogs,
+  collectPrReviews,
   collectPrStatus,
   collectPrView,
   ensureGh,
@@ -53,7 +57,7 @@ import {
 
 const CONTRACT = "herdr-plugins.git/v1";
 const PLUGIN_ID = "rebuildup.git";
-const PLUGIN_VERSION = "0.2.0";
+const PLUGIN_VERSION = "0.3.0";
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_REMOTE_TIMEOUT_MS = 60_000;
 const DEFAULT_DIFF_MAX_BYTES = 256 * 1024;
@@ -799,6 +803,9 @@ const PR_VALUE_FLAGS = [
   "--body",
   "--body-file",
   "--base",
+  "--run",
+  "--job",
+  "--lines",
 ];
 
 /**
@@ -811,8 +818,14 @@ async function cmdPr(options: CliOptions): Promise<void> {
   const pos = positionals(options.args, PR_VALUE_FLAGS);
   const action = pos[0];
   const paneId = pos[1] ?? process.env.HERDR_PANE_ID ?? invocationContext().focused_pane_id;
-  if (!action || !["list", "status", "create", "view"].includes(action)) {
-    fail("pr requires an action: list | status | create | view", 2);
+  if (
+    !action ||
+    !["list", "status", "create", "view", "reviews", "comments", "checks", "logs"].includes(action)
+  ) {
+    fail(
+      "pr requires an action: list | status | create | view | reviews | comments | checks | logs",
+      2,
+    );
   }
   if (!paneId) {
     fail("pane id required (argument, HERDR_PANE_ID, or plugin context)", 2);
@@ -903,6 +916,69 @@ async function cmdPr(options: CliOptions): Promise<void> {
       if (rest.length > 1) fail("pr view accepts at most one PR number", 2);
       const pr = await collectPrView(repoRoot, { repo, number }, ghOptions);
       emit({ ...forgeBase, action: "view", repo, pr });
+      return;
+    }
+
+    // Read-only review/check/log surface (Issue #171). All share the
+    // `pr <action> <pane> <number>` shape; `logs` adds --run/--job/--lines.
+    if (["reviews", "comments", "checks", "logs"].includes(action)) {
+      const number = Number(rest[0]);
+      if (!Number.isInteger(number) || number < 1) {
+        fail(`pr ${action} requires a positive PR number`, 2);
+      }
+      if (rest.length > 1) fail(`pr ${action} accepts at most one PR number`, 2);
+
+      if (action === "reviews") {
+        const data = await collectPrReviews(repoRoot, { repo, number }, ghOptions);
+        emit({ ...forgeBase, action: "reviews", repo, ...data });
+        return;
+      }
+      if (action === "comments") {
+        const data = await collectPrComments(repoRoot, { repo, number }, ghOptions);
+        emit({ ...forgeBase, action: "comments", repo, ...data });
+        return;
+      }
+      if (action === "checks") {
+        const data = await collectPrChecks(repoRoot, { repo, number }, ghOptions);
+        emit({ ...forgeBase, action: "checks", repo, ...data });
+        return;
+      }
+
+      // action === "logs"
+      const runRaw = flagValue(options.args, "--run");
+      const jobRaw = flagValue(options.args, "--job");
+      const linesRaw = flagValue(options.args, "--lines");
+      for (const [raw, what] of [
+        [runRaw, "--run"],
+        [jobRaw, "--job"],
+      ] as const) {
+        if (raw !== undefined && !/^\d+$/.test(raw)) {
+          fail(`invalid ${what}: ${raw} (positive integer required)`, 2);
+        }
+      }
+      if (runRaw !== undefined && jobRaw !== undefined) {
+        fail("--run and --job are mutually exclusive", 2);
+      }
+      let lines: number | undefined;
+      if (linesRaw !== undefined) {
+        lines = Number(linesRaw);
+        if (!Number.isInteger(lines) || lines < 1 || lines > 2000) {
+          fail(`invalid --lines: ${linesRaw}`, 2);
+        }
+        if (jobRaw === undefined) fail("--lines requires --job", 2);
+      }
+      const data = await collectPrLogs(
+        repoRoot,
+        {
+          repo,
+          number,
+          runId: runRaw,
+          jobId: jobRaw,
+          lines,
+        },
+        ghOptions,
+      );
+      emit({ ...forgeBase, action: "logs", repo, ...data });
       return;
     }
 
@@ -1082,9 +1158,12 @@ Usage:
   git fetch <pane_id> [remote] [--prune]
   git push <pane_id> [--set-upstream] [--force-with-lease] [remote] [refspec]
   git remote <pane_id>
-  git pr list|status|create|view <pane_id> [args] [--repo owner/name]
+  git pr list|status|create|view|reviews|comments|checks|logs <pane_id> [args]
+      [--repo owner/name]
       pr create: --title T [--body B | --body-file PATH|-] [--draft]
           [--base B] [--head B]
+      pr reviews|comments|checks <pane> <number>
+      pr logs <pane> <number> [--run ID | --job ID [--lines N]]
   git project <pane_id> [--session NAME]
   git capability
 

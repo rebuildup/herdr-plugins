@@ -2,7 +2,8 @@
 
 Structured JSON CLI contract for the `rebuildup.git` herdr plugin.
 Read commands (`status`, `files`, `diff`, `log`, `compare`, `remote`,
-`pr list`, `pr status`, `pr view`, `project`) are side-effect free;
+`pr list`, `pr status`, `pr view`, `pr reviews`, `pr comments`,
+`pr checks`, `pr logs`, `project`) are side-effect free;
 mutation commands (`stage`, `unstage`, `commit`, `branch`, `upstream`,
 `fetch`, `push`, `pr create`) change the pane repository's index/refs/
 remotes or the forge on the herdr host. Follows the same conventions as `herdr-plugins.inbox/v1`
@@ -38,8 +39,10 @@ bun run src/cli.ts fetch <pane_id> [remote] [--prune]
 bun run src/cli.ts push <pane_id> [--set-upstream] [--force-with-lease]
     [remote] [refspec]
 bun run src/cli.ts remote <pane_id>
-bun run src/cli.ts pr list|status|create|view <pane_id> [args]
-    [--repo owner/name]
+bun run src/cli.ts pr list|status|create|view|reviews|comments|checks|logs
+    <pane_id> [args] [--repo owner/name]
+    pr reviews|comments|checks <pane> <number>
+    pr logs <pane> <number> [--run ID | --job ID [--lines N]]
 bun run src/cli.ts project <pane_id> [--session NAME]
 bun run src/cli.ts capability
 ```
@@ -310,6 +313,41 @@ rejected before any `gh` call.
   truncated at 8000 chars (`body_truncated`), reviews capped at the
   last 10 (author/state/submittedAt only), `statusCheckRollup` capped
   at 50 entries (`checks_truncated` when cut).
+- `pr reviews <number>` — submitted reviews plus review requests via
+  `gh api` (REST). Reviews carry `id`, `author`, `state`, `body`
+  (≤4000 chars, per-item `body_truncated`), `submitted_at`,
+  `commit_id`, `url`; the newest 50 are kept (`reviews_truncated`
+  when capped or the fetched page was full). `review_requests` lists
+  requested reviewer logins and team names. `head`/`base` echo
+  `{ref, sha}` for freshness checks.
+- `pr comments <number>` — PR conversation (`issues/{n}/comments`)
+  and line-level review comments (`pulls/{n}/comments`) as separate
+  bounded lists (newest 50 each; `issue_comments_truncated` /
+  `line_comments_truncated`). Issue comments carry `id`, `author`,
+  `body` (≤4000 chars), `created_at`, `updated_at`, `url`. Line
+  comments additionally carry `path`, `line`, `original_line`,
+  `side`, `in_reply_to_id`, and a bounded `diff_hunk` (≤8000 chars,
+  `diff_hunk_truncated`).
+- `pr checks <number>` — per-check detail via `gh pr checks --json`:
+  `name`, `bucket` (pass/fail/pending/skipping/cancel), `state`,
+  `workflow`, `link`, `description`, `event`, `started_at`,
+  `completed_at`; capped at 100 (`checks_truncated`). Pending/failed
+  checks are data, not errors; a PR with no reported checks returns
+  `checks: []`.
+- `pr logs <number>` — Actions log access, three modes:
+  - default — workflow runs for the PR head sha via
+    `gh run list --commit` (≤20, `runs_truncated`): `id`, `name`,
+    `workflow`, `status`, `conclusion`, `url`, `head_sha`,
+    `created_at`, `event`, `display_title`.
+  - `--run ID` — that run's job list via `gh run view --json jobs`
+    (≤50, `jobs_truncated`): `id`, `name`, `status`, `conclusion`,
+    `url`, `started_at`, `completed_at`.
+  - `--job ID [--lines N]` — the job's log tail via
+    `gh run view --job --log` (default 200 lines, max 2000; hard cap
+    256 KiB). Returns `log`, `lines_returned`, `total_lines`, `bytes`,
+    and `truncated` when the tail was cut.
+  All modes echo `head`/`base` `{ref, sha}` and `head_sha` so callers
+  can verify freshness before any later mutation.
 - `pr create` — the only forge mutation. Requires `--title`; body via
   `--body` (inline argv) or `--body-file PATH` / `--body-file -`
   (stdin) — long bodies never appear in argv. `--draft`, `--base`,
@@ -318,10 +356,11 @@ rejected before any `gh` call.
   `{action:"create", repo, ok:true, url, number}` parsed from gh's
   output.
 - `pr` appears in `mutation_commands` because `pr create` mutates the
-  forge; `list`/`status`/`view` are read-only. PR state is never used
-  to bypass merge/review gates — the plugin exposes state, it does not
-  act on it. Merge, review comments, CI logs, and non-GitHub forges are
-  out of scope (later tickets).
+  forge; `list`/`status`/`view`/`reviews`/`comments`/`checks`/`logs`
+  are read-only. PR state is never used to bypass merge/review gates —
+  the plugin exposes state, it does not act on it. Review submission,
+  comment posting, merge, and non-GitHub forges are out of scope
+  (later tickets).
 - gh error messages echo only the subcommand words, never argv content
   (titles/bodies may be sensitive).
 
@@ -346,7 +385,7 @@ the status data remains authoritative.
 {
   "contract": "herdr-plugins.git/v1",
   "plugin": "rebuildup.git",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "commands": [
     "capability", "status", "files", "diff", "log", "compare",
     "stage", "unstage", "commit", "branch", "upstream", "fetch",
