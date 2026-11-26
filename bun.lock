@@ -22,6 +22,10 @@
       "name": "@herdr-plugins/checkpoints",
       "version": "0.4.0",
     },
+    "plugins/controls": {
+      "name": "@herdr-plugins/controls",
+      "version": "0.6.0",
+    },
     "plugins/conversations": {
       "name": "@herdr-plugins/conversations",
       "version": "0.5.0",
@@ -30,6 +34,10 @@
       "name": "@herdr-plugins/git",
       "version": "0.2.0",
     },
+    "plugins/handoff": {
+      "name": "@herdr-plugins/handoff",
+      "version": "0.6.0",
+    },
     "plugins/inbox": {
       "name": "@herdr-plugins/inbox",
       "version": "0.1.0",
@@ -37,6 +45,10 @@
     "plugins/projects": {
       "name": "@herdr-plugins/projects",
       "version": "0.3.0",
+    },
+    "plugins/textgen": {
+      "name": "@herdr-plugins/textgen",
+      "version": "0.6.0",
     },
     "plugins/usage": {
       "name": "@herdr-plugins/usage",
@@ -66,15 +78,21 @@
 
     "@herdr-plugins/client": ["@herdr-plugins/client@workspace:packages/herdr-client"],
 
+    "@herdr-plugins/controls": ["@herdr-plugins/controls@workspace:plugins/controls"],
+
     "@herdr-plugins/conversations": ["@herdr-plugins/conversations@workspace:plugins/conversations"],
 
     "@herdr-plugins/git": ["@herdr-plugins/git@workspace:plugins/git"],
 
     "@herdr-plugins/git-core": ["@herdr-plugins/git-core@workspace:packages/git-core"],
 
+    "@herdr-plugins/handoff": ["@herdr-plugins/handoff@workspace:plugins/handoff"],
+
     "@herdr-plugins/inbox": ["@herdr-plugins/inbox@workspace:plugins/inbox"],
 
     "@herdr-plugins/projects": ["@herdr-plugins/projects@workspace:plugins/projects"],
+
+    "@herdr-plugins/textgen": ["@herdr-plugins/textgen@workspace:plugins/textgen"],
 
     "@herdr-plugins/usage": ["@herdr-plugins/usage@workspace:plugins/usage"],
 
