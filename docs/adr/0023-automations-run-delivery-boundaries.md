@@ -159,7 +159,8 @@ wording are decided once; this ADR is the pointer of record.
   idempotency key as normative fields (see contract doc).
 - #144 (registry) implements records/state/CRUD against this
   contract; #145 implements `tick`/`fire`/drivers/delivery; #146 adds
-  the reserved `event` schedule; #147 resolves `webhook`.
+  the `event` schedule (manifest-hook marks + lazy drain — ADR-0022
+  addendum); #147 resolves `webhook`.
 - No new upstream workaround is introduced: firing uses OS
   schedulers/watch (ADR-0002 path 3 family), delivery uses existing
   socket APIs only.

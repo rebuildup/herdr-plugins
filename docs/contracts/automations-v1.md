@@ -6,7 +6,8 @@
 > (`create`/`list`/`get`/`update`/`set-enabled`/`delete`/`run-now`/
 > `runs`/`reconcile`); #145 (T3) implemented the firing drivers
 > (`fire`/`tick`/`watch`/`schedule`), run delivery, and driver
-> reporting; #146/#147 flesh out event/webhook triggers.
+> reporting; #146 (T4) implemented `event` schedules via manifest
+> `[[events]]` hooks; #147 fleshes out webhook triggers.
 > External clients MUST depend only on this contract, never on the
 > plugin's internal state file format.
 
@@ -45,7 +46,8 @@ failures are errors — never silently treated as success.
   (`schedule install`), the opt-in `watch` process, or a manual call.
   The plugin holds no clock (ADR-0022).
 - **Trigger** — why a run exists: `schedule` | `manual` | `event` |
-  `webhook`. Only `schedule` and `manual` are reachable in v1.
+  `webhook`. `schedule`, `manual`, and `event` are reachable; `webhook`
+  remains reserved for #147.
 
 ## Schedule schema
 
@@ -65,11 +67,29 @@ offset unless noted.
 // once — single occurrence at run_at (must include offset)
 { "type": "once", "run_at": "2026-03-01T09:00:00+09:00" }
 
+// event — fires on herdr lifecycle hook events delivered through the
+// manifest [[events]] entrypoint (src/hook.ts). `on` is one of the 23
+// hook-eligible dotted names (workspace.*/worktree.*/tab.*/pane.* —
+// see HOOK_EVENT_NAMES; `pane.output_changed`, `pane.updated`,
+// `layout.updated`, etc. are NOT hook-eligible and MUST be rejected).
+// `filter` fields are optional exact-match dimensions extracted from
+// the event payload: pane_id, tab_id, workspace_id, agent,
+// agent_status. `debounce_ms` collapses a burst of matching marks
+// into one fire anchored at the FIRST mark of the burst;
+// `cooldown_ms` suppresses fires within the window after the last
+// EXECUTED event fire; `max_fires` caps total executed fires.
+// All knobs optional; absent = fire per burst, no suppression.
+{ "type": "event",
+  "on": "pane.agent_status_changed",
+  "filter": { "agent_status": "done", "pane_id": "w1:t1:p1" },
+  "debounce_ms": 5000,
+  "cooldown_ms": 60000,
+  "max_fires": 10 }
+
 // RESERVED — schema may appear in stored tasks but `create`/`update`
 // MUST reject new ones with error code "unsupported_schedule" until
-// the owning ticket lands (#146 event, #147 webhook).
+// the owning ticket lands (#147 webhook).
 { "type": "webhook", "…": "reserved" }
-{ "type": "event",   "…": "reserved (#146)" }
 ```
 
 `interval` occurrences are anchored at the task's last fired
@@ -130,7 +150,7 @@ occurrence (or `created_at` for the first), so effective period is
   "status": "running",                    // lifecycle below
   "created_at": "…", "started_at": "…", "finished_at": null,
   "destination_snapshot": { "…": "pane/agent identity at fire time" },
-  "result": null,                         // { "summary": "…", "agent_status": "done" } — observed values only
+  "result": null,                         // { "summary": "…", "agent_status": "done", "agent_status_at": "…" } — observed values only
   "error": null                           // { "code": "…", "message": "…" }
 }
 ```
@@ -173,7 +193,7 @@ occurrence (or `created_at` for the first), so effective period is
 | `tick` | implemented (#145) | Scan due occurrences across enabled tasks; apply `misfire`; fire. The OS/watch driver entrypoint. |
 | `watch [--interval SEC]` | implemented (#145) | Opt-in foreground driver: sleep-until-next-due (capped at `--interval`, default 60 s) + `tick` loop; registers a pid-checked `watch` driver record. |
 | `schedule install\|uninstall\|status` | implemented (#145) | OS scheduler adapter — ONE entry per plugin invoking `tick` (launchd / systemd --user timer / schtasks); records an `os-scheduler` driver record. |
-| `hook` (event entrypoint) | #146 | `[[events]]` handler for reserved `event` schedules. |
+| `hook` (event entrypoint) | implemented (#146) | Manifest `[[events]]` handler (`src/hook.ts`, not a CLI command): records pending event marks; `tick`/`watch` drain them. See §Event triggers. |
 | `serve` (webhook) | #147 | Only if #147 adopts opt-in foreground serve; otherwise absent. |
 
 ## Fire semantics (normative, #145)
@@ -236,6 +256,59 @@ occurrence (or `created_at` for the first), so effective period is
   never parsed into success. `destination_snapshot` records the
   fire-time resolved identities (pane/workspace/tab/agent/argv).
 
+## Event triggers (normative, #146)
+
+Mechanism: manifest `[[events]]` hooks (22 hook-eligible dotted
+event names, `HOOK_EVENT_NAMES`) invoke `src/hook.ts` once per
+delivered event. The hook performs NO socket work and NO delivery —
+it appends a `PendingEventMark` (`event`, `received_at`, raw `data`)
+to the session registry's `pending_events` list inside the
+single-writer state lock, capped at 500 marks; overflow drops the
+OLDEST marks and increments `pending_events_dropped` (honest, never
+silent). Marks drain lazily on the next `tick`/`watch` pass — the
+plugin holds no daemon and subscribes to nothing itself (ADR-0022
+precedent: checkpoint auto-capture).
+
+- Event names arrive in two wire forms — dotted
+  (`HERDR_PLUGIN_EVENT`) and snake_case (`HERDR_PLUGIN_EVENT_JSON`
+  envelope `event` / `data.type`); both normalize to the canonical
+  dotted name. Unknown/non-hook-eligible names are ignored, never
+  recorded.
+- `on` + `filter` matching is exact-equality on dimensions extracted
+  from the payload (`pane_id`, `tab_id`, `workspace_id`, `agent`,
+  `agent_status`; nested `pane`/`tab`/`workspace` objects and flat
+  fields are both understood). A mark matches only inside the task's
+  enabled window (`enabled_at`..`disabled_at`/now) — marks received
+  before `enabled_at` or after `disabled_at` never fire that task.
+  A mark matching no enabled in-window task stays pending until the
+  cap drops it — pending marks are a bounded backlog, not a queue
+  with guaranteed future delivery.
+- Debounce: matching marks within `debounce_ms` of the previous mark
+  in the burst collapse into ONE fire whose `scheduled_for` is the
+  FIRST mark's `received_at` (the burst anchor). `debounce_ms`
+  absent/0 = one fire per mark.
+- Suppression is recorded, never silent: a burst suppressed by
+  `cooldown_ms` (measured from the last EXECUTED event fire's anchor)
+  or over `max_fires` produces a terminal `skipped` run with
+  `error.code` `cooldown` | `max_fires` and `trigger:"event"`.
+- Idempotency reuses the occurrence key: `task_id + scheduled_for`
+  where `scheduled_for` = burst anchor. An existing record for the
+  anchor dedupes (no second fire). `fire --scheduled-for` can never
+  validate an event occurrence (`invalid_occurrence`); `run-now`
+  remains the manual override.
+- Event tasks owe no clock occurrences: `isOccurrenceInstant`,
+  `nextOccurrenceAfter`, and `collectPastInstants` treat `event` as
+  occurrence-free — never `missed`, never re-planned.
+- Run status tracking: `pane.agent_status_changed` additionally
+  folds the OBSERVED `agent_status` into the latest delivered
+  (`running`/`success`) run whose `destination_snapshot.pane_id`
+  matches — `result.agent_status` + `result.agent_status_at`.
+  Observed values only; never a fabricated completion (AGENTS §4).
+- Honesty bound: an event herdr never delivered simply never exists.
+  With no hook delivery (plugin not installed as event source, herdr
+  too old, event not hook-eligible), `tick` reports `events.fired:0`
+  and nothing runs — the plugin never invents events.
+
 ## Driver reporting (normative, #145)
 
 - `watch` registers a `watch` driver record (pid + heartbeat) for its
@@ -289,7 +362,7 @@ JSON error object on stderr:
 | --- | --- |
 | `usage` | Bad args (exit 2). |
 | `invalid_schedule` | Schedule fails schema validation (incl. past `once.run_at`, bad zone/weekday). |
-| `unsupported_schedule` | Reserved type (`webhook`/`event`) or platform-inexpressible schedule. |
+| `unsupported_schedule` | Reserved type (`webhook`) or platform-inexpressible schedule. |
 | `invalid_task` | Destination/name/prompt/misfire fails validation (#144 additive code). |
 | `task_not_found` | Unknown `task_id`. |
 | `destination_unavailable` | Pane closed / no live agent / surface gone at fire time. |
@@ -321,6 +394,8 @@ JSON error object on stderr:
 - Automations invoke `rebuildup.handoff`/`rebuildup.controls`
   surfaces; they never reimplement agent lifecycle, and there is no
   automatic handoff on failure/idle (ADR-0021 §6).
-- `webhook`/`event` schedules are reserved until #146/#147; forge
-  (Issue/PR) events and multi-stage durable workflows are out of v1.
+- `event` schedules (#146) fire only on hook events herdr actually
+  delivers through the manifest `[[events]]` entrypoint; `webhook`
+  remains reserved until #147; forge (Issue/PR) events and
+  multi-stage durable workflows are out of v1.
 - CLI-only in v1; MCP exposure is #30's decision.

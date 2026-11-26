@@ -15,15 +15,16 @@ automations, adapted to herdr's no-daemon model.
 
 ## Status
 
-T3 firing + delivery (#145) implemented on top of the T2 registry:
-`fire`/`tick` idempotent occurrence firing with misfire policies,
-`schedule install|uninstall|status` OS adapters (launchd / systemd
---user / schtasks) and opt-in `watch`, run delivery via
-`agent.prompt`/`agent.start` with `[automations]` provenance, and
-honest `driver.state` reporting. Event triggers land in #146,
-webhook evaluation (if adopted) in #147. The plugin holds no clock
+T4 event triggers (#146) sit on top of the T3 firing + delivery
+(#145) and T2 registry: `fire`/`tick` idempotent occurrence firing
+with misfire policies, `schedule install|uninstall|status` OS
+adapters (launchd / systemd --user / schtasks) and opt-in `watch`,
+run delivery via `agent.prompt`/`agent.start` with `[automations]`
+provenance, honest `driver.state` reporting, and `event` schedules
+fired by herdr `[[events]]` manifest hooks (see below). Webhook
+evaluation (if adopted) lands in #147. The plugin holds no clock
 and no daemon — external clocks call the idempotent `tick`/`fire`
-path (ADR-0022).
+path and herdr calls the hook entrypoint (ADR-0022).
 
 ## Commands
 
@@ -54,9 +55,36 @@ Global flags: `--session NAME --socket PATH --timeout MS`.
 
 Schedules: `interval` (`every_ms >= 60000`), `fixed_time`
 (`time_of_day` HH:MM + optional `weekdays` 0=Sun..6=Sat + optional IANA
-`time_zone`), `once` (ISO 8601 with explicit offset, must be future).
-`webhook`/`event` are schema-reserved → `unsupported_schedule` until
-#146/#147.
+`time_zone`), `once` (ISO 8601 with explicit offset, must be future),
+`event` (below). `webhook` is schema-reserved →
+`unsupported_schedule` until #147.
+
+### Event schedules (#146)
+
+```json
+{ "type": "event",
+  "on": "pane.agent_status_changed",
+  "filter": { "agent_status": "done" },
+  "debounce_ms": 5000, "cooldown_ms": 60000, "max_fires": 10 }
+```
+
+`on` is one of the 22 hook-eligible dotted event names
+(`workspace.*`/`worktree.*`/`tab.*`/`pane.*` — the manifest subscribes
+to all of them). `filter` exact-matches extracted dimensions
+(`pane_id`, `tab_id`, `workspace_id`, `agent`, `agent_status`);
+`debounce_ms` collapses bursts into one fire anchored at the first
+mark; `cooldown_ms`/`max_fires` decline bursts into honest `skipped`
+runs (`error.code` `cooldown`/`max_fires`).
+
+Mechanism: herdr invokes `src/hook.ts` per `[[events]]` manifest
+entry; the hook only records a pending mark (capped at 500,
+overflow counted) — no socket work, no delivery. The next `tick` or
+`watch` pass drains matching marks and delivers through the same run
+path as clock fires (`trigger:"event"`, `scheduled_for` = burst
+anchor, same idempotency key). `pane.agent_status_changed` also
+records the observed status on the latest delivered run for that
+pane (`result.agent_status`/`agent_status_at`). Events herdr never
+delivers never fire — `tick` reports `events.fired:0`.
 
 `run-now` records and delivers a manual run
 (`trigger:"manual"`, `scheduled_for:null`) through the same

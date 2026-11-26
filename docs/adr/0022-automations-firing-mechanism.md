@@ -110,3 +110,34 @@ honestly, including orphaned entries left by an uninstall.
 - **`_wake` chain re-arming from `[[startup]]`** — still leaves
   per-task process growth and silent chain death between herdr
   restarts; rejected for the same reasons as (c).
+
+## Addendum (#146, T4): `event` schedules fire via manifest hooks + lazy drain
+
+`event` schedules do not fit the clock model — their "occurrence" is
+a herdr lifecycle event, not an instant on a grid. Decision:
+
+- The manifest subscribes all 22 hook-eligible event names
+  (`PLUGIN_HOOK_EVENT_KINDS` @ upstream `e8d7d97`; names like
+  `pane.output_changed`/`pane.updated`/`layout.updated` are NOT
+  hook-eligible and are rejected at schedule validation) to
+  `src/hook.ts`, which does NO socket work and NO delivery — the
+  checkpoints-hook contract. It appends a bounded pending mark
+  (`MAX_PENDING_EVENTS` = 500, oldest-dropped counted) to the session
+  registry.
+- Marks drain lazily inside `tick`/`watch` (`prepareEventTick`),
+  reusing the same run path, idempotency key (`task_id +
+  scheduled_for` = burst anchor), and preflight/delivery semantics as
+  clock fires. No daemon, no `events.subscribe` watch driver, no
+  store-and-forward: an event herdr never delivered never exists.
+- `debounce_ms`/`cooldown_ms`/`max_fires` are plugin-side burst and
+  suppression semantics; declined bursts are recorded as honest
+  `skipped` runs, never silently dropped.
+- `pane.agent_status_changed` additionally folds the OBSERVED
+  `agent_status` into the latest delivered run on that pane
+  (`result.agent_status`/`agent_status_at`) — observation only, never
+  a fabricated completion (AGENTS §4).
+
+Rejected for #146: an `events.subscribe` long-lived watch driver
+(violates the no-resident-process constraint and duplicates `watch`),
+and treating hook receipt time as a trusted clock (marks carry
+`received_at` but delivery stays lazy and idempotent).

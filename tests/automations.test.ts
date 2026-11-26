@@ -53,7 +53,7 @@ describe("automations capability (T1 scaffold, #137)", () => {
     expect(doc.contract_status).toBe("draft");
   });
 
-  test("advertises implemented registry commands, plans drivers", () => {
+  test("advertises implemented registry commands, plans serve", () => {
     const doc = capabilityDocument();
     for (const cmd of [
       "capability",
@@ -73,16 +73,19 @@ describe("automations capability (T1 scaffold, #137)", () => {
     ]) {
       expect(doc.commands).toContain(cmd);
     }
-    for (const planned of ["hook", "serve"]) {
-      expect(doc.planned_commands).toContain(planned);
-      expect(doc.commands).not.toContain(planned);
-    }
+    // `hook` is a manifest [[events]] entrypoint (src/hook.ts), not a
+    // CLI command; `serve` remains planned for #147.
+    expect(doc.planned_commands).toEqual(["serve"]);
+    expect(doc.commands).not.toContain("hook");
+    expect(doc.commands).not.toContain("serve");
+    expect(doc.hook_entrypoint).toBe("src/hook.ts");
+    expect(doc.hook_events).toContain("pane.agent_status_changed");
   });
 
-  test("v1 schedule scope: interval/fixed_time/once in, webhook/event reserved", () => {
+  test("v1 schedule scope: interval/fixed_time/once/event in, webhook reserved", () => {
     const doc = capabilityDocument();
-    expect(doc.schedules).toEqual(["interval", "fixed_time", "once"]);
-    expect(doc.reserved_schedules).toEqual(["webhook", "event"]);
+    expect(doc.schedules).toEqual(["interval", "fixed_time", "once", "event"]);
+    expect(doc.reserved_schedules).toEqual(["webhook"]);
     for (const reserved of doc.reserved_schedules) {
       expect(doc.schedules).not.toContain(reserved);
     }
@@ -190,9 +193,10 @@ describe("schedule validation", () => {
     assertOnceInFuture(future, T0); // no throw
   });
 
-  test("reserved webhook/event schedules are unsupported_schedule", () => {
+  test("reserved webhook schedule is unsupported_schedule; event is accepted (#146)", () => {
     expectCode(() => parseSchedule({ type: "webhook" }), "unsupported_schedule");
-    expectCode(() => parseSchedule({ type: "event", on: "pane.closed" }), "unsupported_schedule");
+    const event = parseSchedule({ type: "event", on: "pane.closed" });
+    expect(event.type).toBe("event");
   });
 
   test("unknown/malformed schedules are invalid_schedule", () => {
