@@ -1,0 +1,114 @@
+id = "rebuildup.automations"
+name = "Automations"
+version = "0.7.0"
+min_herdr_version = "0.9.0"
+description = "Scheduled and triggered agent runs: interval/fixed_time/once tasks fired by OS schedulers or an opt-in watch process, plus event schedules fired by herdr lifecycle hooks (contract herdr-plugins.automations/v1, stable). Webhook triggers are unsupported in v1 — upstream gap, ADR-0026."
+platforms = ["linux", "macos", "windows"]
+
+# No build step: dependency-free TypeScript executed by Bun
+# (ADR-0003). T3 (#145): firing drivers (`fire`/`tick`/`watch`/
+# `schedule install|uninstall|status`), run delivery via
+# agent.prompt/agent.start, idempotent task_id+scheduled_for runs,
+# misfire policies, driver.state reporting. T4 (#146): `event`
+# schedules — every herdr plugin-hook event is recorded as a pending
+# mark by src/hook.ts and drained lazily by the next `tick` (no
+# daemon, checkpoints auto-capture precedent); agent_status_changed
+# also folds observed status into delivered runs. T5 (#147): webhook
+# triggers resolved as an upstream gap (ADR-0026) — no `serve`,
+# `webhook` schedules stay `unsupported_schedule`; contract v1
+# finalized STABLE.
+
+# Event hooks (#146): one [[events]] entry per upstream
+# PLUGIN_HOOK_EVENT_KINDS name so `event` schedules can subscribe to
+# any of them. The hook only records marks — firing happens on the
+# next `tick`. `pane.agent_status_changed` additionally updates run
+# observations. Event names unknown to an older herdr produce a
+# non-fatal manifest warning and simply never fire.
+
+[[events]]
+on = "workspace.created"
+command = ["bun", "run", "src/hook.ts"]
+
+[[events]]
+on = "workspace.updated"
+command = ["bun", "run", "src/hook.ts"]
+
+[[events]]
+on = "workspace.closed"
+command = ["bun", "run", "src/hook.ts"]
+
+[[events]]
+on = "workspace.renamed"
+command = ["bun", "run", "src/hook.ts"]
+
+[[events]]
+on = "workspace.moved"
+command = ["bun", "run", "src/hook.ts"]
+
+[[events]]
+on = "workspace.reordered"
+command = ["bun", "run", "src/hook.ts"]
+
+[[events]]
+on = "workspace.focused"
+command = ["bun", "run", "src/hook.ts"]
+
+[[events]]
+on = "worktree.created"
+command = ["bun", "run", "src/hook.ts"]
+
+[[events]]
+on = "worktree.opened"
+command = ["bun", "run", "src/hook.ts"]
+
+[[events]]
+on = "worktree.removed"
+command = ["bun", "run", "src/hook.ts"]
+
+[[events]]
+on = "tab.created"
+command = ["bun", "run", "src/hook.ts"]
+
+[[events]]
+on = "tab.closed"
+command = ["bun", "run", "src/hook.ts"]
+
+[[events]]
+on = "tab.renamed"
+command = ["bun", "run", "src/hook.ts"]
+
+[[events]]
+on = "tab.moved"
+command = ["bun", "run", "src/hook.ts"]
+
+[[events]]
+on = "tab.focused"
+command = ["bun", "run", "src/hook.ts"]
+
+[[events]]
+on = "pane.created"
+command = ["bun", "run", "src/hook.ts"]
+
+[[events]]
+on = "pane.closed"
+command = ["bun", "run", "src/hook.ts"]
+
+[[events]]
+on = "pane.focused"
+command = ["bun", "run", "src/hook.ts"]
+
+[[events]]
+on = "pane.moved"
+command = ["bun", "run", "src/hook.ts"]
+
+[[events]]
+on = "pane.exited"
+command = ["bun", "run", "src/hook.ts"]
+
+[[events]]
+on = "pane.agent_detected"
+command = ["bun", "run", "src/hook.ts"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["bun", "run", "src/hook.ts"]

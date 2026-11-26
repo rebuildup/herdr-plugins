@@ -18,6 +18,14 @@
       "name": "@herdr-plugins/client",
       "version": "0.1.0",
     },
+    "plugins/artifacts": {
+      "name": "@herdr-plugins/artifacts",
+      "version": "0.2.0",
+    },
+    "plugins/automations": {
+      "name": "@herdr-plugins/automations",
+      "version": "0.7.0",
+    },
     "plugins/checkpoints": {
       "name": "@herdr-plugins/checkpoints",
       "version": "0.4.0",
@@ -40,6 +48,10 @@
     },
     "plugins/inbox": {
       "name": "@herdr-plugins/inbox",
+      "version": "0.1.0",
+    },
+    "plugins/mcp": {
+      "name": "@herdr-plugins/mcp",
       "version": "0.1.0",
     },
     "plugins/projects": {
@@ -74,6 +86,10 @@
 
     "@biomejs/cli-win32-x64": ["@biomejs/cli-win32-x64@2.2.4", "", { "os": "win32", "cpu": "x64" }, "sha512-3Y4V4zVRarVh/B/eSHczR4LYoSVyv3Dfuvm3cWs5w/HScccS0+Wt/lHOcDTRYeHjQmMYVC3rIRWqyN2EI52+zg=="],
 
+    "@herdr-plugins/artifacts": ["@herdr-plugins/artifacts@workspace:plugins/artifacts"],
+
+    "@herdr-plugins/automations": ["@herdr-plugins/automations@workspace:plugins/automations"],
+
     "@herdr-plugins/checkpoints": ["@herdr-plugins/checkpoints@workspace:plugins/checkpoints"],
 
     "@herdr-plugins/client": ["@herdr-plugins/client@workspace:packages/herdr-client"],
@@ -89,6 +105,8 @@
     "@herdr-plugins/handoff": ["@herdr-plugins/handoff@workspace:plugins/handoff"],
 
     "@herdr-plugins/inbox": ["@herdr-plugins/inbox@workspace:plugins/inbox"],
+
+    "@herdr-plugins/mcp": ["@herdr-plugins/mcp@workspace:plugins/mcp"],
 
     "@herdr-plugins/projects": ["@herdr-plugins/projects@workspace:plugins/projects"],
 

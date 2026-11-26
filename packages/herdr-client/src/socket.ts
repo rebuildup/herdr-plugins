@@ -120,6 +120,12 @@ export interface Subscription {
   readonly started: Promise<unknown>;
   /** Async iterator of pushed event envelopes `{ event, data }`. */
   readonly events: AsyncIterable<{ event: string; data: unknown }>;
+  /**
+   * Error frame addressed to this subscription, when the server sent one
+   * (e.g. `events_lost` when the subscription fell behind retained
+   * history, or a mid-stream rejection). Null until/unless observed.
+   */
+  readonly terminalError: HerdrError | null;
   /** Close the subscription connection. */
   close(): void;
 }
@@ -144,6 +150,7 @@ export function subscribe(
   let buffer = "";
   let acknowledged = false;
   let closed = false;
+  let terminalError: HerdrError | null = null;
 
   let ackResolve: (value: unknown) => void = () => {};
   let ackReject: (error: Error) => void = () => {};
@@ -207,8 +214,10 @@ export function subscribe(
       }
       if (message.id === id) {
         if (message.error) {
-          // Subscription rejected (e.g. unknown subscription type): fail the
-          // ack and end the stream rather than hanging `started` forever.
+          // Error frame for this subscription — pre-ack this rejects
+          // `started`; post-ack (e.g. upstream `events_lost`) it is
+          // recorded on `terminalError` before the stream is ended.
+          terminalError = message.error;
           clearTimeout(ackTimer);
           acknowledged = true;
           closed = true;
@@ -248,6 +257,9 @@ export function subscribe(
   return {
     started,
     events,
+    get terminalError() {
+      return terminalError;
+    },
     close() {
       closed = true;
       socket.destroy();

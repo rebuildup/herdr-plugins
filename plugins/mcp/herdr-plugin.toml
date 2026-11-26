@@ -1,0 +1,16 @@
+id = "rebuildup.mcp"
+name = "MCP"
+version = "0.7.0"
+min_herdr_version = "0.9.0"
+description = "Local stdio MCP server exposing herdr sessions and sibling plugin contracts to outside agents (contract herdr-plugins.mcp/v1, stable)."
+platforms = ["linux", "macos", "windows"]
+
+# No build step: the plugin is dependency-free TypeScript executed by Bun
+# (runtime prerequisite, see plugins/mcp/README.md).
+#
+# No [[actions]] / [[events]] / [[startup]]: the plugin is a per-client
+# stdio MCP server spawned by the MCP client config (ADR-0002 — no
+# resident process). T4 (#140) added the event surface as in-process
+# tool subscriptions (`events_subscribe`/`events_poll`/`events_wait`/
+# `events_unsubscribe`) — still no daemon; subscriptions die with the
+# client process.
