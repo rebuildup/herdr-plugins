@@ -11,6 +11,24 @@ platforms = ["linux", "macos", "windows"]
 # T1 scaffold (#136) + T2 registry core (#141) + T3 verify (#142) +
 # T4 deliver/gc/export (#143): contract `herdr-plugins.artifacts/v1` is
 # STABLE. Implemented: capability, help, register, list, get, search,
-# verify, delete, deliver, gc, export. No [[actions]] / [[events]] in
-# v1: the registry is explicit CLI invocation (same convention as
-# rebuildup.conversations).
+# verify, delete, deliver, gc, export.
+#
+# TUI surface (#247, contract herdr-plugins.tui/v1, ADR-0031/0032/0033):
+# `main` pane = registry browser (list/search/detail/verify +
+# register/deliver/delete/gc with confirmation; gc dry-run first);
+# `open` action opens it in a tab. CLI behavior is unchanged.
+
+[[panes]]
+id = "main"
+title = "Artifacts: registry"
+description = "Artifact registry browser: list/search/detail/verify, register, deliver, delete, gc (dry-run first). Metadata + path preview; html/image/pdf open externally."
+platforms = ["linux", "macos", "windows"]
+placement = "tab"
+command = ["bun", "run", "src/tui.ts", "main"]
+
+[[actions]]
+id = "open"
+title = "Artifacts: open registry UI"
+description = "Open the artifacts registry TUI in a new tab."
+contexts = ["pane", "workspace"]
+command = ["bun", "run", "src/tui.ts", "open"]
