@@ -1,12 +1,34 @@
 id = "rebuildup.inbox"
 name = "Inbox"
-version = "0.6.0"
+version = "0.7.0"
 min_herdr_version = "0.9.0"
-description = "Work inbox for agent panes: settle, snooze, pin, archive, manual ordering, search/filter, explicit PR/Issue links, restore with persistent user-side organize state, a read-only organize-transition log, and an opt-in watch-pr PR-update watcher (contract herdr-plugins.inbox/v1, stable; additive v0.4.0/v0.5.0/v0.6.0)."
+description = "Work inbox for agent panes: settle, snooze, pin, archive, manual ordering, search/filter, explicit PR/Issue links, restore with persistent user-side organize state, a read-only organize-transition log, an opt-in watch-pr PR-update watcher, and an interactive TUI browser (contracts herdr-plugins.inbox/v1 stable, herdr-plugins.tui/v1; additive v0.4.0–v0.7.0)."
 platforms = ["linux", "macos", "windows"]
 
 # No build step: the plugin is dependency-free TypeScript executed by Bun
 # (runtime prerequisite, see plugins/inbox/README.md).
+
+# Interactive TUI surface (contract herdr-plugins.tui/v1, ADR-0031/0032/0033,
+# Issue #237): workspace-scale inbox browser. `tab` placement per the
+# placement policy — primary browsers get a real pane so HERDR_PANE_ID and
+# plugin.pane.focus/close work; popup is reserved for transient pickers.
+[[panes]]
+id = "main"
+title = "Inbox"
+description = "Interactive inbox browser: attention states, search/filter, pin/order/archive, settle/snooze/restore, PR/Issue links, transition log."
+platforms = ["linux", "macos", "windows"]
+placement = "tab"
+command = ["bun", "run", "src/tui.ts"]
+
+# `open` action: background helper that invokes plugin.pane.open through
+# HERDR_BIN_PATH and returns promptly (actions cannot render UI). The
+# origin context is pinned via HERDR_TUI_CONTEXT_JSON.
+[[actions]]
+id = "open"
+title = "Inbox: open UI"
+description = "Open the interactive inbox browser in a new tab."
+contexts = ["workspace", "pane"]
+command = ["bun", "run", "src/tui.ts", "--open"]
 
 [[actions]]
 id = "settle"

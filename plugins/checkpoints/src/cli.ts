@@ -76,6 +76,13 @@ interface CliOptions extends CallOptions {
   command: string;
   args: string[];
   session: string | undefined;
+  /**
+   * `--no-drain`: skip the lazy pending-capture drain for this
+   * invocation. Read-only surfaces (the TUI, contract tui-v1 §5.1 /
+   * ADR-0033 §3.1) pass it so opening a view never mutates state;
+   * pending marks are left untouched for a later explicit drain.
+   */
+  noDrain?: boolean;
 }
 
 function parseArgs(argv: string[]): CliOptions {
@@ -92,6 +99,8 @@ function parseArgs(argv: string[]): CliOptions {
     } else if (arg === "--timeout") {
       const value = Number(args[++i]);
       if (Number.isFinite(value) && value > 0) options.timeoutMs = value;
+    } else if (arg === "--no-drain") {
+      options.noDrain = true;
     } else {
       rest.push(arg);
     }
@@ -125,6 +134,7 @@ function emit(payload: unknown): void {
  * failure never fails the command — outcomes land in `auto_captures`.
  */
 async function drainAuto(options: CliOptions, config: PluginConfig): Promise<void> {
+  if (options.noDrain === true) return;
   autoReport = await drainPendingCaptures(options, effectiveTimeoutMs(options, config));
 }
 
@@ -1656,6 +1666,8 @@ Every command first drains capture-pending marks recorded by the
 pane.agent_status_changed event hook (working→idle/done transitions):
 each still-valid mark becomes an 'auto' checkpoint for the pane's repo.
 Results are reported in the payload's 'auto_captures' field.
+Read-only surfaces that must not mutate on open (the interactive TUI)
+pass --no-drain to skip the drain; pending marks stay pending.
 See docs/contracts/checkpoints-v1.md.
 `;
 

@@ -88,3 +88,56 @@ bun run src/cli.ts watch-next-prompt --pane w1:p2 [--once] [--max-triggers 5]
 It emits JSONL events (`next_prompt.triggered|generated|error`) and
 records each result as pane metadata `textgen_next_prompt`; composer
 insertion is the caller's job.
+
+## Interactive TUI (#246)
+
+The plugin ships a tab-placed pane entrypoint plus an `open` action
+(`herdr-plugins.tui/v1`; ADR-0031/0032/0033):
+
+```toml
+# herdr-plugin.toml (already declared)
+[[panes]] id = "main"  placement = "tab"  command = ["bun","run","src/tui.ts","main"]
+[[actions]] id = "open" contexts = ["pane","workspace"]  command = ["bun","run","src/tui.ts","open"]
+```
+
+- `open` pins the origin context (workspace/tab/focused pane/cwd) once
+  and calls `plugin.pane.open` with `placement = "tab"`, forwarding the
+  pins as `HERDR_TUI_*` env vars. `HERDR_PANE_ID` inside the UI is the
+  UI pane's own surface identity — never a target.
+- The UI consumes this plugin's own CLI (`src/cli.ts`) for `capability`,
+  `git-context`, and `generate`, so the public contract stays the single
+  source of truth. Opening performs reads only.
+- Flow: pick a task → fill the contract `input_fields` (required fields
+  marked; `@/path/to/file` reads a file for long/multiline values such
+  as diffs) → optional provider/model override → optional `--git-pane`
+  repo-context collection for the git tasks (with a read-only
+  `git-context` preview) → confirm → `generate`.
+- `generate` is gated on `capability`/`mutation_commands` (fail closed
+  when unavailable), confirm-gated with the exact run parameters, and
+  runs with the contract timeout + grace. `review_guide` asks for a
+  per-run `--allow-expensive` opt-in. Cancelling detaches rather than
+  kills the CLI so the agent-path workspace cleanup still runs; the
+  result is discarded and reported honestly.
+- Results render per output shape (text / candidate list / PR
+  title+body) with provider, elapsed, warnings, and git-context
+  provenance. `c` copies the raw result to the clipboard. The view
+  states plainly that **results are not retained** — the contract
+  persists nothing (#249) — and there is deliberately no apply/adopt
+  action: generation and application stay separated.
+- Provider problems (`provider_unavailable`, `no_credential`,
+  `no_provider`, `task_not_opted_in`, `quota_exceeded`,
+  `input_secret_detected`, …) render their real error kind — never a
+  fabricated success. `watch-next-prompt` stays a CLI/daemon surface;
+  `config` writes stay on the CLI.
+- Non-TTY stdin degrades to a plain-text task list; the non-
+  interactive CLI is unchanged.
+
+Opt-in keybind (user-owned; plugins never write herdr config):
+
+```toml
+[[keys.command]]
+key = "prefix+G"
+type = "plugin_action"
+command = "rebuildup.textgen.open"
+description = "open textgen TUI"
+```

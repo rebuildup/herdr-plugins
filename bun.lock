@@ -40,7 +40,7 @@
     },
     "plugins/conversations": {
       "name": "@herdr-plugins/conversations",
-      "version": "0.5.0",
+      "version": "0.6.0",
     },
     "plugins/git": {
       "name": "@herdr-plugins/git",
@@ -52,7 +52,7 @@
     },
     "plugins/inbox": {
       "name": "@herdr-plugins/inbox",
-      "version": "0.6.0",
+      "version": "0.7.0",
     },
     "plugins/machines": {
       "name": "@herdr-plugins/machines",
@@ -72,11 +72,11 @@
     },
     "plugins/textgen": {
       "name": "@herdr-plugins/textgen",
-      "version": "0.7.0",
+      "version": "0.8.0",
     },
     "plugins/usage": {
       "name": "@herdr-plugins/usage",
-      "version": "0.5.0",
+      "version": "0.6.0",
     },
   },
   "packages": {

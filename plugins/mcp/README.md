@@ -81,6 +81,53 @@ not a pane (ADR-0025 §4).
 Out of v1 scope: herdr has no inbound HTTP/tunnel/OAuth surface
 (herdrdev/herdr#6199). No bespoke public server is built.
 
+## Interactive TUI (#248)
+
+The plugin ships a tab-placed pane entrypoint plus an `open` action
+(`herdr-plugins.tui/v1`; ADR-0031/0032/0033):
+
+```toml
+# herdr-plugin.toml (already declared)
+[[panes]] id = "main"  placement = "tab"  command = ["bun","run","src/tui.ts","main"]
+[[actions]] id = "open" contexts = ["pane","workspace"]  command = ["bun","run","src/tui.ts","open"]
+```
+
+- **Diagnostics only.** The stdio MCP server is never screen-ified
+  (ADR-0025/0033): no `serve`, no tool invocation, no mutations. The
+  surface renders the `capability` document — contract/version,
+  surfaces, session/socket resolution + reachability, access levels
+  and the negotiated level, the declared tool table with per-level
+  availability, per-plugin availability, error codes, and upstream
+  gaps.
+- `open` pins the origin context once and calls `plugin.pane.open`
+  with `placement = "tab"`, forwarding the pins as `HERDR_TUI_*` env
+  vars. `HERDR_PANE_ID` inside the UI is the UI pane's own surface
+  identity — never a target. The diagnosed session is the one
+  `capability` resolves from the inherited env
+  (`HERDR_SOCKET_PATH`/`HERDR_SESSION`/flags), exactly like an MCP
+  client config would.
+- Every read goes through the plugin's own `capability` CLI
+  subprocess, so the public contract stays the single source of truth
+  and CLI/MCP/TUI cannot drift. Opening performs reads only; refresh
+  is user-triggered (`r`). Absent/unreachable fields render their real
+  error or `unknown`, never a fabricated state.
+- Keys: `t` tool table (enter → per-tool detail incl. the
+  read-only < supervised < full availability matrix), `p` plugin
+  availability, `i` contract reference, `j` raw capability JSON,
+  `/` filter inside lists, `?` help.
+- Non-TTY stdin degrades to a plain-text capability summary; the
+  non-interactive CLI is unchanged.
+
+Opt-in keybind (user-owned; plugins never write herdr config):
+
+```toml
+[[keys.command]]
+key = "prefix+M"
+type = "plugin_action"
+command = "rebuildup.mcp.open"
+description = "open mcp diagnostics TUI"
+```
+
 ## Runtime prerequisite
 
 Bun (same as every plugin in this repo; see root README / AGENTS.md).
