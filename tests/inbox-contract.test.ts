@@ -19,12 +19,23 @@ interface FakeAgent {
   agent_status: string;
   state_change_seq: number;
   agent_session?: { agent: string; kind: string; value: string } | null;
+  cwd?: string;
+  terminal_title_stripped?: string;
+}
+
+interface FakePane {
+  pane_id: string;
+  workspace_id: string;
+  tab_id: string;
+  title?: string;
+  cwd?: string;
 }
 
 interface FakeHerdr {
   socketPath: string;
   methods: string[];
   setAgents(agents: FakeAgent[]): void;
+  setPanes(panes: FakePane[]): void;
   close(): Promise<void>;
 }
 
@@ -37,7 +48,7 @@ async function fakeHerdr(): Promise<FakeHerdr> {
     { pane_id: "w1:p2", agent_status: "working", state_change_seq: 1 },
     { pane_id: "w1:p3", agent_status: "done", state_change_seq: 1 },
   ];
-  const panes = ["w1:p1", "w1:p2", "w1:p3"].map((id) => ({
+  let panes: FakePane[] = ["w1:p1", "w1:p2", "w1:p3"].map((id) => ({
     pane_id: id,
     workspace_id: "w1",
     tab_id: "w1:t1",
@@ -72,6 +83,9 @@ async function fakeHerdr(): Promise<FakeHerdr> {
     methods,
     setAgents(next: FakeAgent[]) {
       agents = next;
+    },
+    setPanes(next: FakePane[]) {
+      panes = next;
     },
     close: () =>
       new Promise((resolveClose) => {
@@ -261,5 +275,214 @@ describe("inbox contract v1 (pin/archive/order)", () => {
     // Read + metadata projection only. Anything else (pane.close,
     // agent.*, pane.send_input, ...) would be an execution-state violation.
     expect(unique.sort()).toEqual(["pane.report_metadata", "session.snapshot"]);
+  });
+});
+
+describe("inbox contract v1 (filters and tracker links)", () => {
+  let herdr: FakeHerdr;
+  let stateDir: string;
+  let configDir: string;
+  let env: Record<string, string>;
+
+  beforeAll(async () => {
+    herdr = await fakeHerdr();
+    stateDir = mkdtempSync(path.join(tmpdir(), "inbox-state-"));
+    configDir = mkdtempSync(path.join(tmpdir(), "inbox-config-"));
+    env = cliEnv(stateDir, configDir);
+    herdr.setPanes([
+      { pane_id: "w1:p1", workspace_id: "w1", tab_id: "w1:t1", title: "fix login bug" },
+      { pane_id: "w1:p2", workspace_id: "w1", tab_id: "w1:t1", title: "write docs" },
+      { pane_id: "w2:p9", workspace_id: "ws2", tab_id: "w2:t1", title: "deploy pipeline" },
+    ]);
+    herdr.setAgents([
+      {
+        pane_id: "w1:p1",
+        agent_status: "done",
+        state_change_seq: 3,
+        agent_session: { agent: "claude", kind: "session", value: "sess-1" },
+        cwd: "/repo/app",
+        terminal_title_stripped: "fix login bug",
+      },
+      { pane_id: "w1:p2", agent_status: "working", state_change_seq: 2 },
+      { pane_id: "w2:p9", agent_status: "idle", state_change_seq: 1 },
+    ]);
+  });
+
+  afterAll(async () => {
+    await herdr.close();
+    rmSync(stateDir, { recursive: true, force: true });
+    rmSync(configDir, { recursive: true, force: true });
+  });
+
+  const cli = (args: string[]) => runCli([...args, "--socket", herdr.socketPath], env);
+  const paneIds = (json: Record<string, unknown> | null) =>
+    (json?.items as Array<Record<string, unknown>>).map((i) => i.pane_id);
+
+  test("list filters: attention/organize/search/workspace, read-only", async () => {
+    const all = await cli(["list"]);
+    expect(all.status).toBe(0);
+    expect(paneIds(all.json).sort()).toEqual(["w1:p1", "w1:p2", "w2:p9"]);
+    expect((all.json?.filters as Record<string, unknown>).attention).toBe(false);
+
+    // Organize p2, then filter by kind.
+    await cli(["settle", "w1:p2"]);
+    const settled = await cli(["list", "--organize", "settled"]);
+    expect(paneIds(settled.json)).toEqual(["w1:p2"]);
+    expect((settled.json?.counts as Record<string, number>).total).toBe(1);
+
+    const none = await cli(["list", "--organize", "none"]);
+    expect(paneIds(none.json).sort()).toEqual(["w1:p1", "w2:p9"]);
+
+    // Attention: flip p1 to blocked — attention is never hidden by settle.
+    herdr.setAgents([
+      {
+        pane_id: "w1:p1",
+        agent_status: "blocked",
+        state_change_seq: 4,
+        agent_session: { agent: "claude", kind: "session", value: "sess-1" },
+        cwd: "/repo/app",
+      },
+      { pane_id: "w1:p2", agent_status: "working", state_change_seq: 2 },
+      { pane_id: "w2:p9", agent_status: "idle", state_change_seq: 1 },
+    ]);
+    const attention = await cli(["list", "--attention"]);
+    expect(paneIds(attention.json)).toEqual(["w1:p1"]);
+    // Combined filters.
+    const combined = await cli(["list", "--attention", "--search", "login", "--workspace", "w1"]);
+    expect(paneIds(combined.json)).toEqual(["w1:p1"]);
+    const miss = await cli(["list", "--search", "login", "--workspace", "ws2"]);
+    expect(miss.json?.items).toEqual([]);
+
+    // Search hits title/cwd/pane_id case-insensitively.
+    const byCwd = await cli(["list", "--search", "/REPO/app"]);
+    expect(paneIds(byCwd.json)).toEqual(["w1:p1"]);
+
+    // Filters never mutate state: settled mark on p2 survives every read.
+    const again = await cli(["list"]);
+    expect(itemByPane(again.json as Record<string, unknown>, "w1:p2")?.organize).toMatchObject({
+      kind: "settled",
+    });
+
+    // Invalid --organize value is a usage error.
+    const bad = await cli(["list", "--organize", "bogus"]);
+    expect(bad.status).toBe(2);
+
+    await cli(["restore", "w1:p2"]);
+    herdr.setAgents([
+      {
+        pane_id: "w1:p1",
+        agent_status: "done",
+        state_change_seq: 4,
+        agent_session: { agent: "claude", kind: "session", value: "sess-1" },
+        cwd: "/repo/app",
+      },
+      { pane_id: "w1:p2", agent_status: "working", state_change_seq: 2 },
+      { pane_id: "w2:p9", agent_status: "idle", state_change_seq: 1 },
+    ]);
+  });
+
+  test("link/unlink/links contract and honest errors", async () => {
+    // Happy path: PR + Issue links on p1.
+    const link = await cli(["link", "w1:p1", "--pr", "owner/repo#42"]);
+    expect(link.status).toBe(0);
+    expect(link.json?.command).toBe("link");
+    expect((link.json?.links as unknown[]).length).toBe(1);
+
+    const linkIssue = await cli(["link", "w1:p1", "--issue", "owner/repo#7"]);
+    expect(linkIssue.status).toBe(0);
+    expect((linkIssue.json?.links as unknown[]).length).toBe(2);
+
+    // list exposes links additively; counts.linked reflects them.
+    const list = await cli(["list"]);
+    const p1 = itemByPane(list.json as Record<string, unknown>, "w1:p1");
+    expect((p1?.links as Array<Record<string, unknown>>).map((l) => l.ref).sort()).toEqual([
+      "owner/repo#42",
+      "owner/repo#7",
+    ]);
+    expect((list.json?.counts as Record<string, number>).linked).toBe(1);
+
+    // links command reads stored state.
+    const links = await cli(["links", "w1:p1"]);
+    expect(links.status).toBe(0);
+    expect((links.json?.links as unknown[]).length).toBe(2);
+
+    // Re-link same ref is idempotent (re-validation), not a duplicate.
+    const relink = await cli(["link", "w1:p1", "--pr", "owner/repo#42"]);
+    expect((relink.json?.links as unknown[]).length).toBe(2);
+
+    // unlink removes exactly the matching ref.
+    const unlink = await cli(["unlink", "w1:p1", "--issue", "owner/repo#7"]);
+    expect(unlink.status).toBe(0);
+    expect((unlink.json?.removed as Record<string, unknown>)?.ref).toBe("owner/repo#7");
+    expect((unlink.json?.links as unknown[]).length).toBe(1);
+
+    // Honest errors: unknown pane, missing link, bad ref, ambiguous kind.
+    const noPane = await cli(["link", "w9:p9", "--pr", "owner/repo#1"]);
+    expect(noPane.status).not.toBe(0);
+    const noLink = await cli(["unlink", "w1:p1", "--issue", "owner/repo#7"]);
+    expect(noLink.status).not.toBe(0);
+    const badRef = await cli(["link", "w1:p1", "--pr", "not-a-ref"]);
+    expect(badRef.status).toBe(2);
+    const both = await cli(["link", "w1:p1", "--pr", "owner/repo#1", "--issue", "o/r#2"]);
+    expect(both.status).toBe(2);
+    const noKind = await cli(["link", "w1:p1"]);
+    expect(noKind.status).toBe(2);
+
+    // --verify records anyway with a warning when gh cannot confirm.
+    const verified = await cli([
+      "link",
+      "w1:p2",
+      "--pr",
+      "definitely-not-a-real-owner-zzz/repo#1",
+      "--verify",
+    ]);
+    expect(verified.status).toBe(0);
+    expect((verified.json?.warnings as string[]).length).toBeGreaterThan(0);
+    expect((verified.json?.links as unknown[]).length).toBe(1);
+    await cli(["unlink", "w1:p2", "--pr", "definitely-not-a-real-owner-zzz/repo#1"]);
+  });
+
+  test("stale links never attach to a different agent generation", async () => {
+    // p1 currently has pr owner/repo#42 recorded under sess-1.
+    // Simulate an agent generation swap: same pane, new session value.
+    herdr.setAgents([
+      {
+        pane_id: "w1:p1",
+        agent_status: "done",
+        state_change_seq: 4,
+        agent_session: { agent: "claude", kind: "session", value: "sess-2" },
+      },
+      { pane_id: "w1:p2", agent_status: "working", state_change_seq: 2 },
+      { pane_id: "w2:p9", agent_status: "idle", state_change_seq: 1 },
+    ]);
+    const list = await cli(["list"]);
+    const p1 = itemByPane(list.json as Record<string, unknown>, "w1:p1");
+    expect(p1?.links).toEqual([]);
+
+    // Same seq-advance tolerance: links survive status transitions within
+    // the same session — covered by model tests; here verify re-link works
+    // as the explicit re-validation path after staleness.
+    const relink = await cli(["link", "w1:p1", "--pr", "owner/repo#42"]);
+    expect(relink.status).toBe(0);
+    expect((relink.json?.links as unknown[]).length).toBe(1);
+    await cli(["unlink", "w1:p1", "--pr", "owner/repo#42"]);
+
+    // Restore clears organize state but keeps declared links.
+    await cli(["link", "w1:p2", "--issue", "owner/repo#9"]);
+    await cli(["settle", "w1:p2"]);
+    await cli(["restore", "w1:p2"]);
+    const linksAfter = await cli(["links", "w1:p2"]);
+    expect((linksAfter.json?.links as unknown[]).length).toBe(1);
+    await cli(["unlink", "w1:p2", "--issue", "owner/repo#9"]);
+  });
+
+  test("link commands touch only the snapshot read surface", async () => {
+    herdr.methods.length = 0;
+    await cli(["link", "w1:p1", "--pr", "owner/repo#5"]);
+    await cli(["links", "w1:p1"]);
+    await cli(["unlink", "w1:p1", "--pr", "owner/repo#5"]);
+    const unique = [...new Set(herdr.methods)];
+    // No pane.report_metadata (links have no tokens), no execution surfaces.
+    expect(unique).toEqual(["session.snapshot"]);
   });
 });
