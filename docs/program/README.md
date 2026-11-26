@@ -100,10 +100,10 @@ Issue 番号ベースの直列・blocked-by 関係 (release-0-2-0):
 | release-0-3-0 | #26, #3, #48-#53 | `projects-multi-repo`, `project-scripts` | 実装完了・リリース承認待ち (#26 clone/init/publish・worktree 関連付けと #3 自動トリガーは残差→#60) |
 | release-0-4-0 | #4, #72-#75, #94 | `checkpoints` (#23/#24/#26/#5 と接続) | 実装完了・RC 検証済み (macOS/herdr 0.9.5, `rc-0-4-0-verification.md`)・リリース承認待ち。残差: turn boundary 等の上流 gap (spec 記録)・#83/#96・Linux/Windows 導入検証 |
 | release-0-5-0 | #5, #28, #86-#93 | `conversations`, `usage-quota` | 実装完了・両契約 v1 stable・実データ検証済み (`conversations-v1-real-data-verification.md`, `usage-v1-real-data-verification.md`)・リリース承認待ち。upstream gap は herdrdev/herdr#6191 起票済み。usage 残差: claude quota ok 経路は org OAuth policy で未達 (request_failed を誠実に報告)・hub quota は単体テストのみ・Linux/Windows 未検証 |
-| 次期 train (暫定) | #27, #6, #29 | `provider-controls-composer`, `handoff-delegation`, `text-generation` | 未着手 |
+| release-0-6-0 | #27, #6, #29, #99-#110 | `provider-controls-composer`, `handoff-delegation`, `text-generation` | 実装完了・リリース承認待ち。upstream gap は herdrdev/herdr#6196 (dialogs) / #6197 (queue/steer) 起票済み。実機検証: `controls-v1-live-verification.md`, `handoff-v1-live-verification.md`, `handoff-remote-api-verification.md`, `textgen-v1-*-verification.md` |
 | 次期 train (暫定) | #33 | `inbox-extensions` (#8/#9 upstream gap 依存) | 未着手 |
-| 次期 train (暫定) | #30, #31, #32 | `mcp-outside-agents`, `artifacts-snapshots`, `automations` | 未着手 |
-| release-0-8-0 | #34, #160, #161 | `secrets-remote-devices` 棚卸し・責務割当 (#34) + 残差 `rebuildup.secrets` (#160) / `rebuildup.machines` (#161) | #34 棚卸し・ADR-0027/0028 確定 (本ブランチ)。#160/#161 は #34 マージ後に実装 |
+| release-0-7-0 | #30, #31, #32, #135-#147 | `mcp-outside-agents`, `artifacts-snapshots`, `automations` | 実装完了・リリース承認待ち。実機検証: `mcp-v1-live-verification.md`, `artifacts-v1-live-verification.md`, `automations-t4-live-verification.md`。automations webhook は upstream gap (ADR-0026、filing deferred) として契約 v1 で確定 |
+| release-0-8-0 | #34, #160, #161, #167 | `secrets-remote-devices` 棚卸し・責務割当 + 残差 `rebuildup.secrets` / `rebuildup.machines` | 実装完了・RC 検証済み (macOS/herdr 0.9.5, `rc-0-8-0-verification.md`, audit 境界違反なし)・リリース承認待ち。upstream-blocked/out-of-scope 残差は台帳 `secrets-remote-devices` の verification に記録 |
 | 上流待ち | #8, #9 | `attention-granularity`, `agent-view-namespacing` | upstream Issue 候補 |
 | 責務外 | — | `client-polish-misc`, `execution-runtime` | out-of-scope |
 | 後続検討 | #25 残差 | `forge-non-github` | GitHub 基盤 (#39) 後に Forge 別分解 |
