@@ -1141,6 +1141,323 @@ export async function updatePrReviewers(
 }
 
 // ---------------------------------------------------------------------------
+// GitHub issue surface (Issue #174, still ADR-0008 gh-CLI discipline).
+//
+// Issues have no head sha, so there is no `--expect-head` analog: the
+// guard against acting on stale reads is the mutation gate itself
+// (`options.mutation` target resolution) plus explicit invocation only —
+// the same boundary as every other forge mutation. `edit`/`close`
+// re-fetch a bounded `issue view` after writing so the echoed payload is
+// the post-mutation state, never the request echoed back.
+// ---------------------------------------------------------------------------
+
+const ISSUE_LIST_FIELDS = "number,title,state,labels,assignees,author,createdAt,updatedAt,url";
+
+const ISSUE_VIEW_FIELDS = [
+  "number",
+  "title",
+  "state",
+  "stateReason",
+  "closed",
+  "author",
+  "labels",
+  "assignees",
+  "milestone",
+  "body",
+  "comments",
+  "reactionGroups",
+  "createdAt",
+  "updatedAt",
+  "url",
+].join(",");
+
+const ISSUE_COMMENTS_MAX = 50;
+const ISSUE_COMMENT_BODY_MAX_CHARS = 4000;
+const ISSUE_REACTIONS_MAX = 20;
+
+function issueLoginList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => (asRecord(entry).login as string) ?? (asRecord(entry).name as string) ?? null)
+    .filter((v): v is string => typeof v === "string");
+}
+
+/**
+ * Bounded projection of `gh issue view --json`: body capped, comments
+ * reduced to the newest ISSUE_COMMENTS_MAX with per-comment body caps,
+ * reaction groups flattened to {content, count}. Author/labels/assignees/
+ * milestone are compacted to names/logins so the payload stays small.
+ */
+export function boundIssueView(raw: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {
+    number: raw.number ?? null,
+    title: raw.title ?? null,
+    state: raw.state ?? null,
+    state_reason: raw.stateReason ?? null,
+    closed: raw.closed ?? null,
+    author:
+      typeof raw.author === "string"
+        ? raw.author
+        : ((asRecord(raw.author).login as string) ?? null),
+    labels: Array.isArray(raw.labels)
+      ? raw.labels
+          .map((l) => (typeof l === "string" ? l : ((asRecord(l).name as string) ?? null)))
+          .filter((v): v is string => typeof v === "string")
+      : [],
+    assignees: issueLoginList(raw.assignees),
+    milestone: (asRecord(raw.milestone).title as string) ?? null,
+    created_at: raw.createdAt ?? null,
+    updated_at: raw.updatedAt ?? null,
+    url: raw.url ?? null,
+  };
+  const body = boundBody(raw.body, BODY_MAX_CHARS);
+  out.body = body.text;
+  if (body.truncated) out.body_truncated = true;
+
+  const commentsRaw = Array.isArray(raw.comments) ? raw.comments : [];
+  const commentAuthor = (c: Record<string, unknown>): string | null => {
+    const who = c.author ?? c.user;
+    if (typeof who === "string") return who;
+    return (asRecord(who).login as string) ?? null;
+  };
+  const comments = commentsRaw.map((entry) => {
+    const c = asRecord(entry);
+    const text = boundBody(c.body, ISSUE_COMMENT_BODY_MAX_CHARS);
+    const item: Record<string, unknown> = {
+      id: c.id ?? null,
+      author: commentAuthor(c),
+      body: text.text,
+      created_at: c.createdAt ?? c.created_at ?? null,
+      updated_at: c.updatedAt ?? c.updated_at ?? null,
+      url: c.url ?? null,
+    };
+    if (text.truncated) item.body_truncated = true;
+    return item;
+  });
+  out.comments = comments.slice(-ISSUE_COMMENTS_MAX);
+  out.comments_truncated = comments.length > ISSUE_COMMENTS_MAX;
+
+  const reactionsRaw = Array.isArray(raw.reactionGroups) ? raw.reactionGroups : [];
+  out.reactions = reactionsRaw.slice(0, ISSUE_REACTIONS_MAX).map((entry) => {
+    const r = asRecord(entry);
+    return {
+      content: r.content ?? null,
+      count: asRecord(r.users).totalCount ?? r.count ?? null,
+    };
+  });
+  if (reactionsRaw.length > ISSUE_REACTIONS_MAX) out.reactions_truncated = true;
+  return out;
+}
+
+export interface IssueListRequest {
+  repo: string;
+  limit?: number | undefined;
+  state?: "open" | "closed" | "all" | undefined;
+  label?: string[] | undefined;
+  assignee?: string[] | undefined;
+  author?: string | undefined;
+}
+
+/** `issue list`: fixed `--json` field set; gh's own filtering applies. */
+export async function collectIssueList(
+  repoRoot: string,
+  request: IssueListRequest,
+  options: { timeoutMs?: number } = {},
+): Promise<unknown[]> {
+  const args = ["issue", "list", "--repo", request.repo, "--json", ISSUE_LIST_FIELDS];
+  if (request.limit !== undefined) args.push("--limit", String(request.limit));
+  if (request.state) args.push("--state", request.state);
+  for (const label of request.label ?? []) args.push("--label", label);
+  for (const assignee of request.assignee ?? []) args.push("--assignee", assignee);
+  if (request.author) args.push("--author", request.author);
+  const out = await ghOk(repoRoot, args, options);
+  const parsed = JSON.parse(out) as unknown;
+  return Array.isArray(parsed) ? parsed : [];
+}
+
+export interface IssueNumberRequest {
+  repo: string;
+  number: number;
+}
+
+export async function collectIssueView(
+  repoRoot: string,
+  request: IssueNumberRequest,
+  options: { timeoutMs?: number } = {},
+): Promise<Record<string, unknown>> {
+  const out = await ghOk(
+    repoRoot,
+    ["issue", "view", String(request.number), "--repo", request.repo, "--json", ISSUE_VIEW_FIELDS],
+    options,
+  );
+  return boundIssueView(JSON.parse(out) as Record<string, unknown>);
+}
+
+export interface IssueCreateRequest {
+  repo: string;
+  title: string;
+  /** Inline body; ignored when `bodyFile` is set. */
+  body?: string | undefined;
+  /** `"-"` reads the body from stdin; a real path is passed to gh. */
+  bodyFile?: string | undefined;
+  labels?: string[] | undefined;
+  assignees?: string[] | undefined;
+}
+
+/**
+ * `gh issue create` prints the new issue URL on stdout. Same body
+ * discipline as `pr create`: long bodies travel via `--body-file -`
+ * (stdin) or a file path, never inline argv beyond `--body`.
+ */
+export async function collectIssueCreate(
+  repoRoot: string,
+  request: IssueCreateRequest,
+  options: { timeoutMs?: number; bodyText?: string | undefined } = {},
+): Promise<{ url: string; number: number | null }> {
+  const args = ["issue", "create", "--repo", request.repo, "--title", request.title];
+  if (request.bodyFile === "-") {
+    args.push("--body-file", "-");
+  } else if (request.bodyFile) {
+    args.push("--body-file", request.bodyFile);
+  } else {
+    // gh prompts for a body when neither flag is given; pass an explicit
+    // empty body to stay non-interactive.
+    args.push("--body", request.body ?? "");
+  }
+  for (const label of request.labels ?? []) args.push("--label", label);
+  for (const assignee of request.assignees ?? []) args.push("--assignee", assignee);
+  const out = await ghOk(repoRoot, args, {
+    ...options,
+    input: request.bodyFile === "-" ? options.bodyText : undefined,
+  });
+  const url = out.trim().split("\n").pop() ?? "";
+  const match = /\/issues\/(\d+)/.exec(url);
+  return { url, number: match ? Number(match[1]) : null };
+}
+
+/**
+ * `issue comment`: post an issue comment via
+ * `POST issues/{n}/comments` — the same endpoint `gh issue comment`
+ * uses, but through `gh api --input -` so the body never appears in
+ * argv and the created comment is echoed back bounded.
+ */
+export async function submitIssueComment(
+  repoRoot: string,
+  request: IssueNumberRequest & { body: string },
+  options: { timeoutMs?: number } = {},
+): Promise<Record<string, unknown>> {
+  const comment = await ghApiPost(
+    repoRoot,
+    request.repo,
+    `issues/${request.number}/comments`,
+    { body: request.body },
+    options,
+  );
+  return { number: request.number, comment: mapGhComment(comment) };
+}
+
+export interface IssueEditRequest extends IssueNumberRequest {
+  title?: string | undefined;
+  /** Inline body; ignored when `bodyFile` is set. */
+  body?: string | undefined;
+  /** `"-"` reads the body from stdin; a real path is passed to gh. */
+  bodyFile?: string | undefined;
+  addLabels?: string[] | undefined;
+  removeLabels?: string[] | undefined;
+  addAssignees?: string[] | undefined;
+  removeAssignees?: string[] | undefined;
+  /** `"closed"`/`"open"` map to `gh issue close`/`reopen`. */
+  state?: "open" | "closed" | undefined;
+  /** `gh issue close --reason`; only meaningful with state "closed". */
+  reason?: string | undefined;
+}
+
+const ISSUE_CLOSE_REASONS = new Set(["completed", "not planned"]);
+
+/**
+ * `issue edit` / `issue close`: `gh issue edit` for title/body/labels/
+ * assignees, `gh issue close|reopen` for state, then a bounded
+ * `issue view` re-fetch so callers get the post-mutation state. Field
+ * updates and state changes may both apply in one call (edit flags run
+ * first, then the state transition).
+ */
+export async function updateIssue(
+  repoRoot: string,
+  request: IssueEditRequest,
+  options: { timeoutMs?: number; bodyText?: string | undefined } = {},
+): Promise<Record<string, unknown>> {
+  const editArgs = ["issue", "edit", String(request.number), "--repo", request.repo];
+  let hasEdit = false;
+  if (request.title !== undefined) {
+    editArgs.push("--title", request.title);
+    hasEdit = true;
+  }
+  if (request.bodyFile === "-") {
+    editArgs.push("--body-file", "-");
+    hasEdit = true;
+  } else if (request.bodyFile) {
+    editArgs.push("--body-file", request.bodyFile);
+    hasEdit = true;
+  } else if (request.body !== undefined) {
+    editArgs.push("--body", request.body);
+    hasEdit = true;
+  }
+  for (const label of request.addLabels ?? []) {
+    editArgs.push("--add-label", label);
+    hasEdit = true;
+  }
+  for (const label of request.removeLabels ?? []) {
+    editArgs.push("--remove-label", label);
+    hasEdit = true;
+  }
+  for (const assignee of request.addAssignees ?? []) {
+    editArgs.push("--add-assignee", assignee);
+    hasEdit = true;
+  }
+  for (const assignee of request.removeAssignees ?? []) {
+    editArgs.push("--remove-assignee", assignee);
+    hasEdit = true;
+  }
+  if (request.state !== undefined && request.state !== "open" && request.state !== "closed") {
+    throw new GhError("gh_error", `invalid issue state: ${JSON.stringify(request.state)}`);
+  }
+  if (request.reason !== undefined) {
+    if (!ISSUE_CLOSE_REASONS.has(request.reason)) {
+      throw new GhError(
+        "gh_error",
+        `invalid issue close reason: ${JSON.stringify(request.reason)}`,
+      );
+    }
+    if (request.state !== "closed") {
+      throw new GhError("gh_error", "--reason is only valid when closing an issue");
+    }
+  }
+  if (hasEdit) {
+    await ghOk(repoRoot, editArgs, {
+      ...options,
+      input: request.bodyFile === "-" ? options.bodyText : undefined,
+    });
+  }
+  if (request.state === "closed") {
+    const closeArgs = ["issue", "close", String(request.number), "--repo", request.repo];
+    if (request.reason) closeArgs.push("--reason", request.reason);
+    await ghOk(repoRoot, closeArgs, options);
+  } else if (request.state === "open") {
+    await ghOk(
+      repoRoot,
+      ["issue", "reopen", String(request.number), "--repo", request.repo],
+      options,
+    );
+  }
+  const issue = await collectIssueView(
+    repoRoot,
+    { repo: request.repo, number: request.number },
+    options,
+  );
+  return { number: request.number, issue };
+}
+
+// ---------------------------------------------------------------------------
 // PR merge / auto-merge (Issue #173, ADR-0030).
 //
 // Same ADR-0008 discipline: argv-only `gh` spawn, `--input -` payloads,

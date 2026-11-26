@@ -50,6 +50,19 @@ bun run src/cli.ts pr review|comment|reply|reviewers|merge <pane_id> [args]
         [--add-reviewer LOGIN[,LOGIN]...] [--remove-reviewer LOGIN...]
     pr merge <pane> <number> [--squash|--merge|--rebase]
         [--auto | --disable-auto]
+bun run src/cli.ts issue list|view|create|edit|comment|close
+    <pane_id> [args] [--repo owner/name]
+    issue list: [--limit N] [--state open|closed|all]
+        [--label L]... [--assignee U]... [--author U]
+    issue view <pane> <number>
+    issue edit <pane> <number> [--title T] [--body B | --body-file P|-]
+        [--add-label L]... [--remove-label L]... [--add-assignee U]...
+        [--remove-assignee U]... [--state open|closed]
+    issue comment <pane> <number> --body B|--body-file PATH|-
+    issue close <pane> <number> [--reason completed|"not planned"]
+bun run src/cli.ts issue link|unlink|links <pane_id> [args]
+    issue link <pane> <owner>/<repo>#<n> [--verify]
+    issue unlink <pane> <owner>/<repo>#<n>
 bun run src/cli.ts project <pane_id>
 ```
 
@@ -85,6 +98,15 @@ immediately before writing — non-mergeable states fail with
 `merge_blocked`, and PRs whose head branch is a release train
 (`release-x-y-z`) are refused with `release_boundary` so release
 approval stays a maintainer decision (ADR-0030).
+`issue` exposes GitHub issues through the same `gh` path —
+`list`/`view`/`create`/`edit`/`comment`/`close` with the same repo
+resolution, bounded reads, and never-in-argv body discipline. Issues
+have no head sha, so there is no `--expect-head` analog: forge
+mutations are gated by the mutation target-resolution rule and always
+echo the re-fetched post-mutation state. `issue link`/`unlink`/`links`
+delegate to `rebuildup.inbox` (ADR-0013 sibling-plugin resolution,
+`inboxPluginRoot` config override) — the git plugin keeps no link state;
+staleness follows inbox-v1 rules verbatim.
 `project` additionally reports `git_branch`, `git_changes`, and
 `git_ahead_behind` pane metadata tokens.
 
@@ -99,14 +121,22 @@ Design: ADR-0006/0007/0008/0030.
   (`pr reviews|comments|checks|logs`). v0.4.0 adds forge review/comment
   mutations (`pr review|comment|reply|reviewers`) behind the mandatory
   `--expect-head` stale-head guard — explicit invocations only; the
-  plugin never approves its own release PR. v0.5.0 adds `pr merge`
+  plugin never approves its own release PR or merges release branches.
+  v0.5.0 adds `pr merge`
   (immediate merge / auto-merge enable / disable) with merge-state
   re-verification and a hard refusal on release-train head branches —
   release approval stays a maintainer decision. Merge-queue
   manipulation, GitHub stack merges, and non-GitHub forges are later
   tickets. No destructive git operations are exposed (ADR-0007);
   force push requires the explicit `--force-with-lease` flag.
+  v0.6.0 adds the GitHub issue surface (`issue list|view|create|edit|
+  comment|close` via `gh`) and pane↔issue links (`issue link|unlink|
+  links`) delegated to `rebuildup.inbox` — inbox owns the link store
+  and its staleness/retention rules; this plugin stores no link state.
 - Remote herdr hosts: run the CLI on the target host (same rule as
   `rebuildup.inbox`).
 - Optional `config.json` in the plugin config dir:
-  `{"timeoutMs": 10000, "remoteTimeoutMs": 60000, "diffMaxBytes": 262144}`.
+  `{"timeoutMs": 10000, "remoteTimeoutMs": 60000, "diffMaxBytes": 262144,
+  "inboxPluginRoot": "/path/to/plugins/inbox"}` — `inboxPluginRoot`
+  overrides sibling-plugin resolution for `issue link|unlink|links`
+  (default: `../inbox`, then `herdr plugin list --json`).

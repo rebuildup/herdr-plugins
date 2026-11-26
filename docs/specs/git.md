@@ -13,7 +13,10 @@ mutations (`pr review|comment|reply|reviewers`) behind a mandatory
 `--expect-head` stale-head guard. v0.5.0 adds `pr merge`
 (immediate merge / auto-merge enable / disable) behind the same guard
 plus merge-state re-verification and a release-train head refusal
-(ADR-0030). Non-GitHub forges and merge-queue/stack specifics are
+(ADR-0030). v0.6.0 adds the GitHub issue surface
+(`issue list|view|create|edit|comment|close` via `gh`) and pane↔issue
+links (`issue link|unlink|links`) delegated to `rebuildup.inbox`.
+Non-GitHub forges and merge-queue/stack specifics are
 later tickets. Checkpoint integration is Issue #4.
 
 ## Purpose
@@ -72,6 +75,7 @@ invoked only on user/agent request.
 | `push` | `git push [--set-upstream] [--force-with-lease] [remote] [refspec]`; plain `--force` is never exposed. |
 | `remote` | Read-only remote list; URLs are reported with embedded credentials stripped. |
 | `pr` | GitHub PR surface via host `gh`: `list` / `status` / `create` / `view` / `reviews` / `comments` / `checks` / `logs` / `review` / `comment` / `reply` / `reviewers` / `merge`. |
+| `issue` | GitHub issue surface via host `gh`: `list` / `view` / `create` / `edit` / `comment` / `close`, plus pane↔issue `link` / `unlink` / `links` delegated to `rebuildup.inbox`. |
 | `project` | Compute `status` for a pane and project pane metadata tokens. |
 
 All commands accept `--session`, `--socket`, `--timeout` (overrides
@@ -295,6 +299,64 @@ client. Repo resolution is `gh repo view` inside the pane's repo root
   manipulation, GitHub stack merges, `pr checkout`/worktree creation
   (herdr/Worktrunk lifecycle responsibility — reference only), and
   non-GitHub forges are out of scope.
+
+## Forge: GitHub issues via `gh` (Issue #174)
+
+`issue <action> <pane_id>` extends the same `gh`-CLI surface to issues:
+identical repo resolution (`gh repo view` in the pane's repo root,
+`--repo owner/name` override validated before any call), preflight
+(`gh --version` ≥ 2.81.0 + `gh auth status`), argv spawn, and sanitized
+child env. Per-action flag whitelists apply exactly like `pr`.
+
+- `issue list` — `gh issue list --json` fixed fields (number, title,
+  state, labels, assignees, author, createdAt, updatedAt, url) with
+  `--limit` (1–1000), `--state open|closed|all` (default `open`),
+  repeatable/comma-separated `--label`/`--assignee`, and `--author`.
+- `issue view <n>` — bounded projection: body ≤ 8000 chars
+  (`body_truncated`), newest 50 comments with per-comment body ≤ 4000
+  (`comments_truncated`), reactions flattened to `{content, count}`
+  (≤20), author/labels/assignees/milestone compacted to strings.
+- `issue create` — requires `--title`; `--body`/`--body-file PATH|-`
+  with the same never-in-argv discipline as `pr create`;
+  `--label`/`--assignee` repeatable. Returns `{url, number}` parsed
+  from gh's output.
+- `issue edit <n>` — requires ≥1 field flag (`--title`, `--body`/
+  `--body-file`, `--add-label`/`--remove-label`,
+  `--add-assignee`/`--remove-assignee`, `--state open|closed`). Runs
+  `gh issue edit` then `gh issue close|reopen` for state, then
+  re-fetches a bounded view — the payload echoes post-mutation state.
+- `issue comment <n>` — `POST issues/{n}/comments` via
+  `gh api --input -`; body never in argv.
+- `issue close <n>` — `gh issue close` with optional
+  `--reason completed|"not planned"`, then the same post-state echo.
+- **No `--expect-head` analog:** issues have no head sha. Mutation
+  safety is the `options.mutation` target gate (explicit/consistent
+  target required) plus explicit invocation only; `edit`/`close`
+  always echo the re-fetched post-mutation state. gh auth/permission
+  scope is delegated to `gh auth` — the plugin never handles tokens.
+- All forge mutations (`create`/`edit`/`comment`/`close`) are explicit
+  invocations only; there is no automation path. Issue tracking
+  operations never bypass PR review/merge gates.
+
+### Pane↔issue links (delegated to `rebuildup.inbox`)
+
+`issue link <pane> <owner>/<repo>#<n> [--verify]`,
+`issue unlink <pane> <owner>/<repo>#<n>`, and `issue links <pane>` are a
+thin delegating surface over the inbox plugin's public CLI
+(`herdr-plugins.inbox/v1` `link --issue`/`unlink --issue`/`links`) —
+the ADR-0013 sibling-plugin pattern (override `inboxPluginRoot` in
+`config.json` → sibling `../inbox` → `herdr plugin list --json`). The
+git plugin stores **no link state**: pane↔issue associations are
+pane-scoped work links owned by inbox (identity fingerprint +
+seq-regression staleness, retention, `pane.closed` drop), while the
+forge operations above are repo-scoped tracker mutations — the two
+responsibilities stay separate and share no state. Delegated payloads
+are re-wrapped under the git contract with `delegated:
+"rebuildup.inbox"`; inbox errors propagate via `error.kind`
+(`target_required`, `target_conflict`, `inbox_error`, …) and an
+unresolvable inbox plugin is `inbox_unavailable`, never a fabricated
+empty result. `issue link`/`unlink` are mutations gated by the
+inbox CLI's own target resolution; `issue links` is read-only.
 
 ## Metadata projection
 
