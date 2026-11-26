@@ -1605,7 +1605,7 @@ async function cmdCapability(options: CliOptions): Promise<void> {
   emit({
     contract: CONTRACT,
     plugin: PLUGIN_ID,
-    version: "0.6.0",
+    version: "0.7.0",
     commands: [
       "list",
       "settle",
@@ -1643,7 +1643,10 @@ async function cmdCapability(options: CliOptions): Promise<void> {
       "watch",
       "watch-pr",
     ],
-    actions: ["settle", "restore", "snooze", "pin", "unpin", "archive", "unarchive"],
+    actions: ["open", "settle", "restore", "snooze", "pin", "unpin", "archive", "unarchive"],
+    // Interactive TUI surface (herdr-plugins.tui/v1, #237): pane entrypoint
+    // `main` + action `open`. Additive; CLI commands unchanged.
+    tui: { contract: "herdr-plugins.tui/v1", entrypoint: "main", action: "open" },
     events: ["pane.agent_status_changed", "pane.closed"],
     startup: ["reconcile"],
     state_file: stateFilePath(),

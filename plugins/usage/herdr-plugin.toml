@@ -1,6 +1,6 @@
 id = "rebuildup.usage"
 name = "Usage"
-version = "0.5.0"
+version = "0.6.0"
 min_herdr_version = "0.9.0"
 description = "Token usage aggregation over the rebuildup.conversations normalized index: per provider/model/host/project/session/pane totals, subscription quota/reset reports, quota-vs-measured divergence, and clearly-labeled estimated API cost — all with honest missing-data reporting under herdr-plugins.usage/v1."
 platforms = ["linux", "macos", "windows"]
@@ -10,5 +10,23 @@ platforms = ["linux", "macos", "windows"]
 #
 # Read-only aggregation: all commands are CLI-invoked; the plugin keeps
 # no durable state of its own (totals are recomputed from the
-# conversations index on every call). No [[actions]] / [[events]] /
-# [[startup]] yet.
+# conversations index on every call).
+#
+# Interactive TUI (contract docs/contracts/tui-v1.md, ADR-0031/0032/0033):
+# `main` is the usage/quota/cost/divergence report browser; `open` asks
+# herdr to place it in a tab and returns promptly. The plugin has no
+# mutation commands — the TUI is read-only (source refresh is explicit).
+
+[[panes]]
+id = "main"
+title = "Usage"
+platforms = ["linux", "macos", "windows"]
+placement = "tab"
+command = ["bun", "run", "src/tui.ts", "main"]
+
+[[actions]]
+id = "open"
+title = "Usage: open UI"
+description = "Open the usage reports browser (usage, quota, cost, divergence) in a herdr tab."
+contexts = ["workspace", "pane"]
+command = ["bun", "run", "src/tui.ts", "--open"]
