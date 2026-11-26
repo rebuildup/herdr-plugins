@@ -352,3 +352,423 @@ export async function collectPrCreate(
   const match = /\/pull\/(\d+)/.exec(url);
   return { url, number: match ? Number(match[1]) : null };
 }
+
+// ---------------------------------------------------------------------------
+// PR review/read extensions (Issue #171, still read-only, ADR-0008).
+//
+// Reviews, review requests, issue/line comments come from `gh api`
+// (REST JSON). Checks come from `gh pr checks --json` — with --json the
+// exporter path always exits 0 on success regardless of check state, so
+// ghOk is correct here (pending/failed checks are data, not errors).
+// Job/run logs come from `gh run list` / `gh run view` and are returned
+// as a bounded tail. Every payload echoes head/base refs+shas so callers
+// can verify freshness before any later mutation.
+// ---------------------------------------------------------------------------
+
+/** Single-page REST fetch size; a full page means "possibly more". */
+const GH_API_PAGE = 100;
+const PR_DETAIL_ITEMS_MAX = 50;
+const PR_BODY_MAX_CHARS = 4000;
+const PR_DIFF_HUNK_MAX_CHARS = 8000;
+const PR_CHECKS_MAX = 100;
+const PR_LOG_LINES_DEFAULT = 200;
+const PR_LOG_LINES_MAX = 2000;
+const PR_LOG_BYTES_MAX = 256 * 1024;
+/** Whole-log fetch budget; the returned payload is still tail-bounded. */
+const PR_LOG_FETCH_MAX_BUFFER = 64 * 1024 * 1024;
+const PR_RUNS_MAX = 20;
+const PR_RUN_JOBS_MAX = 50;
+
+const PR_CHECKS_FIELDS = "bucket,completedAt,description,event,link,name,startedAt,state,workflow";
+
+const PR_RUN_LIST_FIELDS =
+  "databaseId,name,workflowName,status,conclusion,url,headSha,createdAt,event,displayTitle";
+
+const PR_RUN_VIEW_FIELDS =
+  "databaseId,name,workflowName,status,conclusion,url,headSha,createdAt,jobs";
+
+async function ghApiJson(
+  repoRoot: string,
+  repo: string,
+  endpoint: string,
+  options: { timeoutMs?: number } = {},
+): Promise<unknown> {
+  const out = await ghOk(repoRoot, ["api", `repos/${repo}/${endpoint}`], options);
+  return JSON.parse(out) as unknown;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+}
+
+/** Truncate long text bodies; `*_truncated` is set only when cut. */
+function boundBody(value: unknown, maxChars: number): { text: string | null; truncated: boolean } {
+  if (typeof value !== "string") return { text: null, truncated: false };
+  if (value.length <= maxChars) return { text: value, truncated: false };
+  return { text: `${value.slice(0, maxChars)}…`, truncated: true };
+}
+
+interface BoundedPage<T> {
+  items: T[];
+  /** True when entries were capped or the fetched page was full. */
+  truncated: boolean;
+}
+
+/**
+ * Keep the newest `max` entries (REST lists are chronological ascending).
+ * `truncated` is honest-conservative: a full page may hide further pages
+ * we did not fetch, so it counts as possibly truncated.
+ */
+function boundPage<T>(raw: T[], max: number): BoundedPage<T> {
+  return {
+    items: raw.slice(-max),
+    truncated: raw.length > max || raw.length >= GH_API_PAGE,
+  };
+}
+
+interface PrRefs {
+  head: { ref: string | null; sha: string | null };
+  base: { ref: string | null; sha: string | null };
+  requested_reviewers: Array<{ login: string | null }>;
+  requested_teams: Array<{ name: string | null; slug: string | null }>;
+}
+
+/** `GET pulls/{n}` — head/base freshness plus review requests. */
+async function fetchPrRefs(
+  repoRoot: string,
+  repo: string,
+  number: number,
+  options: { timeoutMs?: number } = {},
+): Promise<PrRefs> {
+  const raw = asRecord(await ghApiJson(repoRoot, repo, `pulls/${number}`, options));
+  const head = asRecord(raw.head);
+  const base = asRecord(raw.base);
+  const reviewers = Array.isArray(raw.requested_reviewers) ? raw.requested_reviewers : [];
+  const teams = Array.isArray(raw.requested_teams) ? raw.requested_teams : [];
+  return {
+    head: { ref: (head.ref as string) ?? null, sha: (head.sha as string) ?? null },
+    base: { ref: (base.ref as string) ?? null, sha: (base.sha as string) ?? null },
+    requested_reviewers: reviewers.map((u) => ({
+      login: (asRecord(u).login as string) ?? null,
+    })),
+    requested_teams: teams.map((t) => ({
+      name: (asRecord(t).name as string) ?? null,
+      slug: (asRecord(t).slug as string) ?? null,
+    })),
+  };
+}
+
+export interface PrNumberRequest {
+  repo: string;
+  number: number;
+}
+
+/**
+ * `pr reviews`: submitted reviews (state/author/body/submittedAt) plus
+ * requested reviewers/teams, bounded. Read-only.
+ */
+export async function collectPrReviews(
+  repoRoot: string,
+  request: PrNumberRequest,
+  options: { timeoutMs?: number } = {},
+): Promise<Record<string, unknown>> {
+  const refs = await fetchPrRefs(repoRoot, request.repo, request.number, options);
+  const raw = await ghApiJson(
+    repoRoot,
+    request.repo,
+    `pulls/${request.number}/reviews?per_page=${GH_API_PAGE}`,
+    options,
+  );
+  if (!Array.isArray(raw)) {
+    throw new GhError("gh_error", "unexpected gh api response for pull request reviews");
+  }
+  const reviews = raw.map((entry) => {
+    const r = asRecord(entry);
+    const body = boundBody(r.body, PR_BODY_MAX_CHARS);
+    const item: Record<string, unknown> = {
+      id: r.id ?? null,
+      author: (asRecord(r.user).login as string) ?? null,
+      state: r.state ?? null,
+      body: body.text,
+      submitted_at: r.submitted_at ?? null,
+      commit_id: r.commit_id ?? null,
+      url: r.html_url ?? null,
+    };
+    if (body.truncated) item.body_truncated = true;
+    return item;
+  });
+  const bounded = boundPage(reviews, PR_DETAIL_ITEMS_MAX);
+  return {
+    number: request.number,
+    head: refs.head,
+    base: refs.base,
+    reviews: bounded.items,
+    review_requests: {
+      users: refs.requested_reviewers.map((u) => u.login),
+      teams: refs.requested_teams.map((t) => t.name ?? t.slug),
+    },
+    reviews_truncated: bounded.truncated,
+  };
+}
+
+/**
+ * `pr comments`: PR conversation (issue comments) and line-level review
+ * comments (path/line/side/diff hunk), each bounded separately.
+ */
+export async function collectPrComments(
+  repoRoot: string,
+  request: PrNumberRequest,
+  options: { timeoutMs?: number } = {},
+): Promise<Record<string, unknown>> {
+  const refs = await fetchPrRefs(repoRoot, request.repo, request.number, options);
+  const issueRaw = await ghApiJson(
+    repoRoot,
+    request.repo,
+    `issues/${request.number}/comments?per_page=${GH_API_PAGE}`,
+    options,
+  );
+  const lineRaw = await ghApiJson(
+    repoRoot,
+    request.repo,
+    `pulls/${request.number}/comments?per_page=${GH_API_PAGE}`,
+    options,
+  );
+  if (!Array.isArray(issueRaw) || !Array.isArray(lineRaw)) {
+    throw new GhError("gh_error", "unexpected gh api response for pull request comments");
+  }
+
+  const issueComments = issueRaw.map((entry) => {
+    const c = asRecord(entry);
+    const body = boundBody(c.body, PR_BODY_MAX_CHARS);
+    const item: Record<string, unknown> = {
+      id: c.id ?? null,
+      author: (asRecord(c.user).login as string) ?? null,
+      body: body.text,
+      created_at: c.created_at ?? null,
+      updated_at: c.updated_at ?? null,
+      url: c.html_url ?? null,
+    };
+    if (body.truncated) item.body_truncated = true;
+    return item;
+  });
+  const boundedIssue = boundPage(issueComments, PR_DETAIL_ITEMS_MAX);
+
+  const lineComments = lineRaw.map((entry) => {
+    const c = asRecord(entry);
+    const body = boundBody(c.body, PR_BODY_MAX_CHARS);
+    const hunk = boundBody(c.diff_hunk, PR_DIFF_HUNK_MAX_CHARS);
+    const item: Record<string, unknown> = {
+      id: c.id ?? null,
+      author: (asRecord(c.user).login as string) ?? null,
+      path: c.path ?? null,
+      line: c.line ?? null,
+      original_line: c.original_line ?? null,
+      side: c.side ?? null,
+      in_reply_to_id: c.in_reply_to_id ?? null,
+      body: body.text,
+      diff_hunk: hunk.text,
+      created_at: c.created_at ?? null,
+      updated_at: c.updated_at ?? null,
+      url: c.html_url ?? null,
+    };
+    if (body.truncated) item.body_truncated = true;
+    if (hunk.truncated) item.diff_hunk_truncated = true;
+    return item;
+  });
+  const boundedLine = boundPage(lineComments, PR_DETAIL_ITEMS_MAX);
+
+  return {
+    number: request.number,
+    head: refs.head,
+    base: refs.base,
+    issue_comments: boundedIssue.items,
+    line_comments: boundedLine.items,
+    issue_comments_truncated: boundedIssue.truncated,
+    line_comments_truncated: boundedLine.truncated,
+  };
+}
+
+/**
+ * `pr checks`: per-check detail via `gh pr checks --json` (name, bucket,
+ * state, workflow, link, description, timings, event). gh exits 0 in
+ * JSON mode even when checks fail or are pending — those are data.
+ * A PR with no reported checks maps to an empty list, not an error.
+ */
+export async function collectPrChecks(
+  repoRoot: string,
+  request: PrNumberRequest,
+  options: { timeoutMs?: number } = {},
+): Promise<Record<string, unknown>> {
+  const refs = await fetchPrRefs(repoRoot, request.repo, request.number, options);
+  let rawText: string;
+  try {
+    rawText = await ghOk(
+      repoRoot,
+      ["pr", "checks", String(request.number), "--repo", request.repo, "--json", PR_CHECKS_FIELDS],
+      options,
+    );
+  } catch (err) {
+    if (err instanceof GhError && /no checks reported/.test(err.message)) {
+      rawText = "[]";
+    } else {
+      throw err;
+    }
+  }
+  const parsed = JSON.parse(rawText) as unknown;
+  const checks = (Array.isArray(parsed) ? parsed : []).slice(0, PR_CHECKS_MAX).map((entry) => {
+    const c = asRecord(entry);
+    return {
+      name: c.name ?? null,
+      bucket: c.bucket ?? null,
+      state: c.state ?? null,
+      workflow: c.workflow ?? null,
+      link: c.link ?? null,
+      description: c.description ?? null,
+      event: c.event ?? null,
+      started_at: c.startedAt ?? null,
+      completed_at: c.completedAt ?? null,
+    };
+  });
+  return {
+    number: request.number,
+    head: refs.head,
+    base: refs.base,
+    checks,
+    checks_truncated: Array.isArray(parsed) && parsed.length > PR_CHECKS_MAX,
+  };
+}
+
+export interface PrLogsRequest extends PrNumberRequest {
+  /** Workflow run id — list that run's jobs. */
+  runId?: string | undefined;
+  /** Actions job id — fetch that job's log tail. */
+  jobId?: string | undefined;
+  /** Tail length in lines for job logs (default 200, max 2000). */
+  lines?: number | undefined;
+}
+
+function mapGhRun(raw: unknown): Record<string, unknown> {
+  const r = asRecord(raw);
+  return {
+    id: r.databaseId ?? null,
+    name: r.name ?? null,
+    workflow: r.workflowName ?? null,
+    status: r.status ?? null,
+    conclusion: r.conclusion ?? null,
+    url: r.url ?? null,
+    head_sha: r.headSha ?? null,
+    created_at: r.createdAt ?? null,
+    event: r.event ?? null,
+    display_title: r.displayTitle ?? null,
+  };
+}
+
+function mapGhJob(raw: unknown): Record<string, unknown> {
+  const j = asRecord(raw);
+  return {
+    id: j.databaseId ?? null,
+    name: j.name ?? null,
+    status: j.status ?? null,
+    conclusion: j.conclusion ?? null,
+    url: j.url ?? null,
+    started_at: j.startedAt ?? null,
+    completed_at: j.completedAt ?? null,
+  };
+}
+
+/**
+ * `pr logs`: workflow runs for the PR head (default), a run's job list
+ * (`runId`), or a job's bounded log tail (`jobId`). All modes echo
+ * head/base freshness. Read-only.
+ */
+export async function collectPrLogs(
+  repoRoot: string,
+  request: PrLogsRequest,
+  options: { timeoutMs?: number } = {},
+): Promise<Record<string, unknown>> {
+  const refs = await fetchPrRefs(repoRoot, request.repo, request.number, options);
+  const base = { number: request.number, head: refs.head, base: refs.base };
+
+  if (request.jobId) {
+    const headSha = refs.head.sha;
+    if (!headSha) {
+      throw new GhError("gh_error", "pull request head sha unavailable for log lookup");
+    }
+    const log = await ghOk(
+      repoRoot,
+      ["run", "view", "--job", request.jobId, "--repo", request.repo, "--log"],
+      { ...options, maxBuffer: PR_LOG_FETCH_MAX_BUFFER },
+    );
+    const lines = Math.min(Math.max(request.lines ?? PR_LOG_LINES_DEFAULT, 1), PR_LOG_LINES_MAX);
+    const allLines = log.replace(/\r\n/g, "\n").split("\n");
+    const tailLines = allLines.slice(-lines);
+    let text = tailLines.join("\n");
+    let truncated = allLines.length > tailLines.length;
+    const byteLength = Buffer.byteLength(text, "utf8");
+    if (byteLength > PR_LOG_BYTES_MAX) {
+      text = Buffer.from(text, "utf8")
+        .subarray(Buffer.byteLength(text, "utf8") - PR_LOG_BYTES_MAX)
+        .toString("utf8");
+      truncated = true;
+    }
+    return {
+      ...base,
+      mode: "job",
+      job_id: request.jobId,
+      head_sha: headSha,
+      log: text,
+      lines_returned: tailLines.length,
+      total_lines: allLines.length,
+      bytes: Buffer.byteLength(text, "utf8"),
+      truncated,
+    };
+  }
+
+  if (request.runId) {
+    const out = await ghOk(
+      repoRoot,
+      ["run", "view", request.runId, "--repo", request.repo, "--json", PR_RUN_VIEW_FIELDS],
+      options,
+    );
+    const parsed = asRecord(JSON.parse(out) as unknown);
+    const jobsRaw = Array.isArray(parsed.jobs) ? parsed.jobs : [];
+    const bounded = jobsRaw.slice(0, PR_RUN_JOBS_MAX);
+    return {
+      ...base,
+      mode: "run",
+      run: mapGhRun(parsed),
+      jobs: bounded.map(mapGhJob),
+      jobs_truncated: jobsRaw.length > PR_RUN_JOBS_MAX,
+    };
+  }
+
+  const headSha = refs.head.sha;
+  if (!headSha) {
+    throw new GhError("gh_error", "pull request head sha unavailable for run lookup");
+  }
+  const out = await ghOk(
+    repoRoot,
+    [
+      "run",
+      "list",
+      "--repo",
+      request.repo,
+      "--commit",
+      headSha,
+      "--limit",
+      String(PR_RUNS_MAX),
+      "--json",
+      PR_RUN_LIST_FIELDS,
+    ],
+    options,
+  );
+  const parsed = JSON.parse(out) as unknown;
+  const runs = Array.isArray(parsed) ? parsed.slice(0, PR_RUNS_MAX) : [];
+  return {
+    ...base,
+    mode: "runs",
+    head_sha: headSha,
+    runs: runs.map(mapGhRun),
+    runs_truncated: Array.isArray(parsed) && parsed.length > PR_RUNS_MAX,
+  };
+}

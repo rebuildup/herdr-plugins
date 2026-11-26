@@ -7,7 +7,9 @@ and merge-base branch comparison (`compare`). Local mutation commands
 (`stage`, `unstage`, `commit`, `branch`, `upstream`), remote
 operations (`fetch`, `push`, `remote` list), and the GitHub PR surface
 (`pr list|status|create|view` via the host `gh` CLI) landed in v0.2.0.
-Merge/review/CI-log and non-GitHub forges are later tickets. Checkpoint
+v0.3.0 extends the PR surface with read-only review/check/log access
+(`pr reviews|comments|checks|logs`). Review submission, comment
+posting, merge, and non-GitHub forges are later tickets. Checkpoint
 integration is Issue #4.
 
 ## Purpose
@@ -50,7 +52,7 @@ only runs read-only `git` commands and projects display metadata.
 | `fetch` | `git fetch [remote] [--prune]`; longer `remoteTimeoutMs` budget. |
 | `push` | `git push [--set-upstream] [--force-with-lease] [remote] [refspec]`; plain `--force` is never exposed. |
 | `remote` | Read-only remote list; URLs are reported with embedded credentials stripped. |
-| `pr` | GitHub PR surface via host `gh`: `list` / `status` / `create` / `view`. |
+| `pr` | GitHub PR surface via host `gh`: `list` / `status` / `create` / `view` / `reviews` / `comments` / `checks` / `logs`. |
 | `project` | Compute `status` for a pane and project pane metadata tokens. |
 
 All commands accept `--session`, `--socket`, `--timeout` (overrides
@@ -199,11 +201,30 @@ client. Repo resolution is `gh repo view` inside the pane's repo root
   `--draft`/`--base`/`--head` pass through. The branch must already be
   pushed; gh's interactive push/prompt flow is never driven
   (`GH_PROMPT_DISABLED=1`, stdin closed immediately).
+- `pr reviews <n>` — submitted reviews (state/author/body ≤4000 chars/
+  submitted_at/commit_id) newest-50 capped, plus `review_requests`
+  (requested reviewer logins, team names) from `GET pulls/{n}` and
+  `GET pulls/{n}/reviews`.
+- `pr comments <n>` — issue comments (`issues/{n}/comments`) and line
+  review comments (`pulls/{n}/comments`: path/line/side/`in_reply_to_id`/
+  bounded `diff_hunk`), each newest-50 capped with independent
+  `*_truncated` flags.
+- `pr checks <n>` — `gh pr checks --json` per-check detail (name,
+  bucket/state, workflow, link, description, event, timings), capped at
+  100. Pending/failed checks are data; "no checks reported" maps to an
+  empty list.
+- `pr logs <n>` — Actions reads: default lists workflow runs for the
+  PR head sha (`gh run list --commit`, ≤20); `--run ID` lists that
+  run's jobs (≤50); `--job ID [--lines N]` returns a bounded log tail
+  (default 200 lines / 2000 max / 256 KiB hard cap) with `truncated`.
 - All `gh` calls are argv spawn under `remoteTimeoutMs` (default 60s);
   error messages echo subcommand words only, never argv content.
+- Every review/check/log payload echoes `head`/`base` `{ref, sha}` (and
+  `head_sha` for logs) so mutation tickets can verify freshness.
 - The plugin exposes PR state but never acts on merge/review gates;
-  merge, reviews, line comments, CI logs, and non-GitHub forges are
-  out of scope for v0.2.0.
+  review submission, comment posting, merge, `pr checkout`/worktree
+  creation (herdr/Worktrunk lifecycle responsibility — reference only),
+  and non-GitHub forges are out of scope.
 
 ## Metadata projection
 
@@ -235,12 +256,12 @@ Unknown keys are ignored; invalid values fall back to defaults.
 ## Non-goals
 
 - No daemon, no hooks that write plugin state, no polling.
-- No PR merge/review/CI-log operations and no non-GitHub forge
-  integrations (the `gh`-CLI PR foundation covers list/status/create/
-  view only; upstream `source-control.md`'s wider surface — review
-  comments, reviewers, auto-merge, GitLab/Forgejo/Gitea/Bitbucket/
-  Azure DevOps/GitCafe/Cursor Origin — is tracked in the feature
-  ledger for later trains).
+- No PR merge/review/comment-posting operations and no non-GitHub forge
+  integrations (the `gh`-CLI PR surface covers list/status/create/view
+  plus read-only reviews/comments/checks/logs; upstream
+  `source-control.md`'s wider surface — review submission, reviewers,
+  auto-merge, GitLab/Forgejo/Gitea/Bitbucket/Azure DevOps/GitCafe/
+  Cursor Origin — is tracked in the feature ledger for later trains).
 - No destructive git operations (see Local mutations).
 - No parsing of GitHub remotes beyond what `gh`/git provide, no provider
   integrations.

@@ -33,9 +33,13 @@ An external client resolves the CLI as follows:
 {
   "contract": "herdr-plugins.inbox/v1",
   "plugin": "rebuildup.inbox",
-  "version": "0.1.0",
-  "commands": ["list", "settle", "snooze", "restore", "reconcile", "watch", "capability"],
-  "actions": ["settle", "restore", "snooze"],
+  "version": "0.2.0",
+  "commands": [
+    "list", "settle", "snooze", "restore",
+    "pin", "unpin", "archive", "unarchive", "order",
+    "reconcile", "watch", "capability"
+  ],
+  "actions": ["settle", "restore", "snooze", "pin", "unpin", "archive", "unarchive"],
   "events": ["pane.agent_status_changed", "pane.closed"],
   "startup": ["reconcile"],
   "state_file": "…",
@@ -81,7 +85,12 @@ not globally unique.
 | `list` | — | Inbox snapshot (below). |
 | `settle` | `pane_id?` | Hide pane until generation change. |
 | `snooze` | `pane_id? --until <spec>` | Hide pane until deadline; early wake on generation change. |
-| `restore` | `pane_id?` | Clear organize state. |
+| `restore` | `pane_id?` | Clear all organize state (marks, pin, order). |
+| `pin` | `pane_id?` | Mark pane pinned: sorts at the top of the inbox. Never hides. |
+| `unpin` | `pane_id?` | Clear the pin mark. |
+| `archive` | `pane_id?` | Hide pane as archived until generation change/attention/`unarchive`. Never touches the agent or pane. |
+| `unarchive` | `pane_id?` | Clear the archive mark; other organize state is kept. |
+| `order` | `pane_id? --first\|--last\|--before <pane>\|--after <pane>` | Set manual order rank within the pane's display group. |
 | `reconcile` | — | Resolve expirations/generation changes, prune stale entries, repair metadata. |
 | `watch` | `--interval SEC` | JSONL event stream + periodic reconcile (below). |
 | `capability` | — | Discovery document (above). |
@@ -92,6 +101,12 @@ Global flags (after the command): `--session NAME`, `--socket PATH`,
 `--until` accepts ISO 8601, `+30m`/`+2h`/`+1d`, or bare `30m`. Without
 `--until`, `snooze` reads `defaultSnooze` from the plugin config dir's
 `config.json` (used by the manifest `snooze` action, which takes no args).
+
+`order` requires exactly one placement flag. Ordering is scoped to the
+moved pane's display group — items sharing its `attention` and `pinned`
+flags — because `list` sorts by those flags before `order`. The reference
+pane of `--before`/`--after` must be a visible inbox item in the same
+group; hidden panes cannot be ordered (restore/unarchive first).
 
 ## Output contract
 
@@ -113,26 +128,44 @@ Global flags (after the command): `--session NAME`, `--socket PATH`,
   "generated_at": "2026-01-10T12:00:00.000Z",
   "session": { "name": "default", "socket": null },
   "state_file": "/abs/path/state.json",
-  "counts": { "total": 0, "inbox": 0, "attention": 0, "organized": 0 },
+  "counts": { "total": 0, "inbox": 0, "attention": 0, "organized": 0, "pinned": 0, "archived": 0 },
   "items": [ { "pane_id": "…", "…": "…" } ]
 }
 ```
 
 `session.name`/`session.socket` echo the resolved target (explicit flag or
-env); they are `null` when the default socket was used implicitly. Item
-fields and `organize`/`attention`/`in_inbox` semantics are unchanged from
-v1 draft: `organize.kind` is `settled`|`snoozed` (`until` on snoozed),
-`attention` (`blocked`) forces `in_inbox: true`, and items for panes absent
+env); they are `null` when the default socket was used implicitly.
+
+`counts` fields (all additive within v1): `total` items reported,
+`inbox` items with `in_inbox: true`, `attention` items flagged
+`attention: true`, `organized` items carrying any hide-kind
+(`settled`/`snoozed`/`archived`), `pinned` items with a live pin,
+`archived` items whose `organize.kind` is `archived`.
+
+Item fields: `organize` is `{kind, since, until?}` where `kind` is
+`settled` | `snoozed` | `archived` (`until` on snoozed only); `pinned` is
+a boolean; `order` is a number rank or absent. `attention` (`blocked`)
+forces `in_inbox: true` regardless of marks, and items for panes absent
 from the snapshot carry only identity/organize fields with
 `in_inbox: false`.
 
+`items` sort order: `pinned` first, then `attention`, then `order`
+ascending (items without `order` sort after ordered ones), then `pane_id`.
+`order` is a layout hint only — it never hides an item and is not
+generation-guarded; it is cleared by `restore`, `pane.closed`, and
+retention pruning like every other organize field.
+
 ## Organize/mutate output
 
-`settle`/`snooze`/`restore` emit `{contract, command, pane_id,
-agent_status, state_change_seq, organize, warnings}`; `organize` is `null`
-after `restore`. `warnings` lists non-fatal issues (e.g. metadata
-projection failure) — the state mutation itself already succeeded; a later
-`reconcile`/`watch` repairs projections.
+`settle`/`snooze`/`restore`/`pin`/`unpin`/`archive`/`unarchive` emit
+`{contract, command, pane_id, agent_status, state_change_seq, organize,
+pinned, order, warnings}`; `organize` is `null` when no hide-kind mark
+survives (`archived` is a hide-kind and appears here), `pinned`/`order`
+echo the pane's surviving pin mark and order rank. `order` emits
+`{contract, command, pane_id, order, placement, warnings}` where
+`placement` echoes the requested placement. `warnings` lists non-fatal
+issues (e.g. metadata projection failure) — the state mutation itself
+already succeeded; a later `reconcile`/`watch` repairs projections.
 
 ## `reconcile` output
 
@@ -152,9 +185,9 @@ projection failure) — the state mutation itself already succeeded; a later
 - `pruned`: state entries dropped because their pane has been absent from
   the snapshot beyond the retention window (24h) or the entry cap (500).
 - `projected`: panes whose metadata tokens were (re)written this pass —
-  organized panes get `inbox_state`/`inbox_snoozed_until`, cleared panes get
-  tokens cleared. Re-running `reconcile` is the repair path for any
-  partial projection failure.
+  organized panes get `inbox_state`/`inbox_snoozed_until`/`inbox_pinned`,
+  cleared panes get tokens cleared. Re-running `reconcile` is the repair
+  path for any partial projection failure.
 
 ## `watch` output and stop conditions
 
@@ -192,5 +225,7 @@ remain the repair paths for any missed wake.
 ## Versioning
 
 `contract` is semver-ish `herdr-plugins.inbox/vN`. Additive optional fields
-may appear within v1; breaking changes bump the version and clients must
-feature-detect via `capability`/`contract`.
+and new command names may appear within v1 — including new `organize.kind`
+values (`archived` was added this way; consumers must tolerate unknown
+kinds). Breaking changes bump the version and clients must feature-detect
+via `capability`/`contract`.
