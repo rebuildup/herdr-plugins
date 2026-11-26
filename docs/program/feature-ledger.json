@@ -162,10 +162,10 @@
         "packages/source-control-github/"
       ],
       "classification": "plugin",
-      "issues": [25, 39],
+      "issues": [25, 39, 171],
       "depends_on": ["#35", "#36"],
       "acceptance": "gh 検出 (>=2.81.0 相当)・pr list/status/create/view を argv spawn + --json で提供。repo は pane cwd の git remote から解決。merge/review/CI ログは scope 外 (read-only 契約)。",
-      "verification": "実装済み (Issue #39 → PR #46, release-0-2-0 merge 62309b9)。契約は git/v1 additive 拡張と決定 (ADR-0008)。merge/review/CI ログは scope 外、残差は forge-non-github と #25 open 分。"
+      "verification": "実装済み (Issue #39 → PR #46, release-0-2-0 merge 62309b9)。契約は git/v1 additive 拡張と決定 (ADR-0008)。#171 (release-0-9-0) で read-only 拡張 pr reviews/comments/checks/logs を追加 (git plugin v0.3.0、submitted reviews・review requests・issue/line comments・per-check detail・workflow run/job/log tail、head/base 鮮度 echo)。mutation (review 送信・comment 投稿・merge) は #172 以降、残差は forge-non-github と #25 open 分。実機検証: docs/research/git-pr-read-verification.md (隔離 session verify171 + fake-gh 契約テスト)。"
     },
     {
       "id": "forge-non-github",
