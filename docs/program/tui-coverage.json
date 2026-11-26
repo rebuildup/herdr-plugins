@@ -11,6 +11,29 @@
     ],
     "contract": "docs/contracts/tui-v1.md"
   },
+  "foundation": {
+    "ticket": "#236",
+    "package": "packages/tui",
+    "status": "implemented",
+    "adr": "docs/adr/0032-tui-library-selection.md",
+    "contract": "docs/contracts/tui-v1.md",
+    "provides": [
+      "raw-mode UTF-8-safe key parsing with bracketed paste (src/input.ts)",
+      "diff renderer: alternate screen, cursor addressing, synchronized output, NO_COLOR/TERM=dumb/ASCII degradation, Unicode-width truncation (src/screen.ts, src/unicode.ts, src/ansi.ts)",
+      "shared components: SelectList, DetailView, TextInput/PromptView, ConfirmView, HelpView (src/components.ts)",
+      "TaskRunner with progress/cancel/timeout/partial (src/task.ts)",
+      "TuiApp screen-stack shell with reserved keys and confirm/prompt/select/task APIs (src/app.ts)",
+      "safety helpers: untrusted-text sanitization (CSI/OSC/DCS + bidi marks), bounded buffers, throttle, spawn-without-shell (src/safety.ts)",
+      "terminal capability detection (src/terminal.ts)"
+    ],
+    "verification": {
+      "unit_tests": "tests/tui-input.test.ts, tests/tui-unicode.test.ts, tests/tui-safety.test.ts, tests/tui-screen.test.ts, tests/tui-components.test.ts, tests/tui-task.test.ts",
+      "pty_smoke": "packages/tui/examples/demo.ts under script(1) PTY: launch, key input, alt-screen enter/exit, clean exit verified",
+      "resize": "covered by unit tests (Renderer resize forces full redraw); live PTY resize not exercised in smoke",
+      "install_mode_reachability": "deferred to #237 pilot per ADR-0032; `../packages/tui` relative import verified only for repo-checkout `bun run`"
+    },
+    "deviations_from_adr_0032": []
+  },
   "status_legend": {
     "cli": "implemented = CLI command exists and is contract-covered",
     "tui_action": "none = no manifest [[actions]] entry today; 'declared:<id>' = exists",
