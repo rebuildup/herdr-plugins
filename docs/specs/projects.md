@@ -176,16 +176,18 @@ CLI invocations — no manifest actions.
 - `ScriptRun.trigger` records `{kind:"manual"|"worktree.created",
   worktree_path?, event_received_at?}` (additive; manual runs get
   `kind:"manual"`).
-- `runOnSettle`/`stopOnSettle` remain unimplemented — settle is
-  plugin-owned organize state, not a herdr event (#181 design / #182
-  implementation).
+- `runOnSettle`/`stopOnSettle` design is settled by ADR-0029 (#181):
+  inbox-v1 gains an additive per-session organize-transition log +
+  `transitions` read command; projects lazy-drains it via the
+  ADR-0013 public-CLI pattern and fires/stops through the unchanged
+  ADR-0010 runner. Implementation: #182.
 
 ## Non-goals
 
 - No worktree/workspace creation for projects themselves — herdr/
   Worktrunk own lifecycle (script runs do create dedicated execution
   workspaces per ADR-0010).
-- No `runOnSettle`/`stopOnSettle` triggers — no faithful event source
-  yet (#181/#182). `runOnWorktreeCreate` ships via the `worktree.created`
-  hook + lazy drain (#180).
+- `runOnSettle`/`stopOnSettle` ship via the inbox organize-transition
+  surface + lazy drain per ADR-0029 (#182); `runOnWorktreeCreate`
+  shipped via the `worktree.created` hook + lazy drain (#180).
 - No per-session namespacing of the registry.
