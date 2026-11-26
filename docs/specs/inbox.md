@@ -141,3 +141,6 @@ with no `--until` uses `defaultSnooze` from the plugin `config.json`.
 - Multi-session namespacing beyond socket selection.
 - `pane.output_matched`-driven attention inference.
 - Checkpoint/handoff features (separate plugins/issues).
+- Work groups / side-chat semantics: mapped onto herdr workspace/tab +
+  `handoff-v1` lineage in ADR-0029; no `group` field is added to
+  organize state, and side-chat presentation is herdr-t3 scope (#7).
