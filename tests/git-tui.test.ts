@@ -393,6 +393,8 @@ describe("resolvePinnedTarget / assertTargetFresh", () => {
   test("assertTargetFresh throws when unborn HEAD gets first commit", async () => {
     const dir = realpathSync(tempDir());
     git(dir, ["init", "-b", "main"]);
+    git(dir, ["config", "user.email", "test@example.com"]);
+    git(dir, ["config", "user.name", "Test"]);
     const target = await resolvePinnedTarget({ paneId: null, cwd: dir, workspaceId: null });
     writeFileSync(path.join(dir, "a.txt"), "one\n");
     git(dir, ["add", "a.txt"]);
