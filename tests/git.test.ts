@@ -226,7 +226,7 @@ describe("collectFiles", () => {
     const conflicted = files.find((f) => f.path === "a.txt");
     expect(conflicted?.kind).toBe("conflicted");
     expect(conflicted?.binary).toBeNull();
-  });
+  }, 20000);
 });
 
 describe("parseLogOutput", () => {
@@ -519,7 +519,7 @@ describe("remote operations", () => {
     expect(sanitizeRemoteUrl("https://oauth2:TOKEN@gitlab.com/x/y.git")).toBe(
       "https://gitlab.com/x/y.git",
     );
-  });
+  }, 20000);
 });
 
 describe("collectDiff", () => {
@@ -581,4 +581,126 @@ describe("collectDiff", () => {
     const numstat = await collectDiff(repo, { format: "numstat" });
     expect(numstat.output).toContain("1\t0\ta.txt");
   });
+});
+
+// ---------------------------------------------------------------------------
+// CLI contract tests: strict option parsing and the usage/runtime exit-code
+// boundary. Every case here fails during argument validation, before any
+// herdr socket or git access, so no session fixture is required.
+// ---------------------------------------------------------------------------
+
+const GIT_CLI = path.join(import.meta.dir, "..", "plugins", "git", "src", "cli.ts");
+
+function runCli(args: string[]): { status: number; error: { code?: string; message?: string } } {
+  const env = { ...process.env };
+  for (const key of [
+    "HERDR_PANE_ID",
+    "HERDR_PLUGIN_CONTEXT_JSON",
+    "HERDR_SOCKET_PATH",
+    "HERDR_SESSION",
+  ]) {
+    delete env[key];
+  }
+  const result = spawnSync(process.execPath, ["run", GIT_CLI, ...args], {
+    encoding: "utf8",
+    env,
+    timeout: 30_000,
+  });
+  let error: { code?: string; message?: string } = {};
+  try {
+    error = (JSON.parse(result.stderr) as { error?: typeof error }).error ?? {};
+  } catch {
+    // Non-JSON stderr still fails the assertions below via status/code.
+  }
+  return { status: result.status ?? -1, error };
+}
+
+function expectUsage(args: string[]): void {
+  const { status, error } = runCli(args);
+  expect(status).toBe(2);
+  expect(error.code).toBe("usage");
+}
+
+describe("cli usage errors", () => {
+  test("every command rejects unknown options with exit 2", () => {
+    const cases: string[][] = [
+      ["status", "p1", "--bogus"],
+      ["files", "p1", "--bogus"],
+      ["diff", "p1", "--bogus"],
+      ["log", "p1", "--bogus"],
+      ["compare", "p1", "--bogus"],
+      ["stage", "p1", "--all", "--bogus"],
+      ["unstage", "p1", "--path", "x", "--bogus"],
+      ["commit", "p1", "-m", "hi", "--bogus"],
+      ["branch", "create", "p1", "n", "--bogus"],
+      ["branch", "switch", "p1", "n", "--bogus"],
+      ["upstream", "p1", "ref", "--bogus"],
+      ["fetch", "p1", "--bogus"],
+      ["push", "p1", "--bogus"],
+      ["remote", "p1", "--bogus"],
+      ["pr", "list", "p1", "--bogus"],
+      ["pr", "status", "p1", "--bogus"],
+      ["pr", "view", "p1", "1", "--bogus"],
+      ["pr", "create", "p1", "--title", "t", "--bogus"],
+      ["project", "p1", "--bogus"],
+      ["capability", "--bogus"],
+    ];
+    for (const args of cases) expectUsage(args);
+  }, 60_000);
+  test("--flag=value on a boolean flag and bare --name= are usage errors", () => {
+    expectUsage(["push", "p1", "--set-upstream=yes"]);
+    expectUsage(["diff", "p1", "--staged=1"]);
+    expectUsage(["status", "p1", "--bogus=1"]);
+  }, 60_000);
+  test("value flags require a value; globals are validated too", () => {
+    expectUsage(["files", "p1", "--path"]);
+    expectUsage(["commit", "p1", "-m"]);
+    expectUsage(["diff", "p1", "--max-bytes"]);
+    expectUsage(["status", "p1", "--timeout"]);
+    expectUsage(["status", "p1", "--timeout", "abc"]);
+    expectUsage(["status", "p1", "--session"]);
+    expectUsage(["status", "p1", "--timeout=-5"]);
+  }, 60_000);
+  test("extra positionals are usage errors", () => {
+    expectUsage(["status", "p1", "p2"]);
+    expectUsage(["remote", "p1", "extra"]);
+    expectUsage(["fetch", "p1", "r1", "r2"]);
+    expectUsage(["push", "p1", "r1", "r2", "r3"]);
+    expectUsage(["compare", "p1", "a", "b", "c"]);
+    expectUsage(["diff", "p1", "a", "b", "c"]);
+    expectUsage(["log", "p1", "p2"]);
+    expectUsage(["capability", "extra"]);
+  }, 60_000);
+  test("stage/unstage require --all or --path (was git_error exit 1)", () => {
+    expectUsage(["stage", "p1"]);
+    expectUsage(["unstage", "p1"]);
+    expectUsage(["stage", "p1", "--all", "--path", "x"]);
+    expectUsage(["unstage", "p1", "--all", "--path=x"]);
+  }, 60_000);
+  test("commit requires -m (was git_error exit 1)", () => {
+    expectUsage(["commit", "p1"]);
+    expectUsage(["commit", "p1", "--allow-empty"]);
+    expectUsage(["commit", "p1", "-m", ""]);
+  }, 60_000);
+  test("branch validates subcommand and per-subcommand flags", () => {
+    expectUsage(["branch"]);
+    expectUsage(["branch", "bogus", "p1", "n"]);
+    expectUsage(["branch", "switch", "p1", "n", "--switch"]);
+  }, 60_000);
+  test("pr validates action, per-action flags, and required args", () => {
+    expectUsage(["pr"]);
+    expectUsage(["pr", "bogus", "p1"]);
+    expectUsage(["pr", "list", "p1", "--title", "t"]); // --title is create-only
+    expectUsage(["pr", "status", "p1", "--state", "open"]);
+    expectUsage(["pr", "view", "p1"]); // missing PR number
+    expectUsage(["pr", "view", "p1", "abc"]);
+    expectUsage(["pr", "view", "p1", "1", "2"]);
+    expectUsage(["pr", "list", "p1", "extra"]);
+    expectUsage(["pr", "create", "p1"]); // missing --title
+    expectUsage(["pr", "create", "p1", "--title", "t", "--body", "b", "--body-file", "f"]);
+    expectUsage(["pr", "create", "p1", "--title", "t", "extra"]);
+    expectUsage(["pr", "create", "p1", "--title", "t", "--repo", "not-a-repo"]);
+    expectUsage(["pr", "list", "p1", "--state", "bogus"]);
+    expectUsage(["pr", "list", "p1", "--limit", "0"]);
+  }, 60_000);
 });

@@ -48,15 +48,57 @@ bun run src/cli.ts capability
   supplies it.
 - Requires `git` on `PATH` and `bun` (plugin runtime prerequisite).
 - All commands print exactly one JSON document on stdout. Handled errors
-  print `{contract, ok:false, error:{code,message}}` on **stderr** and exit
-  1; usage errors exit 2.
+  print `{contract, ok:false, error:{code,message}}` on **stderr**.
+- **Exit codes:** `0` success; `1` handled runtime/environment failure
+  (`error.code`/`kind` carries `git_error`, `git_missing`, `timeout`,
+  `not_a_repo`, `bare_repo`, `pane_not_found`, `no_pane_cwd`,
+  `gh_missing`, `gh_error`, `target_conflict`, `target_required`,
+  `ambient_identity_mismatch`, or `error` for transport/unexpected
+  failures); `2` usage error (`error.code == "usage"` or
+  `invalid_session`).
+- **Strict option parsing:** every `-`-prefixed token must be a flag the
+  command documents — unknown options are usage errors, never silently
+  ignored. `pr` flags are whitelisted per action (`--state` on
+  `pr create`, `--title` on `pr list`, etc. are usage errors). Boolean
+  flags reject `=value`; value flags accept both `--name value` and
+  `--name=value` (the `=` form is required for values that themselves
+  start with `-`, e.g. `--grep=--foo`). A `--` separator ends option
+  parsing; tokens after it are positional. Extra positionals beyond the
+  documented arity are usage errors. Global flags (`--session`,
+  `--socket`, `--timeout`) accept the same `=` form and are validated
+  (`--timeout` must be a positive number).
 
 ## Target selection
 
-Same resolution order as inbox: `--socket` → `HERDR_SOCKET_PATH` →
-`--session`/`HERDR_SESSION` → default session socket. Remote hosts follow
-the inbox rule: run the CLI **on the herdr host**; socket forwarding is not
-a supported path.
+Same rules as inbox (see `docs/contracts/inbox-v1.md` → Target
+selection): explicit `--socket`/`--session` beat ambient
+`HERDR_SOCKET_PATH`/`HERDR_SESSION`; contradictions fail closed with
+`target_conflict`. Mutating commands (`stage`, `unstage`, `commit`,
+`branch create|switch`, `upstream`, `fetch`, `push`, `pr create`,
+`project`) require an explicit or ambient target — the implicit default
+socket is rejected with `target_required`. Ambient pane ids
+(`HERDR_PANE_ID`/plugin context) are verified against the resolved
+session's snapshot (`ambient_identity_mismatch` on workspace/tab
+disagreement). Remote hosts follow the inbox rule: run the CLI **on the
+herdr host**; socket forwarding is not a supported path.
+
+## Git/gh child environment
+
+Every `git` and `gh` child process runs with a sanitized environment
+(`plugins/git/src/git-env.ts`): ambient `GIT_*` variables that could
+retarget the repository, index, object store, discovery, or config
+(`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_CONFIG_COUNT`/
+`GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*`/`GIT_CONFIG_PARAMETERS`,
+`GIT_EXEC_PATH`, `GIT_EXTERNAL_DIFF`, pathspec-magic vars, etc.) are
+stripped so the pane cwd's repository is always the target — issue #96.
+`gh` additionally strips `GH_REPO`, `GH_DEBUG`, `GH_FORCE_TTY`, and
+`GH_PAGER`. Preserved intentionally: user-level config selection
+(`GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`/`GIT_CONFIG_NOSYSTEM`), commit
+identity (`GIT_AUTHOR_*`/`GIT_COMMITTER_*`), auth/transport
+(`GIT_SSH*`/`GIT_ASKPASS`/`GIT_SSL_*`/proxy vars), and all `GH_*` auth
+(`GH_TOKEN`, `GH_HOST`, `GH_ENTERPRISE_TOKEN`, …). The plugin's own pins
+(`GIT_TERMINAL_PROMPT=0`, `GIT_OPTIONAL_LOCKS=0`, `LC_ALL=C`,
+`GH_PROMPT_DISABLED=1`) are applied after stripping.
 
 ## `status`
 
@@ -256,9 +298,10 @@ pane's repository on the herdr host. Success payloads share the shape
 
 Rules:
 
-- `stage`/`unstage` require `--all` or ≥1 `--path`; other combinations
-  are usage errors.
-- `commit` requires ≥1 `-m`; `--allow-empty` is explicit-only. Identity
+- `stage`/`unstage` require `--all` or ≥1 `--path`; bare invocation and
+  the `--all` + `--path` combination are usage errors (exit 2).
+- `commit` requires ≥1 non-empty `-m`; `--allow-empty` is explicit-only.
+  Missing `-m` is a usage error (exit 2), not a git failure. Identity
   comes from git config, never fabricated.
 - Branch/upstream/remote/refspec values and pathspecs are argv elements;
   empty or `-`-prefixed values are rejected (usage error, exit 2).

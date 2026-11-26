@@ -36,7 +36,7 @@
     },
     "plugins/projects": {
       "name": "@herdr-plugins/projects",
-      "version": "0.1.0",
+      "version": "0.3.0",
     },
     "plugins/usage": {
       "name": "@herdr-plugins/usage",

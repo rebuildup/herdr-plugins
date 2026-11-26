@@ -6,13 +6,14 @@ import path from "node:path";
 import { HerdrRpcError } from "../packages/herdr-client/src/index";
 import {
   buildCommandLine,
+  detectShellFamily,
   isPaneGoneError,
   isWaitTimeoutError,
   listRuns,
+  markerLine,
   parseMarkerExitCode,
   runLog,
   runMarkerRegex,
-  runMarkerToken,
   type ScriptTransport,
   scriptTokenName,
   startRun,
@@ -85,16 +86,22 @@ interface FakePane {
   workspace_id: string;
   tab_id: string;
   alive: boolean;
-  /** Line injected via send_input. */
+  /** Lines injected via send_input (one entry per Enter-terminated line). */
+  inputs: string[];
+  /** Last injected line (kept for older assertions). */
   input: string | null;
-  /** Simulated script stdout before the marker. */
+  /** Simulated pane text: echoed inputs + script output + marker. */
   output: string;
   behavior: PaneBehavior;
   closed: boolean;
   keys: string[][];
+  /** Foreground process table reported by pane.process_info. */
+  foreground: { pid: number; name: string }[];
 }
 
-const TOKEN_RE = /__HERDR_DONE_(\S+?)__=\$\?/;
+/** Echoed input lines carry the rc EXPRESSION (`$?`, `%ERRORLEVEL%`,
+ * `$(...)`), never bare digits — this mirrors the real marker regex. */
+const RUN_ID_FROM_MARKER_RE = /__HERDR_DONE_(.+?)__/;
 
 class FakeTransport implements ScriptTransport {
   panes = new Map<string, FakePane>();
@@ -105,6 +112,12 @@ class FakeTransport implements ScriptTransport {
   scriptOutput = "script output line\n";
   metadata: Array<{ pane_id: string; tokens: Record<string, string | null> }> = [];
   waitCalls = 0;
+  getCalls = 0;
+  readCalls = 0;
+  /** When set, pane.close rejects with this error (pane stays alive). */
+  closeError: Error | null = null;
+  /** Foreground processes reported for subsequently created panes. */
+  foreground: { pid: number; name: string }[] = [];
 
   private newPane(): FakePane {
     this.nextPane += 1;
@@ -113,11 +126,13 @@ class FakeTransport implements ScriptTransport {
       workspace_id: `ws-${this.nextPane}`,
       tab_id: `tab-${this.nextPane}`,
       alive: true,
+      inputs: [],
       input: null,
       output: "",
       behavior: this.behavior,
       closed: false,
       keys: [],
+      foreground: [...this.foreground],
     };
     this.panes.set(pane.pane_id, pane);
     return pane;
@@ -136,24 +151,31 @@ class FakeTransport implements ScriptTransport {
   async paneSendInput(paneId: string, params: { text?: string; keys?: string[] }) {
     const pane = this.panes.get(paneId);
     if (!pane || !pane.alive) throw new HerdrRpcError({ code: "pane_not_found", message: "gone" });
-    pane.input = params.text ?? "";
-    // Simulate the shell echoing the input line (contains literal `$?`,
-    // which must NOT match the exit-code regex) plus script output.
-    const token = TOKEN_RE.exec(pane.input)?.[1];
-    if (token === undefined) return;
-    if (pane.behavior === "hang") {
-      pane.output = `${pane.input}\n${this.scriptOutput}`;
+    const text = params.text ?? "";
+    pane.inputs.push(text);
+    pane.input = text;
+    // The terminal echoes every typed line; echoed marker lines contain
+    // the rc expression, never digits, so they cannot match the regex.
+    pane.output += `${text}\n`;
+    const runId = RUN_ID_FROM_MARKER_RE.exec(text)?.[1];
+    if (runId !== undefined && /^echo\b/.test(text)) {
+      // The queued marker line only "runs" once the command finished;
+      // `hang` simulates a command that never reaches it.
+      if (pane.behavior === "hang") return;
+      const code =
+        pane.behavior === "exit0"
+          ? 0
+          : pane.behavior === "exit1"
+            ? 1
+            : pane.behavior === "exit7"
+              ? 7
+              : 0;
+      pane.output += `__HERDR_DONE_${runId}__=${code}\n`;
       return;
     }
-    const code =
-      pane.behavior === "exit0"
-        ? 0
-        : pane.behavior === "exit1"
-          ? 1
-          : pane.behavior === "exit7"
-            ? 7
-            : 0;
-    pane.output = `${pane.input}\n${this.scriptOutput}__HERDR_DONE_${token}__=${code}\n`;
+    // Command line: the "script" produces its output (hang included —
+    // partial output is realistic for a still-running command).
+    pane.output += this.scriptOutput;
   }
 
   async paneSendKeys(paneId: string, keys: string[]) {
@@ -209,11 +231,12 @@ class FakeTransport implements ScriptTransport {
       pane_id: paneId,
       shell_pid: 100,
       foreground_process_group_id: 100,
-      foreground_processes: [],
+      foreground_processes: pane.foreground,
     };
   }
 
   async paneGet(paneId: string) {
+    this.getCalls += 1;
     const pane = this.panes.get(paneId);
     if (!pane || !pane.alive || pane.closed) {
       throw new HerdrRpcError({ code: "pane_not_found", message: "pane gone" });
@@ -222,6 +245,7 @@ class FakeTransport implements ScriptTransport {
   }
 
   async paneRead(paneId: string) {
+    this.readCalls += 1;
     const pane = this.panes.get(paneId);
     if (!pane || !pane.alive) throw new HerdrRpcError({ code: "pane_not_found", message: "gone" });
     return {
@@ -237,6 +261,7 @@ class FakeTransport implements ScriptTransport {
   }
 
   async paneClose(paneId: string) {
+    if (this.closeError) throw this.closeError;
     const pane = this.panes.get(paneId);
     if (pane) {
       pane.closed = true;
@@ -257,31 +282,66 @@ function deps(transport: FakeTransport, extra: Partial<Parameters<typeof startRu
     waitTimeoutMs: 5_000,
     logMaxBytes: 1_024,
     stopGraceMs: 1,
+    stopConfirmMs: 10,
+    // Deterministic host-OS fallback: non-Windows → sh family.
+    platform: "linux",
     sleep: async () => {},
     ...extra,
   };
 }
 
-function startInput(project: Project, repoRoot: string) {
+/**
+ * Simulate the script finishing AFTER the bounded wait timed out: the
+ * shell echoes the durable `__HERDR_DONE_<run-id>__=<code>` marker into
+ * the pane's scrollback. The run-id token is recovered from the injected
+ * input line recorded by `paneSendInput`.
+ */
+function completePaneLater(transport: FakeTransport, paneId: string, code: number): void {
+  const pane = transport.panes.get(paneId);
+  if (!pane) throw new Error(`no fake pane: ${paneId}`);
+  const token = RUN_ID_FROM_MARKER_RE.exec(pane.input ?? "")?.[1];
+  if (token === undefined) throw new Error("pane input carries no run marker token");
+  pane.output = `${pane.output}late output\n__HERDR_DONE_${token}__=${code}\n`;
+}
+
+function startInput(
+  project: Project,
+  repoRoot: string,
+  shell?: "auto" | "sh" | "cmd" | "powershell",
+) {
   return {
     project,
     script: { id: "dev", name: "Dev server", command: "bun run dev", source: "t3.json" },
     repoRoot,
     remote: null,
+    ...(shell !== undefined ? { shell } : {}),
   };
 }
 
 // --- marker / command-line units -------------------------------------------
 
 describe("marker helpers", () => {
-  test("echoed input line never matches the exit-code regex", () => {
+  test("echoed input lines never match the exit-code regex (all families)", () => {
     const runId = "run-abc123-deadbeef";
-    const token = runMarkerToken(runId);
-    const line = `bun run dev; echo ${token}=$?`;
-    expect(parseMarkerExitCode(line, runId)).toBeNull();
+    for (const family of ["sh", "cmd", "powershell"] as const) {
+      const line = markerLine(family, runId);
+      expect(parseMarkerExitCode(line, runId)).toBeNull();
+    }
     // The real output line does match.
-    expect(parseMarkerExitCode(`noise\n${token}=0\nmore`, runId)).toBe(0);
-    expect(parseMarkerExitCode(`${token}=-1\n${token}=3`, runId)).toBe(3);
+    expect(parseMarkerExitCode(`noise\n__HERDR_DONE_${runId}__=0\nmore`, runId)).toBe(0);
+    expect(
+      parseMarkerExitCode(`__HERDR_DONE_${runId}__=-1\n__HERDR_DONE_${runId}__=3`, runId),
+    ).toBe(3);
+  });
+
+  test("markerLine composes the per-family rc expression", () => {
+    const runId = "run-x";
+    expect(markerLine("sh", runId)).toBe("echo __HERDR_DONE_run-x__=$?");
+    expect(markerLine("cmd", runId)).toBe("echo __HERDR_DONE_run-x__=%ERRORLEVEL%");
+    const ps = markerLine("powershell", runId);
+    expect(ps).toContain("__HERDR_DONE_run-x__=");
+    expect(ps).toContain("$LASTEXITCODE");
+    expect(ps).toContain("$?");
   });
 
   test("runMarkerRegex embeds the run id", () => {
@@ -289,22 +349,39 @@ describe("marker helpers", () => {
     expect(runMarkerRegex("run-x")).toContain("(-?\\d+)");
   });
 
-  test("buildCommandLine inlines short single-line commands", async () => {
-    const { line, scriptPath } = await buildCommandLine("run-t1", "echo hi", tempDir());
-    expect(scriptPath).toBeNull();
-    expect(line).toBe("echo hi; echo __HERDR_DONE_run-t1__=$?");
+  test("buildCommandLine inlines short single-line commands (two lines)", async () => {
+    const dir = tempDir();
+    const sh = await buildCommandLine("run-t1", "echo hi", dir, "sh");
+    expect(sh.scriptPath).toBeNull();
+    expect(sh.lines).toEqual(["echo hi", "echo __HERDR_DONE_run-t1__=$?"]);
+    const cmd = await buildCommandLine("run-t1c", "echo hi", dir, "cmd");
+    expect(cmd.lines).toEqual(["echo hi", "echo __HERDR_DONE_run-t1c__=%ERRORLEVEL%"]);
+    const ps = await buildCommandLine("run-t1p", "echo hi", dir, "powershell");
+    expect(ps.lines[0]).toBe("echo hi");
+    expect(ps.lines[1]).toContain("$LASTEXITCODE");
   });
 
-  test("buildCommandLine writes a script file for multiline/long commands", async () => {
+  test("buildCommandLine writes per-family script files for multiline/long commands", async () => {
     const dir = tempDir();
-    const { line, scriptPath } = await buildCommandLine("run-t2", "echo one\necho two", dir);
-    expect(scriptPath).not.toBeNull();
-    expect(scriptPath?.startsWith(dir)).toBe(true);
-    expect(line).toContain(scriptPath as string);
-    expect(line).toContain("__HERDR_DONE_run-t2__=$?");
-    const file = readFileSync(scriptPath as string, "utf8");
-    expect(file).toContain("echo one\necho two");
-    const long = await buildCommandLine("run-t3", "x".repeat(5_000), dir);
+    const sh = await buildCommandLine("run-t2", "echo one\necho two", dir, "sh");
+    expect(sh.scriptPath).toBe(`${dir}/run-t2.sh`);
+    expect(sh.lines[0]).toBe(`sh '${dir}/run-t2.sh'`);
+    expect(sh.lines[1]).toBe("echo __HERDR_DONE_run-t2__=$?");
+    expect(readFileSync(sh.scriptPath as string, "utf8")).toContain("echo one\necho two");
+
+    const cmd = await buildCommandLine("run-t2c", "echo one\necho two", dir, "cmd");
+    expect(cmd.scriptPath).toBe(path.join(dir, "run-t2c.cmd"));
+    expect(cmd.lines[0]).toBe(`call "${cmd.scriptPath}"`);
+    expect(cmd.lines[1]).toBe("echo __HERDR_DONE_run-t2c__=%ERRORLEVEL%");
+    // .cmd content uses CRLF line endings.
+    expect(readFileSync(cmd.scriptPath as string, "utf8")).toContain("echo one\r\necho two\r\n");
+
+    const ps = await buildCommandLine("run-t2p", "echo one\necho two", dir, "powershell");
+    expect(ps.scriptPath).toBe(path.join(dir, "run-t2p.ps1"));
+    expect(ps.lines[0]).toBe(`& '${ps.scriptPath}'`);
+    expect(ps.lines[1]).toContain("$LASTEXITCODE");
+
+    const long = await buildCommandLine("run-t3", "x".repeat(5_000), dir, "sh");
     expect(long.scriptPath).not.toBeNull();
   });
 
@@ -324,6 +401,194 @@ describe("marker helpers", () => {
   });
 });
 
+// --- shell family detection (#67) ------------------------------------------
+
+describe("detectShellFamily", () => {
+  const paneId = "pane-x";
+
+  function procTransport(foreground: { pid: number; name: string }[], shellPid = 100) {
+    const transport = new FakeTransport();
+    transport.paneProcessInfo = async () => ({
+      pane_id: paneId,
+      shell_pid: shellPid,
+      foreground_process_group_id: shellPid,
+      foreground_processes: foreground.map((f) => ({ ...f })),
+    });
+    return transport;
+  }
+
+  test("explicit override wins over process_info and host OS", async () => {
+    const transport = procTransport([{ pid: 100, name: "bash" }]);
+    await expect(
+      detectShellFamily(transport, paneId, { override: "cmd", platform: "linux" }),
+    ).resolves.toEqual({ family: "cmd", source: "flag" });
+    await expect(
+      detectShellFamily(transport, paneId, { override: "auto", platform: "linux" }),
+    ).resolves.toEqual({ family: "sh", source: "process_info" });
+  });
+
+  test("process_info names map to families (cmd.exe, pwsh, zsh)", async () => {
+    for (const [name, family] of [
+      ["cmd.exe", "cmd"],
+      ["pwsh", "powershell"],
+      ["powershell.exe", "powershell"],
+      ["zsh", "sh"],
+      ["bash", "sh"],
+    ] as const) {
+      const transport = procTransport([{ pid: 100, name }]);
+      await expect(detectShellFamily(transport, paneId, { platform: "linux" })).resolves.toEqual({
+        family,
+        source: "process_info",
+      });
+    }
+  });
+
+  test("empty foreground falls back to host OS default", async () => {
+    const empty = procTransport([]);
+    const fast = { sleep: async () => {} };
+    await expect(detectShellFamily(empty, paneId, { platform: "win32", ...fast })).resolves.toEqual(
+      { family: "cmd", source: "host_default" },
+    );
+    await expect(
+      detectShellFamily(empty, paneId, { platform: "darwin", ...fast }),
+    ).resolves.toEqual({ family: "sh", source: "host_default" });
+  });
+
+  test("process_info transport failure falls back to host default", async () => {
+    const transport = new FakeTransport();
+    transport.paneProcessInfo = async () => {
+      throw new Error("socket gone");
+    };
+    await expect(detectShellFamily(transport, paneId, { platform: "win32" })).resolves.toEqual({
+      family: "cmd",
+      source: "host_default",
+    });
+  });
+
+  test("non-shell foreground → not_a_shell; unsupported shell → shell_unknown", async () => {
+    const vim = procTransport([{ pid: 100, name: "vim" }]);
+    await expect(detectShellFamily(vim, paneId, { platform: "linux" })).rejects.toMatchObject({
+      kind: "not_a_shell",
+    });
+    const fish = procTransport([{ pid: 100, name: "fish" }]);
+    await expect(detectShellFamily(fish, paneId, { platform: "linux" })).rejects.toMatchObject({
+      kind: "shell_unknown",
+    });
+    // --shell override bypasses detection entirely.
+    await expect(
+      detectShellFamily(fish, paneId, { override: "sh", platform: "linux" }),
+    ).resolves.toEqual({ family: "sh", source: "flag" });
+  });
+
+  test("shell_pid match wins over other foreground entries", async () => {
+    const transport = procTransport([
+      { pid: 300, name: "node" },
+      { pid: 100, name: "pwsh.exe" },
+    ]);
+    await expect(detectShellFamily(transport, paneId, { platform: "linux" })).resolves.toEqual({
+      family: "powershell",
+      source: "process_info",
+    });
+  });
+});
+
+describe("startRun shell families", () => {
+  test("cmd detection composes cmd wrapper end-to-end", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    transport.foreground = [{ pid: 100, name: "cmd.exe" }];
+    const run = await startRun(startInput(makeProject("p", [repo]), repo), deps(transport));
+    expect(run.result).toBe("success");
+    expect(run.shell_family).toBe("cmd");
+    expect(run.shell_source).toBe("process_info");
+    const pane = transport.panes.get(run.pane_id);
+    expect(pane?.inputs[0]).toBe("bun run dev");
+    expect(pane?.inputs[1]).toBe(`echo __HERDR_DONE_${run.run_id}__=%ERRORLEVEL%`);
+  });
+
+  test("powershell detection composes powershell wrapper", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    transport.foreground = [{ pid: 100, name: "pwsh" }];
+    const run = await startRun(startInput(makeProject("p", [repo]), repo), deps(transport));
+    expect(run.result).toBe("success");
+    expect(run.shell_family).toBe("powershell");
+    const pane = transport.panes.get(run.pane_id);
+    expect(pane?.inputs[1]).toContain("$LASTEXITCODE");
+  });
+
+  test("--shell flag overrides detected family", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    transport.foreground = [{ pid: 100, name: "bash" }];
+    const run = await startRun(
+      startInput(makeProject("p", [repo]), repo, "powershell"),
+      deps(transport),
+    );
+    expect(run.shell_family).toBe("powershell");
+    expect(run.shell_source).toBe("flag");
+    const pane = transport.panes.get(run.pane_id);
+    expect(pane?.inputs[1]).toContain("$LASTEXITCODE");
+  });
+
+  test("win32 host default produces cmd wrapper when detection is empty", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    const run = await startRun(
+      startInput(makeProject("p", [repo]), repo),
+      deps(transport, { platform: "win32" }),
+    );
+    expect(run.shell_family).toBe("cmd");
+    expect(run.shell_source).toBe("host_default");
+    const pane = transport.panes.get(run.pane_id);
+    expect(pane?.inputs[1]).toContain("%ERRORLEVEL%");
+  });
+
+  test("non-shell foreground aborts before injection, pane closed, no record", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    transport.foreground = [{ pid: 100, name: "vim" }];
+    await expect(
+      startRun(startInput(makeProject("p", [repo]), repo), deps(transport)),
+    ).rejects.toMatchObject({ kind: "not_a_shell" });
+    const pane = transport.panes.get("pane-1");
+    expect(pane?.closed).toBe(true);
+    expect(pane?.inputs).toEqual([]);
+    expect((await loadRuns()).runs).toEqual({});
+  });
+
+  test("unsupported shell (fish) fails shell_unknown", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    transport.foreground = [{ pid: 100, name: "fish" }];
+    await expect(
+      startRun(startInput(makeProject("p", [repo]), repo), deps(transport)),
+    ).rejects.toMatchObject({ kind: "shell_unknown" });
+    expect(transport.panes.get("pane-1")?.closed).toBe(true);
+  });
+
+  test("long command on cmd writes .cmd script and invokes via call", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    transport.foreground = [{ pid: 100, name: "cmd.exe" }];
+    const input = startInput(makeProject("p", [repo]), repo);
+    input.script = { ...input.script, command: "echo one\necho two" };
+    const run = await startRun(input, deps(transport));
+    expect(run.result).toBe("success");
+    expect(run.script_path).not.toBeNull();
+    expect(run.script_path).toMatch(/\.cmd$/);
+    const pane = transport.panes.get(run.pane_id);
+    expect(pane?.inputs[0]).toMatch(/^call ".*\.cmd"$/);
+  });
+});
+
 // --- startRun state machine -----------------------------------------------
 
 describe("startRun", () => {
@@ -339,10 +604,15 @@ describe("startRun", () => {
     expect(run.finished_at).not.toBeNull();
     expect(run.pane_id).toBe("pane-1");
     expect(run.workspace_id).toBe("ws-1");
-    // Injected line carries the marker suffix and Enter.
+    // Injected as TWO lines: the command, then the family marker echo.
     const pane = transport.panes.get("pane-1");
-    expect(pane?.input).toContain("bun run dev; echo __HERDR_DONE_");
-    expect(pane?.input).toContain("=$?");
+    expect(pane?.inputs).toHaveLength(2);
+    expect(pane?.inputs[0]).toBe("bun run dev");
+    expect(pane?.inputs[1]).toContain("echo __HERDR_DONE_");
+    expect(pane?.inputs[1]).toContain("=$?");
+    // Detection fell back to the host default (empty foreground) → sh.
+    expect(run.shell_family).toBe("sh");
+    expect(run.shell_source).toBe("host_default");
     // Log captured and stored under the state dir.
     expect(run.log_path).not.toBeNull();
     expect(readFileSync(runLogPath(run.run_id), "utf8")).toContain("hello from script");
@@ -488,6 +758,11 @@ describe("stopRuns", () => {
       finished_at: null,
       exit_code: null,
       result: "running" as const,
+      host: null,
+      session_key: null,
+      stop_requested_at: null,
+      shell_family: null,
+      shell_source: null,
       log_path: null,
       error: null,
     };
@@ -502,6 +777,142 @@ describe("stopRuns", () => {
     const outcomes = await stopRuns("run-aaaa-1", deps(transport)).catch(() => null);
     // pane px doesn't exist in the fake → pane_gone or throw; either way no crash of suite.
     void outcomes;
+  });
+
+  test("happy path records stopping before confirming stopped", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    transport.behavior = "hang";
+    const project = makeProject("p", [repo]);
+    const run = await startRun(startInput(project, repo), deps(transport));
+    expect(run.result).toBe("running");
+    // v2 record carries the ownership tuple.
+    expect(run.host).not.toBeNull();
+    expect(run.session_key).not.toBeNull();
+    expect(run.stop_requested_at).toBeNull();
+
+    const outcomes = await stopRuns(run.run_id, deps(transport));
+    expect(outcomes[0]?.action).toBe("stopped");
+    const stored = (await loadRuns()).runs[run.run_id];
+    expect(stored?.result).toBe("stopped");
+    // ctrl+c was recorded as a distinct request state before confirmation.
+    expect(stored?.stop_requested_at).not.toBeNull();
+    const states = transport.metadata
+      .filter((m) => m.pane_id === run.pane_id)
+      .map((m) => Object.values(m.tokens)[0]);
+    expect(states).toEqual(["running", "stopping", "stopped"]);
+  });
+
+  test("pane already gone → unknown, no input sent", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    transport.behavior = "hang";
+    const project = makeProject("p", [repo]);
+    const run = await startRun(startInput(project, repo), deps(transport));
+    const pane = transport.panes.get(run.pane_id);
+    expect(pane).toBeDefined();
+    if (pane) pane.alive = false;
+
+    const outcomes = await stopRuns(run.run_id, deps(transport));
+    expect(outcomes[0]?.action).toBe("pane_gone");
+    expect(outcomes[0]?.run.result).toBe("unknown");
+    expect(pane?.keys).toEqual([]);
+  });
+
+  test("foreign session record → stale_pane, zero pane side effects", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    transport.behavior = "hang";
+    const project = makeProject("p", [repo]);
+    const run = await startRun(startInput(project, repo), deps(transport));
+    const getCallsBefore = transport.getCalls;
+
+    // A different session/socket must never reach this pane.
+    const outcomes = await stopRuns(
+      run.run_id,
+      deps(transport, { sessionKey: "other-host /tmp/other.sock" }),
+    );
+    expect(outcomes[0]?.action).toBe("stale_pane");
+    const pane = transport.panes.get(run.pane_id);
+    expect(pane?.keys).toEqual([]);
+    expect(pane?.closed).toBe(false);
+    // Foreign short-circuit happens BEFORE pane.get.
+    expect(transport.getCalls).toBe(getCallsBefore);
+    // Result preserved for the owning session; error explains why.
+    const stored = (await loadRuns()).runs[run.run_id];
+    expect(stored?.result).toBe("running");
+    expect(stored?.error).toContain("session mismatch");
+  });
+
+  test("pane replaced in another workspace → stale_pane, no input/close", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    transport.behavior = "hang";
+    const project = makeProject("p", [repo]);
+    const run = await startRun(startInput(project, repo), deps(transport));
+    // Simulate the recorded pane id resolving to a different workspace.
+    const pane = transport.panes.get(run.pane_id);
+    expect(pane).toBeDefined();
+    if (pane) pane.workspace_id = "ws-replaced";
+
+    const outcomes = await stopRuns(run.run_id, deps(transport));
+    expect(outcomes[0]?.action).toBe("stale_pane");
+    expect(pane?.keys).toEqual([]);
+    expect(pane?.closed).toBe(false);
+    const stored = (await loadRuns()).runs[run.run_id];
+    expect(stored?.result).toBe("unknown");
+    expect(stored?.error).toContain("stale_pane");
+  });
+
+  test("stop confirmation timeout → stop_unconfirmed, never claimed stopped", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    transport.behavior = "hang";
+    // Close fails AND a foreground process keeps running: no exit evidence.
+    transport.closeError = new Error("close refused");
+    const project = makeProject("p", [repo]);
+    const run = await startRun(startInput(project, repo), deps(transport));
+    // A live foreground process AFTER the run started (set post-detection).
+    const pane = transport.panes.get(run.pane_id);
+    if (pane) pane.foreground = [{ pid: 200, name: "bun" }];
+
+    const outcomes = await stopRuns(run.run_id, deps(transport));
+    expect(outcomes[0]?.action).toBe("stop_unconfirmed");
+    const stored = (await loadRuns()).runs[run.run_id];
+    expect(stored?.result).toBe("stop_unconfirmed");
+    expect(stored?.stop_requested_at).not.toBeNull();
+    expect(stored?.finished_at).toBeNull();
+    // ctrl+c WAS sent (request accepted) but stopped was never claimed.
+    expect(transport.panes.get(run.pane_id)?.keys).toEqual([["ctrl+c"]]);
+  });
+
+  test("results later confirms a stop_unconfirmed run once the pane is gone", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    transport.behavior = "hang";
+    transport.closeError = new Error("close refused");
+    const project = makeProject("p", [repo]);
+    const run = await startRun(startInput(project, repo), deps(transport));
+    const busyPane = transport.panes.get(run.pane_id);
+    if (busyPane) busyPane.foreground = [{ pid: 200, name: "bun" }];
+    await stopRuns(run.run_id, deps(transport));
+    expect((await loadRuns()).runs[run.run_id]?.result).toBe("stop_unconfirmed");
+
+    // The process finally exits and the pane disappears.
+    transport.closeError = null;
+    const pane = transport.panes.get(run.pane_id);
+    if (pane) pane.alive = false;
+
+    const runs = await listRuns(deps(transport));
+    const updated = runs.find((r) => r.run_id === run.run_id);
+    expect(updated?.result).toBe("stopped");
+    expect((await loadRuns()).runs[run.run_id]?.result).toBe("stopped");
   });
 });
 
@@ -561,6 +972,307 @@ describe("listRuns / runLog", () => {
     writeFileSync(path.join(dir, "runs.json"), "{corrupt");
     const runs = await loadRuns();
     expect(runs.runs).toEqual({});
+  });
+
+  test("v1 run records load with null ownership fields (backward compat)", async () => {
+    const dir = useStateDir();
+    mkdirSync(dir, { recursive: true });
+    const now = new Date().toISOString();
+    writeFileSync(
+      path.join(dir, "runs.json"),
+      JSON.stringify({
+        version: 1,
+        runs: {
+          "run-v1-1": {
+            run_id: "run-v1-1",
+            project_id: "p",
+            script: { id: "s", name: "S", command: "x", source: "t3.json" },
+            repo: { root: "/tmp/r", remote: null },
+            pane_id: "w1:p1",
+            workspace_id: "w1",
+            tab_id: "w1:t1",
+            cwd: "/tmp/r",
+            command_line: "x",
+            script_path: null,
+            started_at: now,
+            finished_at: null,
+            exit_code: null,
+            result: "running",
+            log_path: null,
+            error: null,
+          },
+        },
+      }),
+    );
+    const state = await loadRuns();
+    const run = state.runs["run-v1-1"];
+    expect(run).toBeDefined();
+    expect(run?.host).toBeNull();
+    expect(run?.session_key).toBeNull();
+    expect(run?.stop_requested_at).toBeNull();
+    expect(run?.result).toBe("running");
+    // And a v2 write round-trips.
+    await updateRuns((s) => {
+      const r = s.runs["run-v1-1"];
+      if (r) s.runs["run-v1-1"] = { ...r, error: "x" };
+    });
+    const rewritten = JSON.parse(readFileSync(path.join(dir, "runs.json"), "utf8"));
+    expect(rewritten.version).toBe(2);
+  });
+
+  test("results on a foreign-session record never touches the pane", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    transport.behavior = "hang";
+    const project = makeProject("p", [repo]);
+    const run = await startRun(startInput(project, repo), deps(transport));
+    const getCallsBefore = transport.getCalls;
+    const readCallsBefore = transport.readCalls;
+
+    const runs = await listRuns(deps(transport, { sessionKey: "elsewhere /tmp/e.sock" }));
+    const updated = runs.find((r) => r.run_id === run.run_id);
+    // Result preserved (still running for the owning session), error annotated.
+    expect(updated?.result).toBe("running");
+    expect(updated?.error).toContain("session mismatch");
+    // Zero pane interaction through the wrong session's transport.
+    expect(transport.getCalls).toBe(getCallsBefore);
+    expect(transport.readCalls).toBe(readCallsBefore);
+    const pane = transport.panes.get(run.pane_id);
+    expect(pane?.keys).toEqual([]);
+    expect(pane?.closed).toBe(false);
+  });
+
+  test("results reconciles a pane-mismatched record to unknown", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    transport.behavior = "hang";
+    const project = makeProject("p", [repo]);
+    const run = await startRun(startInput(project, repo), deps(transport));
+    const pane = transport.panes.get(run.pane_id);
+    if (pane) pane.tab_id = "tab-replaced";
+
+    const runs = await listRuns(deps(transport));
+    const updated = runs.find((r) => r.run_id === run.run_id);
+    expect(updated?.result).toBe("unknown");
+    expect(updated?.error).toContain("stale_pane");
+  });
+
+  test("logs on a foreign record returns no log and no pane read", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    transport.behavior = "hang";
+    const project = makeProject("p", [repo]);
+    const run = await startRun(startInput(project, repo), deps(transport));
+    // Ensure no stored log exists for this run.
+    const readCallsBefore = transport.readCalls;
+
+    const result = await runLog(
+      run.run_id,
+      deps(transport, { sessionKey: "elsewhere /tmp/e.sock" }),
+    );
+    expect(result.log).toBeNull();
+    expect(result.run.result).toBe("running");
+    expect(result.run.error).toContain("session mismatch");
+    expect(transport.readCalls).toBe(readCallsBefore);
+  });
+});
+
+// --- durable completion recovery via scrollback re-scan (#68) -------------
+
+describe("completion recovery (#68)", () => {
+  test("wait timeout → later completion → results recovers exit code", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    transport.behavior = "hang"; // wait times out; no marker yet
+    const project = makeProject("p", [repo]);
+    const run = await startRun(startInput(project, repo), deps(transport));
+    expect(run.result).toBe("running");
+
+    // Marker absent → stays honestly running, exit code never fabricated.
+    let runs = await listRuns(deps(transport));
+    expect(runs.find((r) => r.run_id === run.run_id)?.result).toBe("running");
+
+    // The script finishes later: the marker lands in scrollback.
+    completePaneLater(transport, run.pane_id, 0);
+    runs = await listRuns(deps(transport));
+    const recovered = runs.find((r) => r.run_id === run.run_id);
+    expect(recovered?.result).toBe("success");
+    expect(recovered?.exit_code).toBe(0);
+    expect(recovered?.finished_at).not.toBeNull();
+    expect(recovered?.log_path).not.toBeNull();
+    // Persisted, and metadata projected the terminal state.
+    const stored = (await loadRuns()).runs[run.run_id];
+    expect(stored?.result).toBe("success");
+    expect(stored?.exit_code).toBe(0);
+    const states = transport.metadata
+      .filter((m) => m.pane_id === run.pane_id)
+      .map((m) => Object.values(m.tokens)[0]);
+    expect(states).toEqual(["running", "success"]);
+
+    // Double results is idempotent: terminal records are not re-scanned
+    // or rewritten.
+    const readsBefore = transport.readCalls;
+    runs = await listRuns(deps(transport));
+    expect(runs.find((r) => r.run_id === run.run_id)?.result).toBe("success");
+    expect(transport.readCalls).toBe(readsBefore);
+  });
+
+  test("late non-zero exit → failed with the real code", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    transport.behavior = "hang";
+    const project = makeProject("p", [repo]);
+    const run = await startRun(startInput(project, repo), deps(transport));
+
+    completePaneLater(transport, run.pane_id, 3);
+    const runs = await listRuns(deps(transport));
+    const recovered = runs.find((r) => r.run_id === run.run_id);
+    expect(recovered?.result).toBe("failed");
+    expect(recovered?.exit_code).toBe(3);
+  });
+
+  test("scripts logs recovers the same completion (exit code + tail)", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    transport.behavior = "hang";
+    const project = makeProject("p", [repo]);
+    const run = await startRun(startInput(project, repo), deps(transport));
+
+    completePaneLater(transport, run.pane_id, 0);
+    const result = await runLog(run.run_id, deps(transport));
+    expect(result.run.result).toBe("success");
+    expect(result.run.exit_code).toBe(0);
+    expect(result.log).toContain("__HERDR_DONE_");
+    expect(result.log).toContain("late output");
+    // A second logs call serves the stored file without re-reading.
+    const readsBefore = transport.readCalls;
+    const again = await runLog(run.run_id, deps(transport));
+    expect(again.run.result).toBe("success");
+    expect(again.log).toBe(result.log);
+    expect(transport.readCalls).toBe(readsBefore);
+  });
+
+  test("stop_unconfirmed run later completes → marker exit code wins", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    transport.behavior = "hang";
+    transport.closeError = new Error("close refused");
+    const project = makeProject("p", [repo]);
+    const run = await startRun(startInput(project, repo), deps(transport));
+    // A foreground process keeps running after startRun — set it only now,
+    // since a non-shell foreground would fail shell detection at start.
+    const pane = transport.panes.get(run.pane_id);
+    if (pane) pane.foreground = [{ pid: 200, name: "bun" }];
+    await stopRuns(run.run_id, deps(transport));
+    expect((await loadRuns()).runs[run.run_id]?.result).toBe("stop_unconfirmed");
+
+    // The command actually finished before ctrl+c landed: the durable
+    // marker proves the real exit status, which is more truthful than
+    // "stopped" or a lingering stop_unconfirmed.
+    completePaneLater(transport, run.pane_id, 0);
+    const runs = await listRuns(deps(transport));
+    const recovered = runs.find((r) => r.run_id === run.run_id);
+    expect(recovered?.result).toBe("success");
+    expect(recovered?.exit_code).toBe(0);
+  });
+
+  test("marker absent forever → stays running, exit code stays null", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    transport.behavior = "hang";
+    const project = makeProject("p", [repo]);
+    const run = await startRun(startInput(project, repo), deps(transport));
+
+    for (let i = 0; i < 3; i += 1) {
+      const runs = await listRuns(deps(transport));
+      const current = runs.find((r) => r.run_id === run.run_id);
+      expect(current?.result).toBe("running");
+      expect(current?.exit_code).toBeNull();
+      expect(current?.finished_at).toBeNull();
+    }
+    const stored = (await loadRuns()).runs[run.run_id];
+    expect(stored?.result).toBe("running");
+    expect(stored?.exit_code).toBeNull();
+  });
+
+  test("pane gone before marker → unknown, never fabricated success", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    transport.behavior = "hang";
+    const project = makeProject("p", [repo]);
+    const run = await startRun(startInput(project, repo), deps(transport));
+    const pane = transport.panes.get(run.pane_id);
+    if (pane) pane.alive = false;
+
+    const runs = await listRuns(deps(transport));
+    const updated = runs.find((r) => r.run_id === run.run_id);
+    expect(updated?.result).toBe("unknown");
+    expect(updated?.exit_code).toBeNull();
+    expect((await loadRuns()).runs[run.run_id]?.result).toBe("unknown");
+  });
+
+  test("restart with a stale running record → results marks unknown honestly", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    transport.behavior = "hang";
+    const project = makeProject("p", [repo]);
+    const run = await startRun(startInput(project, repo), deps(transport));
+    expect(run.result).toBe("running");
+
+    // Simulate a herdr restart: a NEW transport knows nothing about the
+    // recorded pane id, so pane.get reports it gone.
+    const afterRestart = new FakeTransport();
+    const runs = await listRuns(deps(afterRestart));
+    const updated = runs.find((r) => r.run_id === run.run_id);
+    expect(updated?.result).toBe("unknown");
+    expect(updated?.exit_code).toBeNull();
+    expect((await loadRuns()).runs[run.run_id]?.result).toBe("unknown");
+  });
+
+  test("unreachable pane read during re-scan leaves the record unchanged", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    transport.behavior = "hang";
+    const project = makeProject("p", [repo]);
+    const run = await startRun(startInput(project, repo), deps(transport));
+
+    // Socket dies between ownership check and scrollback read.
+    transport.paneRead = async () => {
+      throw new Error("socket reset by peer");
+    };
+    const runs = await listRuns(deps(transport));
+    const current = runs.find((r) => r.run_id === run.run_id);
+    expect(current?.result).toBe("running");
+    expect(current?.exit_code).toBeNull();
+    expect((await loadRuns()).runs[run.run_id]?.result).toBe("running");
+  });
+
+  test("foreign record is never re-scanned through the wrong session", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const transport = new FakeTransport();
+    transport.behavior = "hang";
+    const project = makeProject("p", [repo]);
+    const run = await startRun(startInput(project, repo), deps(transport));
+    completePaneLater(transport, run.pane_id, 0);
+    const readsBefore = transport.readCalls;
+
+    const runs = await listRuns(deps(transport, { sessionKey: "elsewhere /tmp/e.sock" }));
+    const updated = runs.find((r) => r.run_id === run.run_id);
+    expect(updated?.result).toBe("running");
+    expect(transport.readCalls).toBe(readsBefore);
+    expect((await loadRuns()).runs[run.run_id]?.result).toBe("running");
   });
 });
 
@@ -660,6 +1372,45 @@ describe("cli scripts run/stop/results/logs", () => {
     expectErr(runCli(["scripts", "stop", "run-nope"]), "run_not_found");
     expect(runCli(["scripts", "run"]).status).toBe(2);
     expect(runCli(["scripts", "bogus"]).status).toBe(2);
+  });
+
+  test("results with unreachable socket keeps active records unchanged", async () => {
+    useStateDir();
+    const repo = initRepo();
+    const now = new Date().toISOString();
+    await updateRuns((s) => {
+      s.runs["run-cli-stale"] = {
+        run_id: "run-cli-stale",
+        project_id: "p",
+        script: { id: "s", name: "S", command: "x", source: "t3.json" },
+        repo: { root: repo, remote: null },
+        pane_id: "w1:p1",
+        workspace_id: "w1",
+        tab_id: null,
+        cwd: repo,
+        command_line: "x",
+        script_path: null,
+        started_at: now,
+        finished_at: null,
+        exit_code: null,
+        result: "running",
+        host: null,
+        session_key: null,
+        stop_requested_at: null,
+        log_path: null,
+        shell_family: null,
+        shell_source: null,
+        error: null,
+      };
+    });
+    // HERDR_SOCKET_PATH points at a nonexistent socket: ownership check
+    // is unreachable, so the record must stay `running` — never
+    // fabricated as success or unknown.
+    const r = expectOk(runCli(["scripts", "results"]));
+    const runs = r.runs as Array<{ run_id: string; result: string; exit_code: number | null }>;
+    const record = runs.find((x) => x.run_id === "run-cli-stale");
+    expect(record?.result).toBe("running");
+    expect(record?.exit_code).toBeNull();
   });
 
   test("capability advertises scripts run/stop as mutations", () => {
