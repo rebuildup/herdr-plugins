@@ -16,8 +16,8 @@ implement against is [`docs/contracts/tui-v1.md`](../contracts/tui-v1.md).
 | field | meaning |
 | --- | --- |
 | `cli` | `implemented` — contract-covered CLI command exists |
-| `tui_action` | `declared:<id>` — a manifest `[[actions]]` entry exists today (inbox ×9 incl. `open`, git ×7 incl. `open`/`open-forge`, checkpoints ×2, projects ×2, automations ×1, conversations ×1, usage ×1, mcp ×1); `none` — no action yet |
-| `interactive_tui` | `implemented:#NNN` — interactive TUI shipped in that ticket (#237 Inbox pilot, #238 Git, #239 Git forge, #240 Projects, #241 Projects scripts, #242 Checkpoints, #243 Automations, #244 Conversations/Usage, #248 MCP diagnostics); `planned:#NNN` — scheduled in that implementation ticket (#232 Controls/Handoff/TextGen, #233 Artifacts/Secrets/Machines); `n/a` — daemon-, agent-, or diagnostic-only surface with no interactive TUI planned |
+| `tui_action` | `declared:<id>` — a manifest `[[actions]]` entry exists today (inbox ×9 incl. `open`, git ×7 incl. `open`/`open-forge`, checkpoints ×2, projects ×2, automations ×1, conversations ×1, usage ×1, controls ×1, handoff ×1, textgen ×1, mcp ×1); `none` — no action yet |
+| `interactive_tui` | `implemented:#NNN` — interactive TUI shipped in that ticket (#237 Inbox pilot, #238 Git, #239 Git forge, #240 Projects, #241 Projects scripts, #242 Checkpoints, #243 Automations, #244 Conversations/Usage, #245 Controls/Handoff, #246 TextGen, #248 MCP diagnostics); `planned:#NNN` — scheduled in that implementation ticket (#233 Artifacts/Secrets/Machines); `n/a` — daemon-, agent-, or diagnostic-only surface with no interactive TUI planned |
 | `gui` | GUI is owned by herdr-t3 (#7). This repo records consumption intent only — **GUI-done never implies TUI-done** |
 | `real_machine_evidence` | `docs/research/` paths recording live verification; absence means no recorded real-machine run, not necessarily untested |
 | `upstream_gap` | non-null = blocked on herdr/T3Code upstream; never worked around by PTY guessing |
@@ -33,8 +33,8 @@ implement against is [`docs/contracts/tui-v1.md`](../contracts/tui-v1.md).
 | rebuildup.automations | automations/v1 stable | #231 | 14 | 1 (`open`) | implemented #243 — task list + create/edit forms (schedule/destination) + enable/disable + run-now + runs history + driver diagnostics (schedule install/uninstall/status, tick-now, detached watch; all explicit + confirm-gated) |
 | rebuildup.conversations | conversations/v1 stable | #232 | 8 | 1 (`open`) | **implemented #244**: sessions/history/search browser + event detail; `index` via confirm-gated `i` |
 | rebuildup.usage | usage/v1 stable | #232 | 5 | 1 (`open`) | **implemented #244**: usage/quota/cost/divergence reports with provider + period filters |
-| rebuildup.controls | controls/v1 stable | #232 | 8 | 0 | agent send/command/wait/interrupt/read/rename/start |
-| rebuildup.handoff | handoff/v1 stable | #232 | 9 | 0 | records/lineage + execute/delegate/merge-back |
+| rebuildup.controls | controls/v1 stable | #232 | 8 | 1 (`open`) | implemented #245 — agent list/detail + send/command/wait/interrupt/read/rename + agent.start with launch options |
+| rebuildup.handoff | handoff/v1 stable | #232 | 9 | 1 (`open`) | implemented #245 — record list/detail + create/execute/delegate/merge-back + resume-info/focus-source |
 | rebuildup.textgen | textgen/v1 stable | #232 | 5 | 1 (`open`) | implemented #246 — task picker + input form + provider select + confirm-gated generate; result review/copy only (not persisted, #249); config stays CLI |
 | rebuildup.artifacts | artifacts/v1 stable | #233 | 10 | 0 | list/search/get/verify + register/delete/deliver/gc |
 | rebuildup.secrets | secrets/v1 stable | #233 | 5 | 0 | metadata-only resolve + explicit run/inject + config |
