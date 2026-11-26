@@ -51,11 +51,11 @@ import {
   updateState,
 } from "./state";
 import { loadT3ProjectFile, T3JsonError, type T3ProjectFileScript } from "./t3json";
-import { drainWorktreeTriggers, type TriggerDrainReport } from "./triggers";
+import { drainSettleTriggers, drainWorktreeTriggers, type TriggerDrainReport } from "./triggers";
 import { associateRepoWorktrees, type WorktreeAssociationSkip } from "./worktrees";
 
 const CONTRACT = "herdr-plugins.projects/v1";
-const PLUGIN_VERSION = "0.3.0";
+const PLUGIN_VERSION = "0.4.0";
 const DEFAULT_TIMEOUT_MS = 10_000;
 
 interface PluginConfig {
@@ -70,6 +70,11 @@ interface PluginConfig {
   stopGraceMs?: number | undefined;
   /** Bounded stop-exit confirmation window; default 5_000. */
   stopConfirmMs?: number | undefined;
+  /**
+   * Override for the rebuildup.inbox plugin root used by the settle
+   * drain (#182); falls back to `../inbox` sibling / `herdr plugin list`.
+   */
+  inboxRoot?: string | undefined;
 }
 
 interface CliOptions extends CallOptions {
@@ -115,6 +120,8 @@ function emit(payload: unknown): void {
     (triggerReport.fired.length > 0 ||
       triggerReport.skipped.length > 0 ||
       triggerReport.duplicates > 0 ||
+      triggerReport.stopped !== undefined ||
+      triggerReport.inbox_unavailable === true ||
       triggerReport.session_unreachable === true)
       ? { ...(payload as Record<string, unknown>), triggers: triggerReport }
       : payload;
@@ -122,25 +129,60 @@ function emit(payload: unknown): void {
 }
 
 /**
- * Drain pending `worktree.created` marks recorded by `src/hook.ts`.
- * Best-effort by contract: unreachable sessions keep their marks and
- * per-worktree failures land in `triggers.skipped` — the drain never
- * fails the calling command.
+ * Drain pending `worktree.created` marks (src/hook.ts) AND new inbox
+ * organize transitions (#182 settle triggers). Best-effort by contract:
+ * unreachable sessions keep their marks/cursors and per-item failures
+ * land in `triggers.skipped` — the drain never fails the calling
+ * command; an absent/unrunnable inbox reports `inbox_unavailable`.
  */
 async function drainTriggers(options: CliOptions, config: PluginConfig): Promise<void> {
   const callOptions: CallOptions = {};
   if (options.session !== undefined) callOptions.session = options.session;
   if (options.socketPath !== undefined) callOptions.socketPath = options.socketPath;
   if (options.timeoutMs !== undefined) callOptions.timeoutMs = options.timeoutMs;
-  triggerReport = await drainWorktreeTriggers(
+  const drainConfig = {
+    waitTimeoutMs: config.runTimeoutMs,
+    logMaxBytes: config.runLogMaxBytes,
+    stopGraceMs: config.stopGraceMs,
+  };
+  const worktree = await drainWorktreeTriggers(callOptions, drainConfig, config.defaultScripts);
+  // Settle drain (#182): `--inbox-root` flag wins over config.json
+  // `inboxRoot`; both are optional overrides over sibling/plugin-list
+  // resolution inside drainSettleTriggers.
+  const flagIndex = options.args.indexOf("--inbox-root");
+  const flagRoot = flagIndex !== -1 ? options.args[flagIndex + 1] : undefined;
+  if (flagIndex !== -1) {
+    // Consume the flag pair so subcommand parsers never see it as a
+    // positional/unknown flag.
+    options.args = options.args.filter((_, i) => i !== flagIndex && i !== flagIndex + 1);
+  }
+  const settle = await drainSettleTriggers(
     callOptions,
-    {
-      waitTimeoutMs: config.runTimeoutMs,
-      logMaxBytes: config.runLogMaxBytes,
-      stopGraceMs: config.stopGraceMs,
-    },
+    drainConfig,
     config.defaultScripts,
+    flagRoot ?? config.inboxRoot,
   );
+  triggerReport = {
+    ...worktree,
+    fired: [...worktree.fired, ...settle.fired],
+    skipped: [...worktree.skipped, ...settle.skipped],
+    ...(settle.available ? {} : { inbox_unavailable: true }),
+    ...(settle.session_key !== undefined &&
+    (settle.fired.length > 0 ||
+      settle.skipped.length > 0 ||
+      settle.stopped.length > 0 ||
+      settle.cursor_expired === true)
+      ? {
+          settle: {
+            session_key: settle.session_key,
+            cursor_before: settle.cursor_before ?? 0,
+            cursor_after: settle.cursor_after ?? settle.cursor_before ?? 0,
+            cursor_expired: settle.cursor_expired === true,
+          },
+        }
+      : {}),
+    ...(settle.stopped.length > 0 ? { stopped: settle.stopped } : {}),
+  };
 }
 
 function fail(message: string, code = 1, kind?: string, extra?: Record<string, unknown>): never {
@@ -248,6 +290,7 @@ async function loadConfig(): Promise<PluginConfig> {
         typeof parsed.stopConfirmMs === "number" && parsed.stopConfirmMs > 0
           ? parsed.stopConfirmMs
           : undefined,
+      inboxRoot: typeof parsed.inboxRoot === "string" ? parsed.inboxRoot : undefined,
     };
   } catch {
     return {};
@@ -1195,6 +1238,12 @@ async function cmdCapability(): Promise<void> {
         script_flag: "runOnWorktreeCreate",
         mechanism:
           "manifest [[events]] hook → pending mark → lazy drain on scripts tick|run|stop|results|logs",
+      },
+      {
+        event: "inbox.settled",
+        script_flags: ["runOnSettle", "stopOnSettle"],
+        mechanism:
+          "rebuildup.inbox transitions CLI (ADR-0013) → per-session seq cursor → lazy drain on scripts tick|run|stop|results|logs",
       },
     ],
     requires: {

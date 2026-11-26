@@ -52,6 +52,7 @@ import {
 } from "./model";
 import {
   type InboxEntry,
+  type InboxTransition,
   type LinkKind,
   loadState,
   type PaneLink,
@@ -61,6 +62,13 @@ import {
   stateFilePath,
   updateState,
 } from "./state";
+import {
+  appendClearedTransitions,
+  appendOrganizeTransition,
+  appendTransition,
+  MAX_TRANSITIONS_PER_SESSION,
+  type TransitionContext,
+} from "./transitions";
 
 const CONTRACT = "herdr-plugins.inbox/v1";
 const DEFAULT_SNOOZE_CONFIG = "config.json";
@@ -418,16 +426,40 @@ async function cmdOrganize(options: CliOptions, kind: OrganizeCommand): Promise<
 
   const warnings: string[] = [];
   const sessionKey = sessionKeyFor(options);
+  const transitionCtx: TransitionContext = {
+    pane,
+    agent,
+    at: now.toISOString(),
+  };
   const entry = await updateState(async (state) => {
     const entries = sessionEntries(state, sessionKey);
     switch (kind) {
       case "settle":
+        appendOrganizeTransition(state, sessionKey, "settled", paneId, transitionCtx);
         return settlePane(entries, pane, agent, now);
       case "snooze":
+        appendOrganizeTransition(state, sessionKey, "snoozed", paneId, transitionCtx);
         return snoozePane(entries, pane, agent, until as Date, now);
-      case "restore":
+      case "restore": {
+        // Record `restored` only when the command actually removed
+        // organize state — a no-op restore is not a transition.
+        const before = entries[paneId];
+        const hadState =
+          before !== undefined &&
+          (before.settled !== undefined ||
+            before.snoozed !== undefined ||
+            before.archived !== undefined ||
+            before.pinned !== undefined ||
+            before.order !== undefined);
         restorePane(entries, paneId);
+        if (hadState) {
+          appendOrganizeTransition(state, sessionKey, "restored", paneId, {
+            ...transitionCtx,
+            workspaceId: before?.workspace_id,
+          });
+        }
         return undefined;
+      }
       case "pin":
         return pinPane(entries, pane, agent, now);
       case "unpin":
@@ -494,8 +526,53 @@ async function reconcileOnce(options: CliOptions): Promise<ReconcileResult> {
   const sessionKey = sessionKeyFor(options);
   const mutation = await updateState((state) => {
     const entries = sessionEntries(state, sessionKey);
-    const cleared = resolveState(entries, agents, now).clearedPaneIds;
+    // Snapshot hide-kind/workspace info BEFORE resolution deletes marks
+    // and entries — cleared/pruned transitions still need honest context.
+    const hideKindBefore = new Map<string, boolean>();
+    const workspaceBefore = new Map<string, string | undefined>();
+    for (const [paneId, e] of Object.entries(entries)) {
+      hideKindBefore.set(
+        paneId,
+        e.settled !== undefined || e.snoozed !== undefined || e.archived !== undefined,
+      );
+      workspaceBefore.set(paneId, e.workspace_id);
+    }
+    const resolved = resolveState(entries, agents, now);
+    const cleared = resolved.clearedPaneIds;
     const pruned = pruneState(entries, livePaneIds, now);
+
+    // Organize-transition log (#182): record hide-kind clears caused by
+    // expiry/generation resolution and retention pruning. Pin/order-only
+    // clears are layout hints, not organize transitions.
+    const at = now.toISOString();
+    const paneById = new Map((snapshot.panes ?? []).map((p) => [p.pane_id, p]));
+    const clearedByPane = new Map<
+      string,
+      Array<{ field: string; cause: "expired" | "generation" | "session_mismatch" }>
+    >();
+    for (const cm of resolved.clearedMarks) {
+      if (cm.field === "pinned") continue;
+      const list = clearedByPane.get(cm.pane_id) ?? [];
+      list.push(cm);
+      clearedByPane.set(cm.pane_id, list);
+    }
+    for (const [paneId, marks] of clearedByPane) {
+      appendClearedTransitions(state, sessionKey, paneId, marks, {
+        pane: paneById.get(paneId),
+        agent: agents[paneId],
+        workspaceId: workspaceBefore.get(paneId),
+        at,
+      });
+    }
+    for (const paneId of pruned) {
+      if (hideKindBefore.get(paneId) !== true) continue;
+      appendTransition(state, sessionKey, {
+        kind: "cleared",
+        paneId,
+        ctx: { workspaceId: workspaceBefore.get(paneId), at },
+        cause: "pruned",
+      });
+    }
     // A pane can lose one mark while keeping others (e.g. settle expired but
     // pin survives); project the post-resolution entry, not a blanket clear.
     const clearedEntries = cleared
@@ -943,13 +1020,71 @@ async function cmdWatch(options: CliOptions): Promise<void> {
   if (!stopping) process.exitCode = 1;
 }
 
+/**
+ * `transitions` — read-only page over the per-session organize-transition
+ * log (#182, ADR-0029). Consumers (rebuildup.projects settle triggers)
+ * drain it via `--after <seq>`; `head_seq`/`oldest_seq`/`dropped` let a
+ * consumer detect a cursor older than retention (`cursor_expired`)
+ * instead of silently missing transitions.
+ *
+ * Read-only: expirations resolve through the same in-memory `resolveState`
+ * path as `list` — nothing is persisted that `list` would not already
+ * resolve identically on its own reads.
+ */
+async function cmdTransitions(options: CliOptions): Promise<void> {
+  // Read-only: same in-memory resolve path as `list`; no mutation gating.
+  validateFlags(options.args, { "--after": "value", "--limit": "value" });
+  assertMaxPositionals(options.args, ["--after", "--limit"], 0, "transitions");
+  const now = new Date();
+  const snapshot = await sessionSnapshot(options);
+  const state = await loadState();
+  const sessionKey = sessionKeyFor(options);
+  const entries = state.sessions[sessionKey] ?? {};
+  resolveState(entries, snapshot.agents ?? {}, now);
+
+  const log = state.transitions?.[sessionKey];
+  const items = log?.items ?? [];
+  const headSeq = log?.seq ?? 0;
+  const oldestSeq = items.length > 0 ? (items[0] as InboxTransition).seq : null;
+
+  const afterRaw = flagValue(options.args, "--after");
+  let after: number | null = null;
+  if (afterRaw !== undefined) {
+    after = Number(afterRaw);
+    if (!Number.isInteger(after) || after < 0) {
+      fail("--after must be a non-negative integer seq", 2);
+    }
+  }
+  const limitRaw = flagValue(options.args, "--limit");
+  const limit = limitRaw === undefined ? 200 : Number(limitRaw);
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_TRANSITIONS_PER_SESSION) {
+    fail(`--limit must be an integer between 1 and ${MAX_TRANSITIONS_PER_SESSION}`, 2);
+  }
+
+  // `--after` is exclusive. Without it the newest page is returned;
+  // consumers always pass their stored cursor.
+  const page =
+    after === null ? items.slice(-limit) : items.filter((t) => t.seq > after).slice(0, limit);
+
+  emit({
+    contract: CONTRACT,
+    command: "transitions",
+    generated_at: now.toISOString(),
+    session_key: sessionKey,
+    head_seq: headSeq,
+    oldest_seq: oldestSeq,
+    dropped: log?.dropped ?? 0,
+    transitions: page,
+  });
+}
+
 async function cmdCapability(options: CliOptions): Promise<void> {
   validateFlags(options.args, {});
   assertMaxPositionals(options.args, [], 0, "capability");
   emit({
     contract: CONTRACT,
     plugin: PLUGIN_ID,
-    version: "0.3.0",
+    version: "0.4.0",
     commands: [
       "list",
       "settle",
@@ -964,6 +1099,7 @@ async function cmdCapability(options: CliOptions): Promise<void> {
       "unlink",
       "links",
       "reconcile",
+      "transitions",
       "watch",
       "capability",
     ],
@@ -992,6 +1128,7 @@ Usage:
   inbox links <pane_id> [--session NAME]
   inbox list [--attention] [--organize settled|snoozed|archived|none] [--search <text>] [--workspace <id>]
   inbox reconcile [--session NAME]
+  inbox transitions [--after <seq>] [--limit <n>] [--session NAME]
   inbox watch [--interval SECONDS] [--session NAME]
   inbox capability [--session NAME]
 
@@ -1022,6 +1159,8 @@ async function main(): Promise<void> {
       return cmdLinks(options);
     case "reconcile":
       return cmdReconcile(options);
+    case "transitions":
+      return cmdTransitions(options);
     case "_wake":
       return cmdWake(options);
     case "watch":

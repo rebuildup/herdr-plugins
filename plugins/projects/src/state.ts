@@ -75,6 +75,14 @@ export interface ProjectsState {
   pending_triggers?: PendingTriggerMark[];
   /** Count of marks dropped at the pending-triggers cap. */
   pending_triggers_dropped?: number;
+  /**
+   * Drained inbox organize-transition cursors (#182, ADR-0029), keyed by
+   * the inbox `session_key` verbatim (`hostname + canonical socket`) —
+   * projects never recomputes inbox's key itself. Value is the last
+   * `head_seq` fully processed; absent means "never drained" (the first
+   * drain consumes the retained log).
+   */
+  settle_cursors?: Record<string, number>;
 }
 
 export function emptyState(): ProjectsState {
@@ -127,12 +135,25 @@ export async function loadState(): Promise<ProjectsState> {
         typeof (m as PendingTriggerMark).socket_path === "string",
     );
     const dropped = parsed.pending_triggers_dropped;
+    const settleCursorsRaw =
+      typeof parsed.settle_cursors === "object" && parsed.settle_cursors !== null
+        ? parsed.settle_cursors
+        : undefined;
+    const settleCursors: Record<string, number> = {};
+    if (settleCursorsRaw !== undefined) {
+      for (const [key, value] of Object.entries(settleCursorsRaw)) {
+        if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
+          settleCursors[key] = value;
+        }
+      }
+    }
     return {
       version: STATE_SCHEMA_VERSION,
       projects: parsed.projects,
       pending_triggers: pendingTriggers,
       pending_triggers_dropped:
         typeof dropped === "number" && Number.isInteger(dropped) && dropped >= 0 ? dropped : 0,
+      ...(Object.keys(settleCursors).length > 0 ? { settle_cursors: settleCursors } : {}),
     };
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return emptyState();

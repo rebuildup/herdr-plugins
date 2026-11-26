@@ -14,6 +14,7 @@
 import { reportPaneMetadata, sessionSnapshot } from "../../../packages/herdr-client/src/index";
 import { resolveEntry } from "./model";
 import { sessionEntries, sessionKeyFor, updateState } from "./state";
+import { appendClearedTransitions, appendTransition } from "./transitions";
 
 interface EventEnvelope {
   event?: string;
@@ -55,7 +56,23 @@ async function main(): Promise<void> {
   if (name === "pane.closed") {
     await updateState((state) => {
       const entries = state.sessions[sessionKey];
+      const entry = entries?.[paneId];
+      // Record the organize clear before dropping the entry — the pane is
+      // gone, so only the stored workspace id survives as context.
+      const hadHideKind =
+        entry !== undefined &&
+        (entry.settled !== undefined ||
+          entry.snoozed !== undefined ||
+          entry.archived !== undefined);
       if (entries) delete entries[paneId];
+      if (hadHideKind) {
+        appendTransition(state, sessionKey, {
+          kind: "cleared",
+          paneId,
+          ctx: { workspaceId: entry?.workspace_id, at: new Date().toISOString() },
+          cause: "pane_closed",
+        });
+      }
     });
     return;
   }
@@ -66,6 +83,7 @@ async function main(): Promise<void> {
   const agent = snapshot.agents?.[paneId];
 
   const now = new Date();
+  const pane = (snapshot.panes ?? []).find((p) => p.pane_id === paneId);
   const outcome = await updateState(async (state) => {
     const entries = sessionEntries(state, sessionKey);
     const entry = entries[paneId];
@@ -82,6 +100,18 @@ async function main(): Promise<void> {
       delete entries[paneId];
     }
     entry.updated_at = now.toISOString();
+    // Organize-transition log (#182): hide-kind clears resolved by this
+    // hook are real organize mutations and must be recorded. Pin clears
+    // are layout hints and are not transitions.
+    const hideClears = result.clearedMarks.filter((m) => m.field !== "pinned");
+    if (hideClears.length > 0) {
+      appendClearedTransitions(state, sessionKey, paneId, hideClears, {
+        pane,
+        agent,
+        workspaceId: entry.workspace_id,
+        at: now.toISOString(),
+      });
+    }
     return { ...result, pinned: entry.pinned !== undefined };
   });
 

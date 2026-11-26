@@ -12,7 +12,6 @@ import {
   collectPrStatus,
   collectPrView,
   ensureGh,
-  GhError,
   isValidHeadSha,
   resolveForgeRepo,
   submitPrComment,
