@@ -8,9 +8,33 @@ platforms = ["linux", "macos", "windows"]
 # No build step: the plugin is dependency-free TypeScript executed by Bun
 # (runtime prerequisite, see plugins/checkpoints/README.md).
 #
+# Interactive TUI surface (#242, contract docs/contracts/tui-v1.md,
+# ADR-0031/0032/0033): one tab-placed pane entrypoint plus an `open`
+# action that pins the origin context and calls `plugin.pane.open`.
+# The UI consumes this plugin's own CLI for every read/mutation (reads
+# pass --no-drain so opening never runs the lazy pending-capture
+# drain), so the public contract stays the single source of truth;
+# mutations are confirm-gated and checked against
+# `capability`/`mutation_commands`.
+#
 # One pane-context action: `create` resolves the focused pane's repo via
 # HERDR_PLUGIN_CONTEXT_JSON. list/show/diff/delete take checkpoint ids and
 # stay CLI/agent-invoked only.
+
+[[panes]]
+id = "main"
+title = "Checkpoints: browser"
+description = "Checkpoint browser: list/search, show/diff/plan preview, guarded create/save/restore/delete, groups, gc/prune dry-run-first."
+platforms = ["linux", "macos", "windows"]
+placement = "tab"
+command = ["bun", "run", "src/tui.ts", "main"]
+
+[[actions]]
+id = "open"
+title = "Checkpoints: open UI"
+description = "Open the checkpoints browser TUI in a new tab."
+contexts = ["pane", "workspace"]
+command = ["bun", "run", "src/tui.ts", "open"]
 
 [[actions]]
 id = "create"

@@ -9,7 +9,11 @@ user's index/worktree; `create`, `save`, `delete`, `restore`,
 and — for the restore commands only — the worktree/index.
 Every command (except `capability`/`help`) first drains pending
 work-unit auto-captures recorded by the plugin's event hooks — see
-"Auto-capture" below. Follows the same conventions as
+"Auto-capture" below. A caller that must not mutate on a read-only
+open (the interactive TUI, `docs/contracts/tui-v1.md` §5.1 /
+ADR-0033 §3.1) passes the additive `--no-drain` flag to skip the
+drain; pending marks are left untouched for a later invocation.
+Follows the same conventions as
 `herdr-plugins.git/v1` (`docs/contracts/git-v1.md`).
 
 ## Discovery
@@ -46,6 +50,10 @@ bun run src/cli.ts gc [--repo PATH] [--dry-run]
 bun run src/cli.ts prune [--repo PATH] [--dry-run]
 ```
 
+- `--no-drain` (accepted by every command): skips the lazy
+  pending-capture drain described under "Auto-capture". Additive;
+  default behavior is unchanged. The interactive TUI passes it on all
+  read-only views so opening never mutates plugin state.
 - Repo target for `create`: `--repo PATH` (any path inside the work
   tree), or a pane id — positional argument, `HERDR_PANE_ID`, or
   `HERDR_PLUGIN_CONTEXT_JSON.focused_pane_id` — resolved through the
@@ -310,7 +318,8 @@ The manifest registers two event hooks (`src/hook.ts`):
 - `pane.closed` — drops the pane's marks.
 
 Every CLI command then **lazily drains** pending marks before doing
-its own work: each mark whose generation still matches the live
+its own work (unless invoked with `--no-drain`): each mark whose
+generation still matches the live
 snapshot becomes an `auto` checkpoint of the pane's repo; stale or
 unresolvable marks are dropped. Drain outcomes appear in the payload
 as `auto_captures` (omitted when empty):

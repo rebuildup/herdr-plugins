@@ -29,7 +29,7 @@ implement against is [`docs/contracts/tui-v1.md`](../contracts/tui-v1.md).
 | rebuildup.inbox | inbox/v1 stable | #230 | 17 | 8 | inbox browser + organize verbs + links/transitions |
 | rebuildup.git (+forge) | git/v1 stable | #230 | 17 | 5 | status/files/diff/log/compare browser + stage/commit/branch/push + PR/issue workflows |
 | rebuildup.projects | projects/v1 stable | #231 | 13 | 1 (`open`) | implemented #240 — registry browser + repos membership + settings + scripts/run/stop + worktree info |
-| rebuildup.checkpoints | checkpoints/v1 stable | #231 | 12 | 1 | list/show/diff/plan + guarded restore/delete/gc |
+| rebuildup.checkpoints | checkpoints/v1 stable | #231 | 12 | 2 (`create`, `open`) | implemented #242 — list/show/diff/plan + guarded create/save/restore/delete + groups + gc/prune dry-run-first |
 | rebuildup.automations | automations/v1 stable | #231 | 14 | 0 | task CRUD + schedule + runs + driver diagnostics |
 | rebuildup.conversations | conversations/v1 stable | #232 | 8 | 0 | session/history/search/show browser + usage summary |
 | rebuildup.usage | usage/v1 stable | #232 | 5 | 0 | usage/quota/divergence/cost reports with filters |
