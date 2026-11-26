@@ -51,3 +51,38 @@ extraction until a second consumer justifies it).
 
 [Bun](https://bun.sh) — the plugin is dependency-free TypeScript run
 directly by `bun run src/cli.ts`.
+
+## Interactive TUI (#247)
+
+```toml
+# herdr-plugin.toml (already declared)
+[[panes]] id = "main"  placement = "tab"  command = ["bun","run","src/tui.ts","main"]
+[[actions]] id = "open" contexts = ["pane","workspace"]  command = ["bun","run","src/tui.ts","open"]
+```
+
+- `open` pins the origin context once and calls `plugin.pane.open`
+  with `placement = "tab"`, forwarding the pins as `HERDR_TUI_*` env
+  vars. `HERDR_PANE_ID` inside the UI is the UI pane's own surface
+  identity — never a mutation target.
+- The UI consumes this plugin's own CLI (`src/cli.ts`) for every read.
+  Opening performs reads only (`list`) — it never probes live.
+- Surfaces: saved-machine list (enabled/disabled/selected +
+  last-known probe state), per-machine detail (target, session,
+  reachability, remote herdr version/protocol, plugin surface, remote
+  plugin entries), `p`robe selected / `a`ll (slow SSH probes run in
+  the task runner — progress shown, Ctrl-C/Esc cancels the CLI
+  child), `i` capability/contract info, `R` refresh.
+- READ-ONLY: the plugin has no mutating commands; the TUI exposes no
+  mutating affordance. Machine lifecycle stays with `herdr machine`.
+- Non-TTY stdin degrades to a plain-text machine list; the
+  non-interactive CLI is unchanged.
+
+Opt-in keybind (user-owned; plugins never write herdr config):
+
+```toml
+[[keys.command]]
+key = "prefix+M"
+type = "plugin_action"
+command = "rebuildup.machines.open"
+description = "open machines TUI"
+```

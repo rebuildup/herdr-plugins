@@ -35,9 +35,52 @@ annotated index for client sync (herdr-t3 read surface).
 
 T1–T4 complete (#136/#141/#142/#143): all eleven commands implemented;
 contract `herdr-plugins.artifacts/v1` is **stable** (additive changes
-only). CLI-only plugin — no `[[actions]]`/`[[events]]`. Session-bound
+only). TUI surface added in #247 (`herdr-plugins.tui/v1`): a `main`
+pane entrypoint plus an `open` action — see below. Session-bound
 commands need a reachable herdr session (`session.snapshot`) for
 identity and staleness reporting; `gc` runs offline.
+
+## Interactive TUI (#247)
+
+```toml
+# herdr-plugin.toml (already declared)
+[[panes]] id = "main"  placement = "tab"  command = ["bun","run","src/tui.ts","main"]
+[[actions]] id = "open" contexts = ["pane","workspace"]  command = ["bun","run","src/tui.ts","open"]
+```
+
+- `open` pins the origin context once and calls `plugin.pane.open`
+  with `placement = "tab"`, forwarding the pins as `HERDR_TUI_*` env
+  vars. `HERDR_PANE_ID` inside the UI is the UI pane's own surface
+  identity — never a mutation target.
+- The UI consumes this plugin's own CLI (`src/cli.ts`) for every read
+  and mutation, so the public contract stays the single source of
+  truth. Opening performs reads only (`list`/`get`).
+- Surfaces: artifact list with `/` filter and server-side `s`earch,
+  per-artifact detail (metadata + resolved path; the plugin never
+  renders payload bytes — html/image/pdf get an explicit `o`pen
+  externally via the OS handler), `v`erify integrity, `n` register
+  (path/kind/storage/title/refs + confirm), `l` deliver path
+  reference to a pane/agent (confirm), `d` delete (confirm; a
+  referenced artifact earns a second explicit force confirm), and
+  `g` gc — always dry-run preview first, collection only after an
+  explicit confirm.
+- Every mutation is confirm-gated (exact target + consequence, Esc
+  cancels), checked against `capability`/`mutation_commands` (fail
+  closed when unavailable), and re-validates the artifact via `get`
+  immediately before writing — a vanished artifact aborts `stale`, a
+  changed sha256/path asks before applying.
+- Non-TTY stdin degrades to a plain-text artifact list; the
+  non-interactive CLI is unchanged.
+
+Opt-in keybind (user-owned; plugins never write herdr config):
+
+```toml
+[[keys.command]]
+key = "prefix+A"
+type = "plugin_action"
+command = "rebuildup.artifacts.open"
+description = "open artifacts TUI"
+```
 
 ## Usage
 

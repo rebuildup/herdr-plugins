@@ -16,7 +16,7 @@ implement against is [`docs/contracts/tui-v1.md`](../contracts/tui-v1.md).
 | field | meaning |
 | --- | --- |
 | `cli` | `implemented` — contract-covered CLI command exists |
-| `tui_action` | `declared:<id>` — a manifest `[[actions]]` entry exists today (inbox ×8, git ×5, checkpoints ×1, projects ×1); `none` — no action yet |
+| `tui_action` | `declared:<id>` — a manifest `[[actions]]` entry exists today (inbox ×8, git ×5, checkpoints ×1, projects ×1, artifacts ×1, secrets ×1, machines ×1); `none` — no action yet |
 | `interactive_tui` | `planned:#NNN` — scheduled in that implementation ticket (#230 Inbox/Git/Forge, #231 Projects/Scripts/Checkpoints/Automations, #232 Conversations/Usage/Controls/Handoff/TextGen, #233 Artifacts/Secrets/Machines/MCP diagnostics); `implemented:#NNN` — shipped in that ticket; `n/a` — daemon-, agent-, or diagnostic-only surface with no interactive TUI planned |
 | `gui` | GUI is owned by herdr-t3 (#7). This repo records consumption intent only — **GUI-done never implies TUI-done** |
 | `real_machine_evidence` | `docs/research/` paths recording live verification; absence means no recorded real-machine run, not necessarily untested |
@@ -36,9 +36,9 @@ implement against is [`docs/contracts/tui-v1.md`](../contracts/tui-v1.md).
 | rebuildup.controls | controls/v1 stable | #232 | 8 | 0 | agent send/command/wait/interrupt/read/rename/start |
 | rebuildup.handoff | handoff/v1 stable | #232 | 9 | 0 | records/lineage + execute/delegate/merge-back |
 | rebuildup.textgen | textgen/v1 stable | #232 | 5 | 0 | task picker + result review + explicit adopt; config |
-| rebuildup.artifacts | artifacts/v1 stable | #233 | 10 | 0 | list/search/get/verify + register/delete/deliver/gc |
-| rebuildup.secrets | secrets/v1 stable | #233 | 5 | 0 | metadata-only resolve + explicit run/inject + config |
-| rebuildup.machines | machines/v1 draft | #233 | 3 | 0 | inventory table + probe; lifecycle stays `herdr machine` |
+| rebuildup.artifacts | artifacts/v1 stable | #233 | 10 | 1 (`open`) | implemented #247 — registry browser + register/search + verify + delete(force-confirm)/deliver/gc(dry-run first); payload never rendered |
+| rebuildup.secrets | secrets/v1 stable | #233 | 5 | 1 (`open`) | implemented #247 — binding browser + metadata-only resolve + explicit run/inject + config init; values never displayed (ADR-0027) |
+| rebuildup.machines | machines/v1 draft | #233 | 3 | 1 (`open`) | implemented #247 — inventory browser + on-demand probe (progress+cancel) + capability info; read-only, lifecycle stays `herdr machine` |
 | rebuildup.mcp | mcp/v1 stable | #233 | 3 CLI + 24 tools | 0 | diagnostics only — the stdio server is NOT screen-ified |
 
 ## Foundation row (#236)
