@@ -74,3 +74,28 @@ Output is one JSON document on stdout; errors are
 (exit 1 handled, 2 usage).
 
 See `docs/contracts/controls-v1.md` and `docs/specs/controls.md`.
+
+## Interactive TUI
+
+The plugin ships a tab-placed pane entrypoint plus an `open` action
+(`herdr-plugins.tui/v1`, ADR-0031/0032/0033, issue #245):
+
+```bash
+herdr plugin action invoke rebuildup.controls.open   # or the manifest pane
+```
+
+The TUI is an agent browser: pick an agent pane for `send`,
+`command` (provider slash-command passthrough), `wait`, `interrupt`
+(PTY-level keys), `read` (bounded scrollback), `rename`, and `focus`;
+`s` starts an agent on a shell pane with the per-provider launch table
+(kind, name, model, reasoning, permission-mode, resume). Boundary: the
+herdr TUI already covers plain agent browsing and attach — this surface
+exposes only the plugin-contract capabilities above (launch args,
+wait-until, PTY interrupt, scrollback reads, generation guards).
+
+Safety contract (tui-v1 §5): open is read-only; every mutation is
+confirm-gated with the exact target shown; mutations pass the pinned
+`--expect-pane/--expect-state-seq/--expect-agent-session` generation
+signals so a stale agent generation aborts `stale_generation`; ops are
+gated against `capability`/`mutation_commands`; all contract calls run
+through the plugin CLI so CLI/MCP/GUI behavior cannot drift.

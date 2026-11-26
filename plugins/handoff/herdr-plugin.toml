@@ -8,9 +8,32 @@ platforms = ["linux", "macos", "windows"]
 # No build step: the plugin is dependency-free TypeScript executed by Bun
 # (runtime prerequisite, see plugins/handoff/README.md).
 #
-# No [[actions]] / [[events]] / [[startup]]: the plugin is CLI-only.
-# T1 (#103) shipped the payload contract, state store, and read-side
-# commands; T2 (#104) adds same-host execute/resume-info; T3 (#105)
-# adds cross-machine execute --remote; T4 (#106) adds delegation
-# lineage (delegate/merge-back), worktree targets, and the #30/#32
-# boundaries (ADR-0021).
+# Interactive TUI surface (#245, contract docs/contracts/tui-v1.md,
+# ADR-0031/0032/0033): one tab-placed pane entrypoint plus an `open`
+# action that pins the origin context and calls `plugin.pane.open`.
+# The UI consumes this plugin's own CLI for every contract operation
+# (list/status/execute/delegate/merge-back/create/resume-info/
+# remote-probe) so CLI/MCP/GUI behavior cannot drift; record detail
+# opens read-only (`status --no-reconcile --no-resolve-refs`) and
+# ref resolution / remote probes / the delivered→done reconcile are
+# explicit keys. Execute target pickers enumerate panes/workspaces via
+# the documented session.snapshot socket read; `f` returns focus to
+# the origin pane via pane.focus, guarded to the record's own
+# host+session. Mutations are confirm-gated with exact target identity
+# (incl. remote machine) and checked against
+# `capability`/`mutation_commands`.
+
+[[panes]]
+id = "main"
+title = "Handoff: records"
+description = "Handoff record browser: list/status/lineage, resume-info, execute/delegate/merge-back with target selection, remote machines, and return-to-origin focus."
+platforms = ["linux", "macos", "windows"]
+placement = "tab"
+command = ["bun", "run", "src/tui.ts", "main"]
+
+[[actions]]
+id = "open"
+title = "Handoff: open records UI"
+description = "Open the handoff record TUI in a new tab."
+contexts = ["pane", "workspace"]
+command = ["bun", "run", "src/tui.ts", "open"]
