@@ -9,6 +9,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { ghChildEnv } from "../../../packages/git-core/src/git-env";
 
 export type GhErrorKind = "gh_missing" | "timeout" | "gh_error" | "stale_head";
 
@@ -42,11 +43,14 @@ export function runGh(
   return new Promise((resolve, reject) => {
     const child = spawn("gh", args, {
       cwd,
-      env: {
-        ...process.env,
+      // gh shells out to git for repo/remote resolution, so it gets the same
+      // GIT_* sanitization as git.ts plus GH_* targeting/debug stripping
+      // (GH_REPO could silently retarget the forge repo). Auth env
+      // (GH_TOKEN/GITHUB_TOKEN/GH_HOST/GH_ENTERPRISE_TOKEN/...) is preserved.
+      env: ghChildEnv({
         GH_PROMPT_DISABLED: "1",
         LC_ALL: "C",
-      },
+      }),
       // stdin is always piped and closed immediately when unused, so gh
       // can never block waiting for interactive input.
       stdio: ["pipe", "pipe", "pipe"],

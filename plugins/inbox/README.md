@@ -63,6 +63,7 @@ bun run src/cli.ts link <pane_id> --pr <owner>/<repo>#<n> [--verify]
 bun run src/cli.ts unlink <pane_id> --issue <owner>/<repo>#<n>
 bun run src/cli.ts links <pane_id>
 bun run src/cli.ts reconcile
+bun run src/cli.ts transitions [--after <seq>] [--limit <n>]
 bun run src/cli.ts watch [--interval SECONDS]
 bun run src/cli.ts watch-pr [pane_id] [--interval SECONDS] [--once] [--git-root PATH]
 bun run src/cli.ts capability
@@ -74,6 +75,11 @@ plugin resolves it from `HERDR_PANE_ID` / `HERDR_PLUGIN_CONTEXT_JSON`.
 `watch` is an opt-in long-running reconciler (subscription + periodic
 expiry). Without it or an event, snooze expiry materializes lazily on the
 next command invocation — see `docs/specs/inbox.md` for the constraint.
+
+`transitions` is a read-only page over the per-session organize-transition
+log (ADR-0029): every settle/snooze/restore/clear is recorded with a
+monotonic `seq`, and consumers drain it via `--after <seq>` —
+`rebuildup.projects` uses it for `runOnSettle`/`stopOnSettle` triggers.
 
 `watch-pr` is likewise opt-in: run it (or `watch-pr --once` per
 invocation) only while you want forge polling. It reads PR state solely

@@ -258,6 +258,26 @@ as expired at read time, so no client ever observes a stale "snoozed" state.
 stays correct. `reconcile` re-projects tokens for every organized pane,
 which is the repair path for partial projection failures.
 
+## Target selection and ambient isolation
+
+Socket targeting follows `docs/contracts/inbox-v1.md` → Target selection
+(implemented in `packages/herdr-client` `resolveTarget`):
+
+- Explicit `--socket`/`--session` beat ambient `HERDR_SOCKET_PATH`/
+  `HERDR_SESSION`; any explicit↔ambient or ambient↔ambient contradiction
+  fails closed with `target_conflict` — an ambient `HERDR_SOCKET_PATH`
+  exported for session A can never silently redirect an explicit
+  `--session B` invocation (issue #83).
+- Mutating commands (`settle`/`snooze`/`restore`/`reconcile`/`watch`/
+  `_wake`, and the event hooks which run with `mutation: true`) require
+  an explicit or consistent ambient target; the implicit default socket
+  is rejected with `target_required`.
+- Ambient pane identity (`HERDR_PANE_ID`, `HERDR_WORKSPACE_ID`,
+  `HERDR_TAB_ID`, `HERDR_PLUGIN_CONTEXT_JSON`) is verified against the
+  resolved session's snapshot before metadata writes
+  (`ambient_identity_mismatch`); an explicit positional pane id bypasses
+  the ambient check but must exist in the target session.
+
 ## Pane and session identity
 
 State entries are keyed by `pane_id` **within a session namespace**. The
@@ -306,6 +326,29 @@ would conflict with other plugins and herdr-t3's own views. See ADR-0004.
 
 Hook failures are logged to the plugin command log and never affect herdr.
 
+## Organize-transition log and `transitions` command (#182, ADR-0029)
+
+Every real organize mutation appends one `InboxTransition` to a
+per-session log in `state.json` (`transitions` key, schema-v2
+namespaced like entries): `seq` (monotonic per session), `at`, `kind`
+(`settled`/`snoozed`/`restored`/`cleared`), `pane_id`, and context
+fields captured from the snapshot the mutating command already loaded
+(`workspace_id`, `cwd`, `agent_status`, `state_change_seq`,
+`agent_session`). `cleared` transitions carry `cause`
+(`expired`/`generation`/`session_mismatch`/`pane_closed`/`pruned`) and
+are recorded by reconcile, the `agent_status_changed`/`pane.closed`
+hooks, and retention pruning — never by pin/order (layout hints).
+
+`transitions [--after <seq>] [--limit <n>]` is the read-only drain
+surface (contract `herdr-plugins.inbox/v1`, additive in 0.4.0): it
+returns `{session_key, head_seq, oldest_seq, dropped, transitions[]}`
+with `--after` exclusive. Retention caps the log at 500 items per
+session; evicted items increment `dropped` so a consumer can detect a
+cursor older than the retained window (`cursor_expired`) instead of
+assuming a gapless history. `rebuildup.projects` `runOnSettle`/
+`stopOnSettle` (#182) drains this log lazily — inbox never pushes and
+never fabricates herdr events.
+
 ## Manifest actions
 
 `settle`, `restore`, `snooze`, `pin`, `unpin`, `archive`, `unarchive`
@@ -329,4 +372,4 @@ with no `--until` uses `defaultSnooze` from the plugin `config.json`.
   *content* changes do not wake — only the contracted trigger set does.
 - True "required check passed" / review-decision semantics: check
   *failure* is detected via `gh pr checks` buckets; "all required checks
-  green" is not a distinct trigger in v0.4.0.
+  green" is not a distinct trigger in v0.5.0.

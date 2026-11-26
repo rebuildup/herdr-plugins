@@ -262,6 +262,8 @@ const PLUGIN = path.join(__dirname, "..", "plugins", "projects");
 const HOOK = path.join(PLUGIN, "src", "hook.ts");
 const CLI = path.join(PLUGIN, "src", "cli.ts");
 
+let deadSocketPath: string | null = null;
+
 function baseEnv(extra?: Record<string, string>): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
@@ -275,6 +277,12 @@ function baseEnv(extra?: Record<string, string>): Record<string, string> {
     }
     env[key] = value;
   }
+  // #199 hygiene: the settle-trigger drain resolves a socket on EVERY
+  // scripts-family call. Default to a dead socket so tests that do not
+  // pass one can never reach the developer's live herdr session; tests
+  // that need a socket pass HERDR_SOCKET_PATH via `extra`.
+  if (deadSocketPath === null) deadSocketPath = path.join(tempDir(), "no-such-herdr.sock");
+  env.HERDR_SOCKET_PATH = deadSocketPath;
   if (extra) Object.assign(env, extra);
   return env;
 }
@@ -464,7 +472,10 @@ describe("scripts tick drain (fake hook events)", () => {
       });
       expect(hook.status).toBe(0);
 
-      const tick = await runCli(["scripts", "tick"], { HERDR_PLUGIN_STATE_DIR: stateDir });
+      const tick = await runCli(["scripts", "tick"], {
+        HERDR_PLUGIN_STATE_DIR: stateDir,
+        HERDR_SOCKET_PATH: fake.socketPath,
+      });
       expect(tick.status).toBe(0);
       const triggers = tick.json?.triggers as {
         fired: Array<Record<string, unknown>>;
@@ -482,7 +493,9 @@ describe("scripts tick drain (fake hook events)", () => {
       // Execution surface: dedicated workspace created IN the worktree.
       expect(fake.createdCwds).toEqual([worktree]);
       expect(fake.inputs[0]).toContain("echo setup-ran");
-      expect(fake.inputs[0]).toContain("__HERDR_DONE_");
+      // The runner injects command and marker as separate send_input
+      // lines (#67 per-line parsing); assert across all injected input.
+      expect(fake.inputs.join("\n")).toContain("__HERDR_DONE_");
 
       // Run record carries the trigger provenance.
       const runs = await loadRuns();
@@ -493,10 +506,16 @@ describe("scripts tick drain (fake hook events)", () => {
       expect(run?.repo.root).toBe(worktree);
       expect(run?.project_id).toBe(projectId);
 
-      // Marks consumed; a second tick is a no-op — no double-fire.
+      // Marks consumed; a second tick fires nothing new. The settle
+      // drain reports inbox_unavailable (dead test socket) — honest,
+      // never an error.
       const tick2 = await runCli(["scripts", "tick"], { HERDR_PLUGIN_STATE_DIR: stateDir });
       expect(tick2.status).toBe(0);
-      expect(tick2.json?.triggers).toBeUndefined();
+      const triggers2 = tick2.json?.triggers as
+        | { fired: unknown[]; inbox_unavailable?: boolean }
+        | undefined;
+      expect(triggers2?.fired ?? []).toHaveLength(0);
+      expect(triggers2?.inbox_unavailable).toBe(true);
       expect(fake.createdCwds).toHaveLength(1);
       expect(Object.keys((await loadRuns()).runs)).toHaveLength(1);
     } finally {
@@ -510,7 +529,13 @@ describe("scripts tick drain (fake hook events)", () => {
     try {
       const tick = await runCli(["scripts", "tick"], { HERDR_PLUGIN_STATE_DIR: stateDir });
       expect(tick.status).toBe(0);
-      expect(tick.json?.triggers).toBeUndefined();
+      // No worktree fires; the settle drain reports inbox_unavailable on
+      // the dead test socket — still no fabricated trigger activity.
+      const triggers = tick.json?.triggers as
+        | { fired: unknown[]; inbox_unavailable?: boolean }
+        | undefined;
+      expect(triggers?.fired ?? []).toHaveLength(0);
+      expect(triggers?.inbox_unavailable).toBe(true);
       expect(fake.createdCwds).toHaveLength(0);
       expect(Object.keys((await loadRuns()).runs)).toHaveLength(0);
     } finally {
@@ -536,7 +561,10 @@ describe("scripts tick drain (fake hook events)", () => {
       });
       expect(hook.status).toBe(0);
 
-      const tick = await runCli(["scripts", "tick"], { HERDR_PLUGIN_STATE_DIR: stateDir });
+      const tick = await runCli(["scripts", "tick"], {
+        HERDR_PLUGIN_STATE_DIR: stateDir,
+        HERDR_SOCKET_PATH: fake.socketPath,
+      });
       expect(tick.status).toBe(0);
       const triggers = tick.json?.triggers as {
         fired: unknown[];
@@ -569,7 +597,10 @@ describe("scripts tick drain (fake hook events)", () => {
         });
         expect(hook.status).toBe(0);
       }
-      const tick = await runCli(["scripts", "tick"], { HERDR_PLUGIN_STATE_DIR: stateDir });
+      const tick = await runCli(["scripts", "tick"], {
+        HERDR_PLUGIN_STATE_DIR: stateDir,
+        HERDR_SOCKET_PATH: fake.socketPath,
+      });
       expect(tick.status).toBe(0);
       const triggers = tick.json?.triggers as { fired: unknown[] };
       expect(triggers.fired).toHaveLength(1);
@@ -592,7 +623,10 @@ describe("scripts tick drain (fake hook events)", () => {
         ...worktreeCreatedEnv(fake.socketPath, worktree),
         HERDR_PLUGIN_STATE_DIR: stateDir,
       });
-      const tick = await runCli(["scripts", "tick"], { HERDR_PLUGIN_STATE_DIR: stateDir });
+      const tick = await runCli(["scripts", "tick"], {
+        HERDR_PLUGIN_STATE_DIR: stateDir,
+        HERDR_SOCKET_PATH: fake.socketPath,
+      });
       expect(tick.status).toBe(0);
       const triggers = tick.json?.triggers as {
         fired: unknown[];
@@ -620,7 +654,10 @@ describe("scripts tick drain (fake hook events)", () => {
         ...worktreeCreatedEnv(fake.socketPath, worktree),
         HERDR_PLUGIN_STATE_DIR: stateDir,
       });
-      const tick = await runCli(["scripts", "tick"], { HERDR_PLUGIN_STATE_DIR: stateDir });
+      const tick = await runCli(["scripts", "tick"], {
+        HERDR_PLUGIN_STATE_DIR: stateDir,
+        HERDR_SOCKET_PATH: fake.socketPath,
+      });
       expect(tick.status).toBe(0);
       const triggers = tick.json?.triggers as {
         fired: unknown[];
@@ -649,7 +686,10 @@ describe("scripts tick drain (fake hook events)", () => {
       expect(hook.status).toBe(0);
       // Remove the worktree before the drain runs.
       git(repo, ["worktree", "remove", "--force", worktree]);
-      const tick = await runCli(["scripts", "tick"], { HERDR_PLUGIN_STATE_DIR: stateDir });
+      const tick = await runCli(["scripts", "tick"], {
+        HERDR_PLUGIN_STATE_DIR: stateDir,
+        HERDR_SOCKET_PATH: fake.socketPath,
+      });
       expect(tick.status).toBe(0);
       const triggers = tick.json?.triggers as {
         fired: unknown[];

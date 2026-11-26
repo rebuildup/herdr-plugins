@@ -539,7 +539,9 @@ describe("checkpoints cli", () => {
     ];
     const fake = await fakeHerdrSocket(panes);
     try {
-      const refused = await runCliAsync(["restore", id, "--socket", fake.socketPath]);
+      const refused = await runCliAsync(["restore", id, "--socket", fake.socketPath], {
+        HERDR_SOCKET_PATH: fake.socketPath,
+      });
       const error = expectErr(refused, "shared_worktree");
       expect(error.panes).toEqual(["w1:p1", "w1:p2"]);
       // Refusal happened before any mutation: no pre-restore checkpoint.
@@ -548,7 +550,9 @@ describe("checkpoints cli", () => {
       expect(list.total).toBe(1);
 
       // --force overrides the refusal.
-      const forced = await runCliAsync(["restore", id, "--socket", fake.socketPath, "--force"]);
+      const forced = await runCliAsync(["restore", id, "--socket", fake.socketPath, "--force"], {
+        HERDR_SOCKET_PATH: fake.socketPath,
+      });
       expectOk(forced);
       expect(readFileSync(path.join(repo, "a.txt"), "utf8")).toBe("v1\n");
     } finally {
@@ -570,7 +574,9 @@ describe("checkpoints cli", () => {
     ];
     const fake = await fakeHerdrSocket(panes);
     try {
-      const restored = await runCliAsync(["restore", id, "--socket", fake.socketPath]);
+      const restored = await runCliAsync(["restore", id, "--socket", fake.socketPath], {
+        HERDR_SOCKET_PATH: fake.socketPath,
+      });
       const payload = expectOk(restored);
       expect(payload.isolation).toBe("single_pane");
       expect(readFileSync(path.join(repo, "a.txt"), "utf8")).toBe("v1\n");

@@ -25,7 +25,7 @@ bun run src/cli.ts update <id> [--title T] [--pinned|--unpinned]
 bun run src/cli.ts archive|unarchive|pin|unpin <id>
 bun run src/cli.ts settings get|set|unset <id> [key] [value]
 bun run src/cli.ts scripts list <project|repo> [--repo PATH]
-bun run src/cli.ts scripts run <project> <name> [--repo PATH]
+bun run src/cli.ts scripts run <project> <name> [--repo PATH] [--shell auto|sh|cmd|powershell]
 bun run src/cli.ts scripts stop <run-id|project>
 bun run src/cli.ts scripts results [project]
 bun run src/cli.ts scripts logs <run-id>
@@ -40,15 +40,34 @@ actions). `scripts list` resolves project script definitions from
 in a dedicated herdr pane with a structured completion marker
 (exit 0/1/timeout/stopped/unknown — never fabricated), `scripts stop`
 interrupts the recorded pane, and `scripts results`/`logs` expose the
-run records. Multi-repo projects require `--repo` for `run`. Script
+run records. The pane's shell family (POSIX sh / cmd.exe / PowerShell)
+is auto-detected via `pane.process_info` with a host-OS fallback, or
+forced with `--shell`; each family gets its own exit-code marker
+(`#67`). Multi-repo projects require `--repo` for `run`. Script
 commands are trusted repo content executed with user privileges.
 `t3.json` scripts flagged `runOnWorktreeCreate` auto-run via the
 `worktree.created` hook event: the hook records a pending mark and the
 next `scripts tick` (or `scripts run|stop|results|logs`) drains it —
 repo membership is verified by `git-common-dir`, skips are reported in
 the payload's `triggers` block, and runs carry
-`trigger:{kind:"worktree.created", worktree_path}`. `runOnSettle`/
-`stopOnSettle` are not implemented — see docs/specs/projects.md.
+`trigger:{kind:"worktree.created", worktree_path}`. `t3.json` scripts
+flagged `runOnSettle`/`stopOnSettle` drain the installed inbox plugin's
+`transitions` log lazily (ADR-0029): settled panes fire
+`runOnSettle` scripts on their worktree root, and `stopOnSettle` stops
+only same-worktree running runs whose script carries the flag — runs
+carry `trigger:{kind:"inbox.settled", pane_id, transition_seq}`.
+
+`repos list` also reports the repo↔worktree association (#184): per
+member repo it calls herdr `worktree.list` (read-only,
+`trust_repository: false`), verifies each checkout by
+`git rev-parse --git-common-dir`, and returns `worktrees[]` with
+path/branch/dirty plus, for worktrees open in a herdr workspace,
+pane-addressed `herdr-plugins.git/v1` pointers and a compact `status`
+summary fetched via the sibling git plugin's CLI. Pane-less worktrees
+report path/branch/dirty only — no diff data is fabricated, and the
+plugin never creates worktrees or panes (herdr/Worktrunk own
+lifecycle). Unreachable herdr degrades to `worktrees: null` +
+`worktrees_error`; foreign checkouts land in `worktrees_skipped`.
 
 Full contract: `docs/contracts/projects-v1.md`. Spec: `docs/specs/projects.md`.
 Design: ADR-0009 (registry), ADR-0010 (script execution).

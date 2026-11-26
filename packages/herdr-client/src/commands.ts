@@ -4,17 +4,27 @@
  */
 
 import type { AgentInfo, AgentListResult, SessionSnapshot } from "./snapshot";
-import { type RequestOptions, request, resolveSocketPath, subscribe } from "./socket";
+import { type RequestOptions, request, resolveTarget, subscribe } from "./socket";
 
 export interface CallOptions extends RequestOptions {
-  /** Named herdr session; overrides HERDR_SESSION. */
+  /** Named herdr session; explicit flag, beats ambient HERDR_SESSION/HERDR_SOCKET_PATH. */
   session?: string | undefined;
-  /** Explicit socket path; overrides session resolution. */
+  /** Explicit socket path; beats ambient HERDR_SOCKET_PATH/HERDR_SESSION. */
   socketPath?: string | undefined;
+  /**
+   * Mutating operation: target resolution fails closed with
+   * `target_required` when it would fall back to the implicit default
+   * session socket (no explicit flag and no ambient HERDR_* target).
+   */
+  mutation?: boolean | undefined;
 }
 
 function socketFor(options: CallOptions): string {
-  return options.socketPath ?? resolveSocketPath({ session: options.session });
+  return resolveTarget({
+    session: options.session,
+    socketPath: options.socketPath,
+    mutation: options.mutation,
+  }).socketPath;
 }
 
 export async function sessionSnapshot(options: CallOptions = {}): Promise<SessionSnapshot> {
@@ -33,6 +43,50 @@ export async function sessionSnapshot(options: CallOptions = {}): Promise<Sessio
     snapshot.agents = map;
   }
   return snapshot;
+}
+
+export interface WorktreeListEntry {
+  path?: string;
+  branch?: string | null;
+  is_bare?: boolean;
+  is_detached?: boolean;
+  is_linked_worktree?: boolean;
+  is_prunable?: boolean;
+  label?: string | null;
+  open_workspace_id?: string | null;
+  [key: string]: unknown;
+}
+
+export interface WorktreeListResult {
+  source?: {
+    repo_key?: string;
+    repo_name?: string;
+    repo_root?: string;
+    source_checkout_path?: string;
+    source_workspace_id?: string;
+    [key: string]: unknown;
+  };
+  worktrees?: WorktreeListEntry[];
+  [key: string]: unknown;
+}
+
+/**
+ * `worktree.list` for a repository cwd (herdr protocol 22, verified
+ * 0.9.5). Read-only association surface: `trust_repository` is always
+ * false — an untrusted-repo failure surfaces to the caller, which must
+ * never retry with a trust grant (ADR-0029).
+ */
+export async function worktreeList(
+  cwd: string,
+  options: CallOptions = {},
+): Promise<WorktreeListResult> {
+  const result = (await request(
+    socketFor(options),
+    "worktree.list",
+    { cwd, trust_repository: false },
+    options,
+  )) as WorktreeListResult | undefined;
+  return result ?? {};
 }
 
 export async function agentList(options: CallOptions = {}): Promise<AgentListResult> {

@@ -8,11 +8,13 @@
  * or interleave state.
  */
 
-import { realpathSync } from "node:fs";
 import { mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
-import { pluginDirs, resolveSocketPath } from "../../../packages/herdr-client/src/socket";
+import { pluginDirs } from "../../../packages/herdr-client/src/socket";
+
+// Session discriminator shared with other plugins (herdr-client); re-exported
+// so existing `./state` imports keep working.
+export { sessionKeyFor } from "../../../packages/herdr-client/src/socket";
 
 export const PLUGIN_ID = "rebuildup.inbox";
 export const STATE_SCHEMA_VERSION = 2;
@@ -142,10 +144,55 @@ export interface InboxEntry {
 }
 
 /**
+ * Organize-transition kinds recorded in the per-session log (#182,
+ * ADR-0029). `cleared` covers every non-user removal path; `cause`
+ * distinguishes them. `pin`/`unpin`/`archive`/`unarchive` are layout or
+ * hide-kind mutations outside this enum and are not recorded — the log
+ * exists so consumers (rebuildup.projects settle triggers) can observe
+ * settle/restore intent, not to mirror every organize write.
+ */
+export type TransitionKind = "settled" | "snoozed" | "restored" | "cleared";
+
+/** Why an organize mark was cleared without an explicit user restore. */
+export type ClearedCause = "expired" | "generation" | "session_mismatch" | "pane_closed" | "pruned";
+
+/**
+ * One recorded organize transition. Fields beyond `kind`/`pane_id` are
+ * captured from the pane+agent snapshot already loaded by the mutating
+ * command — no extra socket calls, no PTY text. `seq` is the per-session
+ * monotonic cursor (1-based, gapless until retention drops).
+ */
+export interface InboxTransition {
+  seq: number;
+  at: string;
+  kind: TransitionKind;
+  pane_id: string;
+  workspace_id?: string | undefined;
+  cwd?: string | undefined;
+  agent_status?: string | undefined;
+  state_change_seq?: number | undefined;
+  agent_session?: AgentSessionRef | null | undefined;
+  /** `cleared` transitions only. */
+  cause?: ClearedCause | undefined;
+}
+
+/**
+ * Bounded per-session transition log. `seq` is the highest issued
+ * sequence number (the head cursor); `items` is capped at
+ * MAX_TRANSITIONS_PER_SESSION with the oldest dropped into `dropped`.
+ */
+export interface TransitionLog {
+  seq: number;
+  dropped: number;
+  items: InboxTransition[];
+}
+
+/**
  * State is namespaced per herdr session AND per host. The session key is
  * `hostname + canonical socket path`: pane ids are only unique within one
  * session (`w1:p1` exists in every session), and a state file shared across
  * hosts (synced home dir, forwarded socket) must not merge organize marks.
+ * The same key namespaces `transitions`.
  */
 export interface InboxState {
   version: typeof STATE_SCHEMA_VERSION;
@@ -155,6 +202,11 @@ export interface InboxState {
    * Additive optional field (schema stays v2); absent in pre-#178 files.
    */
   watch?: Record<string, Record<string, Record<string, LinkWatch>>> | undefined;
+  /**
+   * Organize-transition log per session key (additive, #182/ADR-0029).
+   * Optional on disk — state files written before the surface lack it.
+   */
+  transitions?: Record<string, TransitionLog>;
 }
 
 export function emptyState(): InboxState {
@@ -199,26 +251,6 @@ export function removeWatchLink(
   if (session && Object.keys(session).length === 0) delete state.watch?.[sessionKey];
 }
 
-/**
- * Session discriminator for state namespacing: hostname plus the canonical
- * (symlink-resolved) socket path the command will talk to. Socket path is
- * the only session identity the socket API exposes; canonicalization keeps
- * `/var` vs `/private/var` spellings of the same socket identical.
- */
-export function sessionKeyFor(options: {
-  session?: string | undefined;
-  socketPath?: string | undefined;
-}): string {
-  const socketPath = options.socketPath ?? resolveSocketPath({ session: options.session });
-  let canonical = socketPath;
-  try {
-    canonical = realpathSync(socketPath);
-  } catch {
-    canonical = path.resolve(socketPath);
-  }
-  return `${os.hostname()} ${canonical}`;
-}
-
 export function stateFilePath(): string {
   return path.join(pluginDirs(PLUGIN_ID).stateDir, "state.json");
 }
@@ -238,6 +270,37 @@ export async function loadState(): Promise<InboxState> {
     ) {
       return emptyState();
     }
+    // The transition log is append-only audit data: keep entries that
+    // look well-formed, drop malformed ones individually.
+    const transitionsRaw =
+      typeof parsed.transitions === "object" && parsed.transitions !== null
+        ? parsed.transitions
+        : undefined;
+    const transitions: Record<string, TransitionLog> = {};
+    if (transitionsRaw !== undefined) {
+      for (const [key, log] of Object.entries(transitionsRaw)) {
+        if (
+          typeof log === "object" &&
+          log !== null &&
+          typeof (log as TransitionLog).seq === "number" &&
+          Array.isArray((log as TransitionLog).items)
+        ) {
+          const l = log as TransitionLog;
+          transitions[key] = {
+            seq: l.seq,
+            dropped: typeof l.dropped === "number" ? l.dropped : 0,
+            items: l.items.filter(
+              (t): t is InboxTransition =>
+                typeof t === "object" &&
+                t !== null &&
+                typeof (t as InboxTransition).seq === "number" &&
+                typeof (t as InboxTransition).kind === "string" &&
+                typeof (t as InboxTransition).pane_id === "string",
+            ),
+          };
+        }
+      }
+    }
     return {
       version: STATE_SCHEMA_VERSION,
       sessions: parsed.sessions,
@@ -245,6 +308,7 @@ export async function loadState(): Promise<InboxState> {
         typeof parsed.watch === "object" && parsed.watch !== null
           ? (parsed.watch as InboxState["watch"])
           : undefined,
+      ...(Object.keys(transitions).length > 0 ? { transitions } : {}),
     };
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return emptyState();

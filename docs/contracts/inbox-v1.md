@@ -33,12 +33,12 @@ An external client resolves the CLI as follows:
 {
   "contract": "herdr-plugins.inbox/v1",
   "plugin": "rebuildup.inbox",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "commands": [
     "list", "settle", "snooze", "restore",
     "pin", "unpin", "archive", "unarchive", "order",
     "link", "unlink", "links",
-    "reconcile", "watch", "watch-pr", "capability"
+    "reconcile", "transitions", "watch", "watch-pr", "capability"
   ],
   "actions": ["settle", "restore", "snooze", "pin", "unpin", "archive", "unarchive"],
   "events": ["pane.agent_status_changed", "pane.closed"],
@@ -51,12 +51,34 @@ An external client resolves the CLI as follows:
 ## Target selection (Host / Session)
 
 The CLI always talks to **the herdr server owning the socket it resolves**.
-Resolution order:
+Explicit flags win over ambient environment; any contradiction between
+explicit and ambient targets — or between the two ambient variables — is a
+`target_conflict` error (exit 1), never a silent pick:
 
-1. `--socket PATH` (explicit; local socket path — see Remote hosts)
-2. `HERDR_SOCKET_PATH`
-3. `--session NAME` / `HERDR_SESSION` → `<config>/sessions/<name>/herdr.sock`
-4. default session socket `<config>/herdr.sock`
+1. `--socket PATH` / `--session NAME` (explicit; local socket path — see
+   Remote hosts). `--session NAME` resolves to
+   `<config>/sessions/<name>/herdr.sock` (`default` → `<config>/herdr.sock`).
+   When both flags are given they must agree on the same socket.
+2. Ambient context, consistent pair required when both are set:
+   `HERDR_SOCKET_PATH` wins over `HERDR_SESSION` →
+   `<config>/sessions/<name>/herdr.sock`; if both are set they must resolve
+   to the same socket.
+3. default session socket `<config>/herdr.sock` — implicit fallback.
+
+**Mutation gating**: `settle`, `snooze`, `restore`, `reconcile`, `watch`,
+and `_wake` mutate plugin state and pane metadata, so they require an
+explicit or ambient target — the implicit default socket is rejected with
+`target_required` (exit 1). Read commands (`list`, `capability`) may use
+the default fallback.
+
+**Ambient pane identity**: when the pane id comes from `HERDR_PANE_ID` or
+`HERDR_PLUGIN_CONTEXT_JSON.focused_pane_id` (not an explicit positional),
+the ambient `HERDR_WORKSPACE_ID`/`HERDR_TAB_ID` (or context
+`workspace_id`/`tab_id`) must match the pane's `workspace_id`/`tab_id` in
+the resolved session snapshot; a mismatch fails closed with
+`ambient_identity_mismatch` before any metadata write. An explicit
+positional pane id overrides the ambient pane id and is verified by
+session membership alone.
 
 Operating-system rules match herdr: unix socket on macOS/Linux, named pipe
 `\\.\pipe\<path>` on Windows (handled inside the client).
@@ -96,12 +118,20 @@ not globally unique.
 | `unlink` | `pane_id? --pr <repo>#<n>` or `--issue <repo>#<n>` | Remove one declared link. |
 | `links` | `pane_id?` | Read the pane's declared links (staleness resolved). |
 | `reconcile` | — | Resolve expirations/generation changes, prune stale entries, repair metadata. |
+| `transitions` | `--after <seq>` `--limit <n>` | Read-only page over the per-session organize-transition log (below). |
 | `watch` | `--interval SEC` | JSONL event stream + periodic reconcile (below). |
 | `watch-pr` | `[pane_id] [--interval SEC] [--once] [--git-root PATH]` | Opt-in PR-update watcher: polls declared PR links via the git plugin and restores attention on qualifying transitions (below). |
 | `capability` | — | Discovery document (above). |
 
 Global flags (after the command): `--session NAME`, `--socket PATH`,
-`--timeout MS` (per-request timeout, default 10000).
+`--timeout MS` (per-request timeout, default 10000). Global flags also
+accept `--name=value` form.
+
+Option parsing is strict: every `-`-prefixed token must be a flag the
+command documents (`--until`/`--for` on `snooze`, `--until` on `_wake`,
+`--interval` on `watch`); unknown options, `--flag=value` on boolean
+flags, missing flag values, invalid values, and extra positionals are
+usage errors (exit 2). A `--` separator ends option parsing.
 
 `--until` accepts ISO 8601, `+30m`/`+2h`/`+1d`, or bare `30m`. Without
 `--until`, `snooze` reads `defaultSnooze` from the plugin config dir's
@@ -155,9 +185,11 @@ only `session.snapshot` — no metadata projection, no execution surfaces.
 - Success: exactly one JSON document on stdout (pretty-printed, except
   `watch` which is JSONL — one compact object per line).
 - Failure: one JSON object on **stderr**,
-  `{"contract","ok":false,"error":{"code":"usage"|"error","message"}}`,
-  plus exit code `2` (usage) or `1` (handled error). Socket/transport
-  failures are errors — never an empty inbox.
+  `{"contract","ok":false,"error":{"code","message"}}`, plus exit code
+  `2` (usage: `"usage"` or `invalid_session`) or `1` (handled error:
+  `"error"`, `target_conflict`, `target_required`,
+  `ambient_identity_mismatch`). Socket/transport failures are errors —
+  never an empty inbox.
 - `pane_id` may be omitted when `HERDR_PANE_ID` or
   `HERDR_PLUGIN_CONTEXT_JSON.focused_pane_id` is set (manifest actions,
   event-hook contexts).
@@ -238,6 +270,49 @@ already succeeded; a later `reconcile`/`watch` repairs projections.
   cleared panes get tokens cleared. Re-running `reconcile` is the repair
   path for any partial projection failure.
 
+## `transitions` output (ADR-0029, #182)
+
+Inbox records every real organize transition in a per-session log inside
+the plugin state file (`transitions` key — internal, not part of this
+contract). `transitions` is the read-only drain surface external consumers
+use to observe settle/restore/clear activity; it never fabricates herdr
+events and never exposes the state file directly.
+
+```json
+{
+  "contract": "herdr-plugins.inbox/v1",
+  "command": "transitions",
+  "generated_at": "…",
+  "session_key": "hostname:socket-path",
+  "head_seq": 42,
+  "oldest_seq": 7,
+  "dropped": 3,
+  "transitions": [ { "seq": 8, "…": "…" } ]
+}
+```
+
+- `session_key` echoes the session namespace the page belongs to.
+- `head_seq` is the per-session monotonic head (0 when no log exists);
+  `oldest_seq` is the smallest retained `seq` (`null` when empty); `dropped`
+  counts transitions evicted by the 500-per-session retention cap. A
+  consumer whose stored cursor is below `oldest_seq`/`seq - dropped`
+  window MUST treat it as expired — transitions were lost — rather than
+  assume a gapless history.
+- `transitions` items carry `{seq, at, kind, pane_id}` plus context fields
+  captured from the same snapshot the mutating command already loaded:
+  `workspace_id`, `cwd`, `agent_status`, `state_change_seq`,
+  `agent_session` (fingerprint or `null`). `kind` is `settled` | `snoozed`
+  | `restored` | `cleared`; `cleared` items add `cause`:
+  `expired` | `generation` | `session_mismatch` | `pane_closed` | `pruned`.
+- Flags: `--after <seq>` is an **exclusive** cursor (only `seq > after`);
+  omit it to read the newest page (`--limit`, default 200, max 500). A
+  consumer drains by storing `head_seq` after each batch; replaying a
+  partially-processed batch is safe because `seq` is unique per session.
+- `transitions` is read-only: expiry/generation resolution is the same
+  deterministic in-memory path as `list`; nothing is persisted that `list`
+  would not already resolve identically. Pin/order changes are layout
+  hints and do **not** produce transitions.
+
 ## `watch` output and stop conditions
 
 JSONL on stdout:
@@ -261,7 +336,7 @@ deadline and runs one reconcile — this keeps pane metadata tokens fresh on
 the herdr host without user action (ADR-0005). `watch`/startup reconcile
 remain the repair paths for any missed wake.
 
-## `watch-pr` output and semantics (added in plugin v0.4.0)
+## `watch-pr` output and semantics (added in plugin v0.5.0)
 
 `watch-pr` is the opt-in PR-update attention watcher (Issue #178). It is a
 plain opt-in process — **no resident daemon, no webhook** (webhook/inbound

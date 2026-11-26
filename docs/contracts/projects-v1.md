@@ -30,6 +30,7 @@ bun run src/cli.ts settings set <id> <key> <value>
 bun run src/cli.ts settings unset <id> <key>
 bun run src/cli.ts scripts list <project|repo> [--repo PATH]
 bun run src/cli.ts scripts run <project> <name> [--repo PATH]
+    [--shell auto|sh|cmd|powershell]
 bun run src/cli.ts scripts stop <run-id|project>
 bun run src/cli.ts scripts results [project]
 bun run src/cli.ts scripts logs <run-id>
@@ -72,8 +73,11 @@ under a stable id:
 - `repos[].root` — absolute worktree root (`git rev-parse
   --show-toplevel`); linked worktrees resolve to their own root.
 - `repos[].remote` — normalized remote identity (`host/path`, `.git`
-  suffix and casing removed, scp/https unified); `null` when the repo
-  has no remote. This is the cross-checkout grouping key.
+  suffix and trailing slashes removed, scp/https/`ssh://` unified, host
+  lowercased with non-default port kept, **path case preserved
+  verbatim** — case-sensitive forges exist and consumers compare the
+  identity exactly); `null` when the repo has no remote. This is the
+  cross-checkout grouping key.
 - Registry state lives only under the plugin state dir
   (`HERDR_PLUGIN_STATE_DIR`), host-global (not per-session), single
   writer lock + atomic rename. The plugin never mutates herdr state.
@@ -157,7 +161,8 @@ Response: `{contract, command:"update", project, generated_at}`.
 ## `repos list <project>`
 
 Lists the repos bound to a project — the read side of multi-checkout
-grouping (#51). Each entry carries the stored membership fields plus
+grouping (#51) plus the repo↔worktree/diff read association (#184,
+ADR-0029 §2). Each entry carries the stored membership fields plus
 cheap live git inspection:
 
 ```json
@@ -172,10 +177,50 @@ cheap live git inspection:
       "added_at": "…",
       "branch": "main",
       "dirty": false,
-      "has_submodules": true
+      "has_submodules": true,
+      "worktree_submodules": "recursive",
+      "worktrees": [
+        {
+          "path": "/abs/repo-wt",
+          "branch": "feature",
+          "dirty": false,
+          "has_submodules": false,
+          "is_linked_worktree": true,
+          "is_bare": false,
+          "is_detached": false,
+          "is_prunable": false,
+          "label": "feature",
+          "open_workspace_id": "wKN",
+          "panes": [
+            {
+              "pane_id": "wKN:p1",
+              "workspace_id": "wKN",
+              "cwd": "/abs/repo-wt",
+              "commands": {
+                "status": "status wKN:p1",
+                "diff": "diff wKN:p1",
+                "files": "files wKN:p1",
+                "compare": "compare wKN:p1 <base> <head>"
+              },
+              "status": {
+                "contract": "herdr-plugins.git/v1",
+                "ok": true,
+                "repo_root": "/abs/repo-wt",
+                "branch": "feature",
+                "detached": false,
+                "changes": { "staged": 0, "unstaged": 2, "untracked": 1, "conflicted": 0 }
+              },
+              "status_error": null
+            }
+          ],
+          "panes_unavailable": false
+        }
+      ],
+      "worktrees_error": null
     }
   ],
   "skipped": [{ "root": "/abs/gone", "reason": "git_error" }],
+  "worktrees_skipped": [{ "path": "/abs/foreign-wt", "reason": "not_member_repo" }],
   "generated_at": "…"
 }
 ```
@@ -185,12 +230,55 @@ cheap live git inspection:
   remote — the identity then falls back to the root path).
 - `branch` (`git rev-parse --abbrev-ref HEAD`), `dirty`
   (`git status --porcelain` non-empty), and `has_submodules`
-  (`git submodule status` non-empty; non-zero exit or empty output =
-  false) are fetched live per repo under the command timeout.
+  (`git submodule status` non-empty output → `true`, empty output →
+  `false`, **non-zero exit or probe failure → `null` = unknown**) are
+  fetched live per repo under the command timeout. The submodule probe
+  is best-effort: its failure never hides the branch/dirty fields and
+  never guesses `false`.
 - A repo that is unreachable or no longer a work tree keeps its stored
   fields with `branch`/`dirty`/`has_submodules` = `null` and is also
   reported in `skipped` with a git-contract `reason` — never fabricated.
-- Read-only; unknown project id → `project_not_found`.
+- `worktree_submodules` is a read-only advisory: the repo's `t3.json`
+  `worktreeSubmodules` value (`recursive`|`top-level`|`none`, `null`
+  when absent/unparseable). Nothing consumes it — submodule init on
+  worktree creation is a herdr/Worktrunk-side gap (ADR-0029 §3).
+- `worktrees` is the herdr `worktree.list` association for the member
+  repo (socket method, `cwd` = member root, `trust_repository: false`
+  always — an untrusted-repo failure is reported, never retried with a
+  trust grant). Each entry is verified by `git rev-parse
+  --git-common-dir` equality with the member repo — the authoritative
+  same-repo test covering linked worktrees — then enriched by
+  `inspectRepo` (`branch`/`dirty`/`has_submodules`). Checkouts that
+  fail verification or are gone are reported in `worktrees_skipped`
+  (`no_path`, `worktree_gone`, `not_member_repo`, git kinds), never
+  attributed by guesswork. `worktrees` is `[]` when herdr reports no
+  worktrees.
+- `worktrees_error` is `null` on success; otherwise
+  `{reason, detail?}` — `session_unreachable` (socket connect/timeout),
+  an RPC `code` (e.g. `repo_untrusted`), or `repo_mismatch` (herdr's
+  `source.repo_root` canonicalizes to a different repo than the
+  member). On error `worktrees` is `null` — the association is
+  unavailable, not empty.
+- `open_workspace_id` is herdr's `WorktreeInfo.open_workspace_id`;
+  `panes` resolves it via `session.snapshot` (panes whose
+  `workspace_id` matches). `panes_unavailable: true` marks a stale or
+  unresolvable workspace id — `panes` is then `[]`.
+- `panes[].commands` are pane-addressed `herdr-plugins.git/v1` read
+  invocations (`status`/`diff`/`files`/`compare`) — pointers only. The
+  git contract is pane-addressed, so a worktree with no open workspace
+  has NO diff surface: `panes` is `[]` and no diff fields exist.
+- `panes[].status` is a live compact `status` summary fetched through
+  the sibling `rebuildup.git` plugin's public CLI (ADR-0013 env-pin
+  spawn: `HERDR_PROJECTS_ROOT_GIT` override → sibling `plugins/git` →
+  `herdr plugin list`; child env is scrubbed of all ambient `HERDR_*`).
+  At most 8 status calls per member repo (`MAX_GIT_STATUS_CALLS`);
+  beyond that `status_error.kind = "budget_exceeded"`. Failures are
+  structured in `status_error` (`plugin_unavailable`, the git
+  plugin's own error `kind`, `contract_mismatch`, `spawn_error`) —
+  pointers are still emitted.
+- Read-only; the plugin never creates/removes worktrees, workspaces,
+  or panes (lifecycle stays herdr/Worktrunk). Unknown project id →
+  `project_not_found`.
 
 ## `repos add` / `repos remove <project>`
 
@@ -239,7 +327,10 @@ Keys are allow-listed (`SETTINGS_ALLOW_LIST` in `state.ts`): currently
 project-scoped keys relevant to scripts and display. Any other key fails
 `settings_key_not_allowed`. The list extends additively; it never
 accepts arbitrary keys. A corrupt settings file reads as empty
-(overrides are non-authoritative).
+(overrides are non-authoritative); the next `settings set`/`unset`
+rewrites the file wholesale from that empty base — corrupt bytes are
+never partially merged and no `settings_corrupt` error is raised,
+matching the `runs.json` policy.
 
 ## `scripts list <project|repo>`
 
@@ -338,29 +429,78 @@ injects input into panes it did not create.
 - Script definitions resolve against the **selected repo's** `t3.json`
   plus the project's settings/env/builtin layers (same machinery as
   `scripts list`).
-- The command is injected as ONE `pane.send_input` line:
-  `<command>; echo "__HERDR_DONE_<run-id>__=$?"`. Commands containing
-  newlines or longer than 4000 chars are first written to an
-  executable `/bin/sh` script file under the plugin state dir
-  (`runs/<run-id>.sh`) and invoked by path — a documented POSIX-sh
-  limitation for that edge case.
+- The command is injected as **two `pane.send_input` lines** (Enter
+  after each): line 1 is the user command (or a script-file
+  invocation), line 2 is the shell-family marker echo. Sending them as
+  separate parsed command lines is what makes cmd.exe's
+  `%ERRORLEVEL%` correct (it would expand at parse time on a shared
+  `cmd1 & echo ...` line) and works uniformly for sh/cmd/powershell.
+- **Shell family detection (#67).** The marker line is shell-specific,
+  so the family is resolved before composing it, in precedence order:
+  1. `--shell sh|cmd|powershell` — explicit override (`auto` = detect);
+     invalid values fail `invalid_shell`.
+  2. `pane.process_info` foreground process name (`shell_pid` match
+     preferred): POSIX names (sh/bash/zsh/dash/ash/ksh/…) → `sh`,
+     `cmd[.exe]` → `cmd`, `powershell[.exe]`/`pwsh[.exe]` → `powershell`.
+  3. Conservative host-OS default when detection is inconclusive
+     (empty foreground after bounded retries, or `process_info`
+     transport failure): Windows host → `cmd`, otherwise `sh`.
+     Recorded as `shell_source:"host_default"` — never silent.
+  A positively identified unsupported shell (fish, nu, xonsh, …) fails
+  `shell_unknown`; a non-shell foreground fails `not_a_shell`. Both
+  close the just-created pane and persist NO run record — a guessed
+  wrapper is never injected.
+- **Per-family marker line** (line 2):
+  - `sh`: `echo __HERDR_DONE_<run-id>__=$?`
+  - `cmd`: `echo __HERDR_DONE_<run-id>__=%ERRORLEVEL%`
+  - `powershell`: `echo "__HERDR_DONE_<run-id>__=$( if ($null -ne
+    $LASTEXITCODE) { $LASTEXITCODE } elseif ($?) { 0 } else { 1 } )"` —
+    `$LASTEXITCODE` covers native commands; cmdlet-only scripts fall
+    back to `$?` mapped to 0/1 (powershell caveat documented).
+  The echoed input line never matches the digit regex in any family.
+- Commands containing newlines or longer than 4000 chars are first
+  written to a script file under the plugin state dir
+  (`runs/<run-id>.sh|.cmd|.ps1`, per family; `.cmd` content is CRLF)
+  and invoked by a short line: `sh '<path>'` / `call "<path>"` /
+  `& '<path>'`. Script files are retained like run logs (audit trail).
+  Note: `.ps1` invocation is subject to the pane's PowerShell
+  execution policy; `.cmd`/`.sh` paths use host-native separators
+  (a POSIX pane on a Windows host is out of scope). Trade-off of the
+  two-line design: a command that reads stdin may consume the queued
+  marker line — the run then times out `running` rather than reporting
+  a wrong result; a command containing a bare `exit` kills the pane's
+  interactive shell before the marker prints, reconciling to
+  `unknown` (use a subshell/`sh -c` for exit-code probes).
 - **Completion:** `pane.wait_for_output` (`source:"recent_unwrapped"`,
   regex `__HERDR_DONE_<run-id>__=(-?\d+)`) blocks up to `runTimeoutMs`
   (plugin config `config.json`, default 600000 ms = 10 min). The echoed
-  input line cannot match (it contains literal `$?`), and the run-id
+  input line cannot match (it contains the rc expression, never bare
+  digits), and the run-id
   nonce prevents cross-run collisions. The exit code is parsed from the
   marker digits ONLY — never inferred from pane text, process liveness,
   or pane close events.
 - **Results:** marker exit 0 → `success`; non-zero → `failed` (with
   `exit_code`). Wait timeout → the run stays `running`, the pane is left
-  alone (never killed implicitly), and `scripts results`/`logs`
-  re-check liveness lazily. Pane vanished before the marker →
+  alone (never killed implicitly). Pane vanished before the marker →
   `unknown` — never fabricated success.
+- **Durable completion receipt (#68):** the marker line persists in
+  pane scrollback after the wait times out, so completion is
+  recoverable without polling or a daemon. `scripts results`/`logs`
+  lazily re-scan the owned pane's scrollback (`pane.read`,
+  `recent_unwrapped`, last 2000 lines) for
+  `__HERDR_DONE_<run-id>__=<code>`; a found marker finalizes the record
+  exactly like the live wait path (`success`/`failed` + `exit_code` +
+  `finished_at` + bounded log tail). `events.subscribe`
+  `pane.output_matched` was evaluated and rejected: it requires a
+  persistent subscription connection a one-shot CLI cannot hold after
+  exit, events are not replayed to late subscribers, and ADR-0002
+  forbids a daemon — the scrollback receipt is the durable record.
 - A run record is persisted BEFORE the command is injected, so a crash
   mid-run still leaves an honest trail.
 - `pane.report_metadata` projects a display-only `script_<name>` token
-  (`running`/`success`/`failed`/`stopped`/`unknown`) on the execution
-  pane; projection failures never fail the run.
+  (`running`/`stopping`/`success`/`failed`/`stopped`/
+  `stop_unconfirmed`/`unknown`) on the execution pane; projection
+  failures never fail the run.
 
 Response: `{contract, command:"scripts run", run: ScriptRun,
 generated_at}`.
@@ -380,50 +520,109 @@ rename, dedicated `runs.json.lock`):
   "workspace_id": "wKN",
   "tab_id": "wKN:t1",
   "cwd": "/abs/repo",
-  "command_line": "bun run dev; echo \"__HERDR_DONE_run-…__=$?\"",
+  "command_line": "bun run dev\necho __HERDR_DONE_run-…__=$?",
   "script_path": null,
+  "shell_family": "sh",
+  "shell_source": "host_default",
   "started_at": "…",
   "finished_at": "…",
   "exit_code": 0,
   "result": "success",
+  "host": "my-mac.local",
+  "session_key": "my-mac.local /Users/me/.config/herdr/sessions/main/herdr.sock",
+  "stop_requested_at": null,
   "log_path": "runs/run-mj3k2x-9f3ab1.log",
   "error": null,
-  "trigger": { "kind": "worktree.created", "worktree_path": "/abs/wt", "event_received_at": "…" }
+  "trigger": { "kind": "inbox.settled", "pane_id": "w1:p2", "transition_seq": 41, "transition_at": "…" }
 }
 ```
 
-`result` ∈ `running | success | failed | stopped | unknown`.
-`running` means the marker was not observed within the wait — it does
-NOT assert the process is alive. `log_path`/`script_path` are relative
-to the plugin state dir (`null` when absent). `trigger` (#180,
-additive, absent on records predating it) records the run origin:
-`{kind:"manual"}` for `scripts run`, `{kind:"worktree.created",
-worktree_path, event_received_at}` for auto-triggered runs.
+`result` ∈ `running | stopping | stop_unconfirmed | success | failed |
+stopped | unknown`. `running` means the marker was not observed within
+the wait — it does NOT assert the process is alive. `stopping` means a
+stop was requested (ctrl+c accepted) but exit is not yet confirmed;
+`stop_unconfirmed` means the bounded confirmation window elapsed
+without evidence. `log_path`/`script_path` are relative to the plugin
+state dir (`null` when absent). `shell_family` ∈ `sh | cmd |
+powershell`, `shell_source` ∈ `flag | process_info | host_default`
+(both `null` on pre-#67 records). `trigger` (#180/#182, additive,
+absent on records predating it) records the run origin:
+`{kind:"manual"}` for `scripts run`,
+`{kind:"worktree.created", worktree_path, event_received_at}` for
+worktree-create auto-triggers, and `{kind:"inbox.settled", pane_id,
+transition_seq, transition_at}` for settle auto-triggers.
+
+**Ownership tuple (schema v2, #66).** `host` + `session_key` (the
+`sessionKeyFor` discriminator: hostname + canonical socket path) +
+`pane_id` (herdr never reuses pane ids) + `workspace_id`/`tab_id` +
+`started_at` together identify the execution surface a record may
+target. v1 records lack `host`/`session_key`/`stop_requested_at`; they
+load with those fields `null` and are verified by pane context only.
+Before ANY input/close/read (`scripts stop`, `results` liveness,
+`logs` capture, stop confirmation) the runner re-validates ownership
+via `pane.get`: a `pane_not_found`, a host/session mismatch
+(`foreign` — short-circuits before any socket call), or a
+workspace/tab/pane_id disagreement (`pane_mismatch`) yields a
+structured `stale_pane` outcome / `unknown` record and **zero side
+effects** on the pane — input and close are never sent to a pane the
+record cannot prove it owns.
 
 ## `scripts stop <run-id|project>`
 
 Stops runs owned by this plugin. The target resolves to run records: an
 exact `run_id`, a unique `run_id` prefix (`ambiguous_run` on collision),
-or a project id (all its `running` runs; `run_not_found` when nothing
-matches). For each `running` run the plugin sends `pane.send_keys
-["ctrl+c"]` to the RECORDED `pane_id` only, waits `stopGraceMs` (config,
-default 2000), captures a bounded log tail, then `pane.close`. The run
-is recorded `stopped`. Already-finished runs are reported
-`already_finished`; a vanished pane is recorded `unknown`. There is no
-way to address any pane the plugin did not create and record.
+or a project id (all its active runs; `run_not_found` when nothing
+matches). Active results are `running | stopping | stop_unconfirmed`.
+
+For each active run the plugin FIRST re-validates pane ownership
+(`pane.get` + recorded host/session/workspace/tab context — see the
+ownership tuple above). A foreign or mismatched pane produces a
+`stale_pane` outcome and no pane side effects; a vanished pane is
+`pane_gone` (`running` → `unknown`, stopping states → `stopped`, since
+pane absence after a stop request IS exit evidence).
+
+For an owned `running` run: `pane.send_keys ["ctrl+c"]` to the RECORDED
+`pane_id` only → record `stopping` + `stop_requested_at` → `stopGraceMs`
+(config, default 2000) → bounded `pane.read` log capture →
+`pane.close` → **confirmation** within `stopConfirmMs` (config, default
+5000): the pane is gone (`pane.get` → not_found) OR
+`pane.process_info` reports an empty foreground process list (shell
+regained the tty). Only then is the run recorded `stopped`.
+ctrl+c alone is NEVER treated as stopped. Without evidence inside the
+window the run is recorded `stop_unconfirmed` (request accepted,
+exit unproven); `scripts results`/`logs` keep re-checking and promote it
+to `stopped` once evidence appears. `stopping`/`stop_unconfirmed`
+records re-targeted by `scripts stop` skip the redundant ctrl+c and go
+straight to close+confirm. Already-finished runs are reported
+`already_finished`. There is no way to address any pane the plugin did
+not create and record.
 
 Response: `{contract, command:"scripts stop", outcomes:[{run, action}],
 generated_at}` where `action` ∈ `stopped | already_finished |
-pane_gone`. Fails `no_running_runs` when nothing was actually stopped.
+pane_gone | stale_pane | stop_unconfirmed`. Fails `no_running_runs` when
+no run was acted on (all `already_finished`).
 
 ## `scripts results [project]`
 
 Lists run records newest-first, optionally filtered by project id
-(`project_not_found` for unknown ids). `running` records are reconciled
-lazily: `pane.get` is re-checked per running run and a vanished pane
-flips the record to `unknown` (persisted). Socket failures leave the
-record `running` — liveness is unknown, not fabricated. One socket call
-per running run; bounded by the small number of concurrent runs.
+(`project_not_found` for unknown ids). Active records
+(`running`/`stopping`/`stop_unconfirmed`) are reconciled lazily AFTER
+ownership re-validation: `pane.get` plus the recorded host/session/
+workspace/tab context. For an OWNED pane the scrollback is then
+re-scanned once for the durable completion marker (#68): marker found
+→ the run is finalized `success`/`failed` with the parsed `exit_code`,
+`finished_at`, and a bounded log tail — this recovers runs whose
+`pane.wait_for_output` timed out, across CLI invocations and herdr
+restarts, with no polling loop. A vanished pane flips `running` →
+`unknown` (persisted) and confirms `stopping`/`stop_unconfirmed` →
+`stopped`;
+`stopping` states with an empty foreground process list also promote to
+`stopped`. A foreign host/session record is never probed through the
+wrong socket — its `error` is annotated and the result preserved for
+the owning session. A pane context mismatch marks the record `unknown`
+(`stale_pane`). Socket failures leave the record unchanged — liveness
+is unknown, not fabricated. Bounded by the small number of concurrent
+runs.
 
 Response: `{contract, command:"scripts results", project_id?, runs:
 ScriptRun[], generated_at}`.
@@ -434,9 +633,15 @@ Returns the bounded log for one run (`run_id` exact or unique prefix,
 `run_not_found`/`ambiguous_run` otherwise). On completion the runner
 stores the pane read tail — capped at `runLogMaxBytes` (config, default
 65536 bytes, tail kept with a truncation marker) at
-`<stateDir>/runs/<run-id>.log`. When no log exists yet and the pane is
-still alive, a bounded `pane.read` (last 500 lines) is captured on
-demand. A `running` run whose pane is gone is marked `unknown`.
+`<stateDir>/runs/<run-id>.log`. When the run is active, ownership
+re-validation runs first and the pane scrollback is re-scanned once
+for the completion marker (#68) — a found marker finalizes the record
+(`success`/`failed` + `exit_code`) and its tail becomes the log. With
+no marker, a bounded `pane.read` (`recent_unwrapped`, last 2000 lines)
+captures the tail on demand — only after ownership re-validation
+passes; foreign/mismatched panes are never read. A `running` run whose
+pane is gone is marked `unknown`; a stopping-state run whose pane is
+gone is confirmed `stopped`.
 
 Response: `{contract, command:"scripts logs", run_id, run, log_path,
 log, generated_at}` (`log` may be `null`).
@@ -493,22 +698,89 @@ no polling, no `events.subscribe` watch process (ADR-0002).
   execution so concurrent drains cannot double-fire.
 - **Honesty:** skipped marks are reported, never silent; run results
   keep the `running|success|failed|stopped|unknown` semantics — no
-  fabricated success. `runOnSettle`/`stopOnSettle` remain
-  unimplemented pending #181/#182.
+  fabricated success.
+
+## Auto triggers — `runOnSettle` / `stopOnSettle` (#182, ADR-0029)
+
+Settle is plugin-owned organize state (`rebuildup.inbox`), not a herdr
+event, so there is no `[[events]]` manifest hook. Instead, inbox records
+its own organize transitions in a per-session seq log and exposes them
+read-only via `inbox transitions --after <seq>`
+(`herdr-plugins.inbox/v1`, inbox 0.4.0+). Projects drains that log lazily
+— same no-daemon discipline as the worktree drain — and consumes only
+`kind:"settled"` transitions (`snoozed`/`restored`/`cleared` are recorded
+by inbox but ignored by projects).
+
+- **Inbox resolution (ADR-0013 public-CLI pattern):** the drain locates
+  the installed inbox plugin the same way other plugins do — explicit
+  override first (`--inbox-root` flag on draining commands, then
+  `inboxRoot` in the plugin config dir's `config.json`), then the
+  `../inbox` sibling checkout, then `herdr plugin list` — and invokes
+  `<plugin_root>/src/cli.ts transitions` with `bun run`. The child
+  environment is pinned (`HERDR_PLUGIN_STATE_DIR`/`_CONFIG_DIR` pointed
+  at the resolved inbox dirs, all other `HERDR_*` stripped) so the inbox
+  CLI reads its own state, never projects'. `--socket`/`--session` are
+  forwarded so the drain always reads the session the invoking command
+  resolved. An absent/unrunnable inbox never fails the calling command:
+  the drain reports `inbox_unavailable` and consumes nothing.
+- **Cursor:** the response's `session_key` is stored verbatim as the
+  cursor key in `state.settle_cursors` (projects never recomputes
+  inbox's `hostname + canonical socket` key). The cursor advances to the
+  response `head_seq` only after the batch is processed; a mid-batch
+  crash replays the un-acked tail, absorbed by `transition_seq`
+  dedupe (below). A stored cursor below the log's retained window
+  (`oldest_seq`/`dropped`) sets `cursor_expired` in the report — the
+  consumer is told transitions were lost rather than silently skipped.
+- **Collapse:** within a drained batch, a later `cleared` or `restored`
+  transition for the same `pane_id` supersedes an earlier `settled`
+  (reported `settle_superseded`) — settle→restore is not a net settle.
+  Only transitions that survived collapse reach script resolution.
+- **Repo + script resolution:** the settled pane's `cwd` (captured on
+  the transition by inbox) resolves via `resolveRepo` → canonical
+  worktree root → `git-common-dir` project match (the #180 path) →
+  layered `resolveScripts` on that worktree root. Only scripts with
+  `runOnSettle === true` fire, through the unchanged ADR-0010 runner;
+  `ScriptRun.trigger` records `{kind:"inbox.settled", pane_id,
+  transition_seq, transition_at}`.
+- **stopOnSettle:** for each settled transition, `running` runs whose
+  recorded `repo.root` canonicalizes to the SAME worktree root AND whose
+  script — re-resolved through the same layers — has
+  `stopOnSettle === true` are stopped via the existing `stopRuns` path
+  (recorded `pane_id` only). Sibling worktrees of the same repo group
+  are never touched, and runs started by this very drain are excluded
+  (the pre-drain run snapshot is taken before any fire). Stopped runs
+  are reported in `triggers.stopped[]` with `{run_id, project_id,
+  script, pane_id, action, transition_seq}`.
+- **Idempotency:** a run record whose `trigger.transition_seq` equals
+  the drained transition's `seq` means that transition already fired —
+  reported `already_fired`, never re-fired.
+- **Drain report:** merged into the invoking command's payload as
+  `triggers: {fired[], skipped[], stopped?, duplicates,
+  pending_remaining, inbox_unavailable?, settle?, session_unreachable?}`
+  when non-empty. Settle `fired[]`/`skipped[]` entries carry
+  `source:"inbox.settled"` plus `pane_id`/`transition_seq`
+  (skipped also `cwd?`). `settle` reports `{session_key, cursor_before,
+  cursor_after, cursor_expired}`. Skip reasons include
+  `settle_superseded`, `already_fired`, `cwd_unavailable`, `cwd_gone`,
+  `repo_not_registered`, `ambiguous_project`, `no_run_on_settle_scripts`,
+  `stop_script_resolution_failed`, `stop_failed`,
+  `session_unreachable`, `run_start_failed`, plus git-contract kinds.
 
 ## `scripts tick`
 
 `{contract, command:"scripts tick", triggers?, generated_at}` —
-drains pending `worktree.created` marks (see above). Exit 0 on success;
-the drain itself never fails the command (per-mark outcomes are
-reported in `triggers.skipped`).
+drains pending `worktree.created` marks AND new inbox organize
+transitions (see above). `--inbox-root <path>` overrides inbox plugin
+resolution for this invocation. Exit 0 on success; the drain itself
+never fails the command (per-item outcomes are reported in
+`triggers.skipped`).
 
-## Remaining auto-trigger gap
+## Remaining auto-trigger gaps
 
-`runOnSettle`/`stopOnSettle` have no faithful trigger source yet —
-settle is plugin-owned organize state (inbox), not a herdr event.
-Tracked by #181 (design) / #182 (implementation). #32 automations own
-scheduled/event-driven execution generally.
+`runOnSettle`/`stopOnSettle` cover the settle transition only —
+`snoozed`/`restored`/`cleared` transitions are recorded by inbox but
+have no projects-side semantics (by design, ADR-0029). #32 automations
+own scheduled/event-driven execution generally.
 
 ## Errors
 
@@ -518,6 +790,9 @@ scheduled/event-driven execution generally.
 `invalid_project_id`, `settings_key_not_allowed`, `t3json_invalid`,
 `invalid_script_list`, `unknown_script`, `no_repos`, plus the script
 runner kinds `repo_ambiguous`, `ambiguous_script`, `ambiguous_run`,
-`run_not_found`, `no_running_runs`, `script_run_error`. Errors may
+`run_not_found`, `no_running_runs`, `script_run_error`, `stale_pane`,
+`shell_unknown`, `not_a_shell`, `invalid_shell` (`shell_unknown` /
+`not_a_shell` abort `scripts run` before injection; `invalid_shell` is
+a `--shell` value error). Errors may
 carry extra fields (`project_id`, `key`, `root`, `repos`, `name`,
 `matches`, `run_id`, `target`, `path`, `reason`, `layer`).

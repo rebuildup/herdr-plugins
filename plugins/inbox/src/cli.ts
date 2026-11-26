@@ -7,19 +7,28 @@
  *
  * Pane selection: explicit <pane_id> argument, else HERDR_PANE_ID, else
  * HERDR_PLUGIN_CONTEXT_JSON.focused_pane_id (manifest action context).
+ * Ambient pane ids are verified against the resolved session's snapshot
+ * (workspace/tab consistency); session/socket targeting follows
+ * `resolveTarget` — explicit flags beat ambient HERDR_* and contradictions
+ * fail closed (see docs/contracts/inbox-v1.md → Target selection).
  */
 
 import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import {
+  type AmbientIdentity,
+  ambientIdentity,
+  assertAmbientPaneIdentity,
   type CallOptions,
   type PaneInfo,
   pluginDirs,
   reportPaneMetadata,
+  resolveTarget,
   type SessionSnapshot,
   sessionSnapshot,
   subscribeAgentEvents,
+  TargetResolutionError,
 } from "../../../packages/herdr-client/src/index";
 import {
   applyInboxFilters,
@@ -44,6 +53,7 @@ import {
 import { resolvePluginRoot, runPluginCli } from "./pluginroot";
 import {
   type InboxEntry,
+  type InboxTransition,
   type LinkKind,
   type LinkWatch,
   type LinkWatchObservation,
@@ -56,6 +66,13 @@ import {
   stateFilePath,
   updateState,
 } from "./state";
+import {
+  appendClearedTransitions,
+  appendOrganizeTransition,
+  appendTransition,
+  MAX_TRANSITIONS_PER_SESSION,
+  type TransitionContext,
+} from "./transitions";
 import {
   buildObservation,
   collectWatchTargets,
@@ -75,6 +92,22 @@ interface CliOptions extends CallOptions {
   session: string | undefined;
 }
 
+function takeGlobalValue(args: string[], i: number, flag: string): string {
+  const value = args[i + 1];
+  if (value === undefined || value.length === 0 || value.startsWith("-")) {
+    fail(`option ${flag} requires a value`, 2);
+  }
+  return value;
+}
+
+function parseGlobalTimeout(raw: string): number {
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) {
+    fail(`invalid --timeout: ${raw} (expected a positive number of milliseconds)`, 2);
+  }
+  return value;
+}
+
 function parseArgs(argv: string[]): CliOptions {
   const args = [...argv];
   const command = args.shift() ?? "help";
@@ -83,12 +116,22 @@ function parseArgs(argv: string[]): CliOptions {
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i] as string;
     if (arg === "--session") {
-      options.session = args[++i];
+      options.session = takeGlobalValue(args, i, "--session");
+      i += 1;
+    } else if (arg.startsWith("--session=")) {
+      options.session = arg.slice("--session=".length);
+      if (options.session.length === 0) fail("option --session requires a value", 2);
     } else if (arg === "--socket") {
-      options.socketPath = args[++i];
+      options.socketPath = takeGlobalValue(args, i, "--socket");
+      i += 1;
+    } else if (arg.startsWith("--socket=")) {
+      options.socketPath = arg.slice("--socket=".length);
+      if (!options.socketPath) fail("option --socket requires a value", 2);
     } else if (arg === "--timeout") {
-      const value = Number(args[++i]);
-      if (Number.isFinite(value) && value > 0) options.timeoutMs = value;
+      options.timeoutMs = parseGlobalTimeout(takeGlobalValue(args, i, "--timeout"));
+      i += 1;
+    } else if (arg.startsWith("--timeout=")) {
+      options.timeoutMs = parseGlobalTimeout(arg.slice("--timeout=".length));
     } else {
       rest.push(arg);
     }
@@ -115,64 +158,113 @@ function fail(message: string, code = 1): never {
   emitError(message, code);
 }
 
+/**
+ * First value of a flag, in either `--name value` or `--name=value` form.
+ * Tokens after a `--` separator are positional and never match.
+ */
 function flagValue(args: string[], name: string): string | undefined {
-  const index = args.indexOf(name);
-  if (index === -1) return undefined;
-  return args[index + 1];
-}
-
-function positional(args: string[]): string[] {
-  const out: string[] = [];
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i] as string;
+    if (arg === "--") break;
+    if (arg === name) return args[i + 1];
+    if (arg.startsWith(`${name}=`)) return arg.slice(name.length + 1);
+  }
+  return undefined;
+}
+
+type FlagKind = "boolean" | "value";
+
+/**
+ * Strict option check: every `-`-prefixed token before a `--` separator
+ * must be a whitelisted flag for this command (`--name=value` counts as
+ * `--name`). Unknown options, `--flag=value` on boolean flags, and value
+ * flags with a missing/option-like value are usage errors (exit 2).
+ * A lone `-` is a positional, not an option.
+ */
+function validateFlags(args: string[], spec: Record<string, FlagKind>): void {
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i] as string;
+    if (arg === "--") break;
+    if (arg === "-" || !arg.startsWith("-")) continue;
+    const eq = arg.indexOf("=");
+    const name = eq === -1 ? arg : arg.slice(0, eq);
+    const kind = spec[name];
+    if (!kind) fail(`unknown option: ${arg}`, 2);
+    if (kind === "boolean") {
+      if (eq !== -1) fail(`option ${name} does not take a value`, 2);
+      continue;
+    }
+    if (eq !== -1) continue;
+    const next = args[i + 1];
     if (
-      arg === "--until" ||
-      arg === "--for" ||
-      arg === "--before" ||
-      arg === "--after" ||
-      arg === "--organize" ||
-      arg === "--search" ||
-      arg === "--workspace" ||
-      arg === "--pr" ||
-      arg === "--issue" ||
-      arg === "--session" ||
-      arg === "--socket" ||
-      arg === "--timeout" ||
-      arg === "--interval" ||
-      arg === "--git-root"
+      next === undefined ||
+      next === "--" ||
+      next.startsWith("--") ||
+      (next.length > 1 && next.startsWith("-") && next in spec)
     ) {
+      fail(`option ${name} requires a value`, 2);
+    }
+    i += 1;
+  }
+}
+
+/** Positional args, skipping flag values. Everything after `--` counts. */
+function positionals(args: string[], valueFlags: string[]): string[] {
+  const out: string[] = [];
+  let afterSeparator = false;
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i] as string;
+    if (afterSeparator) {
+      out.push(arg);
+      continue;
+    }
+    if (arg === "--") {
+      afterSeparator = true;
+      continue;
+    }
+    if (valueFlags.includes(arg)) {
       i += 1;
       continue;
     }
-    if (arg.startsWith("--")) continue;
+    if (arg.length > 1 && arg.startsWith("-")) continue;
     out.push(arg);
   }
   return out;
 }
 
-interface PluginContext {
-  focused_pane_id?: string;
-  workspace_id?: string;
-}
-
-function invocationContext(): PluginContext {
-  const raw = process.env.HERDR_PLUGIN_CONTEXT_JSON;
-  if (!raw) return {};
-  try {
-    return JSON.parse(raw) as PluginContext;
-  } catch {
-    return {};
+/** More positionals than the command accepts is a usage error. */
+function assertMaxPositionals(
+  args: string[],
+  valueFlags: string[],
+  max: number,
+  usage: string,
+): void {
+  const pos = positionals(args, valueFlags);
+  if (pos.length > max) {
+    fail(`${usage}: unexpected argument ${JSON.stringify(pos[max])}`, 2);
   }
 }
 
-async function resolvePaneId(args: string[]): Promise<string> {
-  const positionalArgs = positional(args);
-  const explicit =
-    positionalArgs[0] ?? process.env.HERDR_PANE_ID ?? invocationContext().focused_pane_id;
-  if (!explicit) {
+interface PaneSelection {
+  paneId: string;
+  /** Non-null when the pane id came from ambient env/context (not positional). */
+  ambient: AmbientIdentity | null;
+}
+
+/**
+ * Resolve the target pane. An explicit positional wins; otherwise the
+ * ambient identity bundle (HERDR_PANE_ID / context focused_pane_id) is
+ * used and kept for the post-snapshot consistency check — ambient
+ * workspace/tab ids that disagree with the resolved pane fail closed.
+ */
+function resolvePaneSelection(args: string[], valueFlags: string[] = []): PaneSelection {
+  const positional = positionals(args, valueFlags)[0];
+  if (positional) return { paneId: positional, ambient: null };
+  const identity = ambientIdentity();
+  if (!identity.paneId) {
     fail("pane id required (argument, HERDR_PANE_ID, or plugin context)", 2);
   }
-  return explicit;
+  return { paneId: identity.paneId as string, ambient: identity };
 }
 
 async function loadConfig(): Promise<{
@@ -270,8 +362,19 @@ function parseListFilters(args: string[]): InboxFilters {
   return filters;
 }
 
+const LIST_FLAGS: Record<string, FlagKind> = {
+  "--attention": "boolean",
+  "--organize": "value",
+  "--search": "value",
+  "--workspace": "value",
+};
+const LIST_VALUE_FLAGS = ["--organize", "--search", "--workspace"];
+
 async function cmdList(options: CliOptions): Promise<void> {
+  validateFlags(options.args, LIST_FLAGS);
+  assertMaxPositionals(options.args, LIST_VALUE_FLAGS, 0, "list");
   const now = new Date();
+  const target = resolveTarget({ session: options.session, socketPath: options.socketPath });
   const snapshot = await sessionSnapshot(options);
   const state = await loadState();
   const entries = state.sessions[sessionKeyFor(options)] ?? {};
@@ -286,7 +389,7 @@ async function cmdList(options: CliOptions): Promise<void> {
     contract: CONTRACT,
     generated_at: now.toISOString(),
     session: {
-      name: options.session ?? process.env.HERDR_SESSION ?? null,
+      name: target.session,
       socket: options.socketPath ?? process.env.HERDR_SOCKET_PATH ?? null,
     },
     state_file: stateFilePath(),
@@ -312,10 +415,20 @@ async function cmdList(options: CliOptions): Promise<void> {
 type OrganizeCommand = "settle" | "snooze" | "restore" | "pin" | "unpin" | "archive" | "unarchive";
 
 async function cmdOrganize(options: CliOptions, kind: OrganizeCommand): Promise<void> {
-  const paneId = await resolvePaneId(options.args);
+  // Every organize command mutates plugin state and pane metadata: the
+  // target must be explicit or a consistent ambient context, never the
+  // implicit default socket.
+  options.mutation = true;
+  const snoozeFlags: Record<string, FlagKind> = { "--until": "value", "--for": "value" };
+  const valueFlags = kind === "snooze" ? ["--until", "--for"] : [];
+  validateFlags(options.args, kind === "snooze" ? snoozeFlags : {});
+  assertMaxPositionals(options.args, valueFlags, 1, `${kind} <pane_id>`);
+  const selection = resolvePaneSelection(options.args, valueFlags);
+  const paneId = selection.paneId;
   const now = new Date();
   const snapshot = await sessionSnapshot(options);
   const pane = await findPane(snapshot, paneId);
+  if (selection.ambient) assertAmbientPaneIdentity(pane, selection.ambient);
   const agent = snapshot.agents?.[paneId];
 
   // Resolve the snooze deadline before taking the state lock: parse failures
@@ -336,16 +449,40 @@ async function cmdOrganize(options: CliOptions, kind: OrganizeCommand): Promise<
 
   const warnings: string[] = [];
   const sessionKey = sessionKeyFor(options);
+  const transitionCtx: TransitionContext = {
+    pane,
+    agent,
+    at: now.toISOString(),
+  };
   const entry = await updateState(async (state) => {
     const entries = sessionEntries(state, sessionKey);
     switch (kind) {
       case "settle":
+        appendOrganizeTransition(state, sessionKey, "settled", paneId, transitionCtx);
         return settlePane(entries, pane, agent, now);
       case "snooze":
+        appendOrganizeTransition(state, sessionKey, "snoozed", paneId, transitionCtx);
         return snoozePane(entries, pane, agent, until as Date, now);
-      case "restore":
+      case "restore": {
+        // Record `restored` only when the command actually removed
+        // organize state — a no-op restore is not a transition.
+        const before = entries[paneId];
+        const hadState =
+          before !== undefined &&
+          (before.settled !== undefined ||
+            before.snoozed !== undefined ||
+            before.archived !== undefined ||
+            before.pinned !== undefined ||
+            before.order !== undefined);
         restorePane(entries, paneId);
+        if (hadState) {
+          appendOrganizeTransition(state, sessionKey, "restored", paneId, {
+            ...transitionCtx,
+            workspaceId: before?.workspace_id,
+          });
+        }
         return undefined;
+      }
       case "pin":
         return pinPane(entries, pane, agent, now);
       case "unpin":
@@ -412,8 +549,53 @@ async function reconcileOnce(options: CliOptions): Promise<ReconcileResult> {
   const sessionKey = sessionKeyFor(options);
   const mutation = await updateState((state) => {
     const entries = sessionEntries(state, sessionKey);
-    const cleared = resolveState(entries, agents, now).clearedPaneIds;
+    // Snapshot hide-kind/workspace info BEFORE resolution deletes marks
+    // and entries — cleared/pruned transitions still need honest context.
+    const hideKindBefore = new Map<string, boolean>();
+    const workspaceBefore = new Map<string, string | undefined>();
+    for (const [paneId, e] of Object.entries(entries)) {
+      hideKindBefore.set(
+        paneId,
+        e.settled !== undefined || e.snoozed !== undefined || e.archived !== undefined,
+      );
+      workspaceBefore.set(paneId, e.workspace_id);
+    }
+    const resolved = resolveState(entries, agents, now);
+    const cleared = resolved.clearedPaneIds;
     const pruned = pruneState(entries, livePaneIds, now);
+
+    // Organize-transition log (#182): record hide-kind clears caused by
+    // expiry/generation resolution and retention pruning. Pin/order-only
+    // clears are layout hints, not organize transitions.
+    const at = now.toISOString();
+    const paneById = new Map((snapshot.panes ?? []).map((p) => [p.pane_id, p]));
+    const clearedByPane = new Map<
+      string,
+      Array<{ field: string; cause: "expired" | "generation" | "session_mismatch" }>
+    >();
+    for (const cm of resolved.clearedMarks) {
+      if (cm.field === "pinned") continue;
+      const list = clearedByPane.get(cm.pane_id) ?? [];
+      list.push(cm);
+      clearedByPane.set(cm.pane_id, list);
+    }
+    for (const [paneId, marks] of clearedByPane) {
+      appendClearedTransitions(state, sessionKey, paneId, marks, {
+        pane: paneById.get(paneId),
+        agent: agents[paneId],
+        workspaceId: workspaceBefore.get(paneId),
+        at,
+      });
+    }
+    for (const paneId of pruned) {
+      if (hideKindBefore.get(paneId) !== true) continue;
+      appendTransition(state, sessionKey, {
+        kind: "cleared",
+        paneId,
+        ctx: { workspaceId: workspaceBefore.get(paneId), at },
+        cause: "pruned",
+      });
+    }
     // A pane can lose one mark while keeping others (e.g. settle expired but
     // pin survives); project the post-resolution entry, not a blanket clear.
     const clearedEntries = cleared
@@ -463,6 +645,8 @@ async function reconcileOnce(options: CliOptions): Promise<ReconcileResult> {
  *
  * Explicit --socket/--session flags are forwarded because the child does not
  * inherit argv; HERDR_SOCKET_PATH/HERDR_SESSION env vars propagate naturally.
+ * Both paths stay consistent under `resolveTarget`: a contradictory ambient
+ * env + explicit flag combination fails closed in the parent before spawn.
  */
 function spawnSnoozeWake(options: CliOptions, until: Date): string | null {
   try {
@@ -486,6 +670,9 @@ const WAKE_MAX_SLEEP_MS = 2_000_000_000;
 
 /** Internal `_wake` command: sleep until the deadline, then reconcile once. */
 async function cmdWake(options: CliOptions): Promise<void> {
+  options.mutation = true;
+  validateFlags(options.args, { "--until": "value" });
+  assertMaxPositionals(options.args, ["--until"], 0, "_wake");
   const untilSpec = flagValue(options.args, "--until");
   if (!untilSpec) fail("_wake requires --until <iso8601>", 2);
   const until = parseUntilSpec(untilSpec, new Date());
@@ -498,6 +685,9 @@ async function cmdWake(options: CliOptions): Promise<void> {
 }
 
 async function cmdReconcile(options: CliOptions): Promise<void> {
+  options.mutation = true;
+  validateFlags(options.args, {});
+  assertMaxPositionals(options.args, [], 0, "reconcile");
   const result = await reconcileOnce(options);
   emit({ contract: CONTRACT, command: "reconcile", ...result });
 }
@@ -524,10 +714,26 @@ function parseOrderPlacement(args: string[]): OrderPlacement {
  * state — it is a layout hint only.
  */
 async function cmdOrder(options: CliOptions): Promise<void> {
-  const paneId = await resolvePaneId(options.args);
+  // order rewrites plugin state ranks and is a mutation of herdr-visible
+  // layout state: explicit or consistent ambient target required.
+  options.mutation = true;
+  const orderFlags: Record<string, FlagKind> = {
+    "--before": "value",
+    "--after": "value",
+    "--first": "boolean",
+    "--last": "boolean",
+  };
+  const orderValueFlags = ["--before", "--after"];
+  validateFlags(options.args, orderFlags);
+  assertMaxPositionals(options.args, orderValueFlags, 1, "order <pane_id>");
+  const selection = resolvePaneSelection(options.args, orderValueFlags);
+  const paneId = selection.paneId;
   const placement = parseOrderPlacement(options.args);
   const now = new Date();
   const snapshot = await sessionSnapshot(options);
+  if (selection.ambient) {
+    assertAmbientPaneIdentity(await findPane(snapshot, paneId), selection.ambient);
+  }
   const state = await loadState();
   const sessionKey = sessionKeyFor(options);
   const entries = state.sessions[sessionKey] ?? {};
@@ -657,12 +863,24 @@ function linkViews(links: PaneLink[] | undefined) {
  * session snapshot; re-linking the same ref re-validates its fingerprint.
  */
 async function cmdLink(options: CliOptions): Promise<void> {
-  const paneId = await resolvePaneId(options.args);
+  // link writes plugin state: explicit or consistent ambient target required.
+  options.mutation = true;
+  const linkFlags: Record<string, FlagKind> = {
+    "--pr": "value",
+    "--issue": "value",
+    "--verify": "boolean",
+  };
+  const linkValueFlags = ["--pr", "--issue"];
+  validateFlags(options.args, linkFlags);
+  assertMaxPositionals(options.args, linkValueFlags, 1, "link <pane_id>");
+  const selection = resolvePaneSelection(options.args, linkValueFlags);
+  const paneId = selection.paneId;
   const { kind, ref } = trackerKindAndRef(options.args);
   const { repo, number } = parseTrackerRef(ref);
   const now = new Date();
   const snapshot = await sessionSnapshot(options);
   const pane = await findPane(snapshot, paneId);
+  if (selection.ambient) assertAmbientPaneIdentity(pane, selection.ambient);
   const agent = snapshot.agents?.[paneId];
 
   const warnings: string[] = [];
@@ -690,12 +908,20 @@ async function cmdLink(options: CliOptions): Promise<void> {
 
 /** Remove one declared link; the pane must still exist in the snapshot. */
 async function cmdUnlink(options: CliOptions): Promise<void> {
-  const paneId = await resolvePaneId(options.args);
+  // unlink writes plugin state: explicit or consistent ambient target required.
+  options.mutation = true;
+  const unlinkFlags: Record<string, FlagKind> = { "--pr": "value", "--issue": "value" };
+  const unlinkValueFlags = ["--pr", "--issue"];
+  validateFlags(options.args, unlinkFlags);
+  assertMaxPositionals(options.args, unlinkValueFlags, 1, "unlink <pane_id>");
+  const selection = resolvePaneSelection(options.args, unlinkValueFlags);
+  const paneId = selection.paneId;
   const { kind, ref } = trackerKindAndRef(options.args);
   const { repo, number } = parseTrackerRef(ref);
   const now = new Date();
   const snapshot = await sessionSnapshot(options);
-  await findPane(snapshot, paneId);
+  const pane = await findPane(snapshot, paneId);
+  if (selection.ambient) assertAmbientPaneIdentity(pane, selection.ambient);
 
   const sessionKey = sessionKeyFor(options);
   const removed = await updateState((state) => {
@@ -721,9 +947,15 @@ async function cmdUnlink(options: CliOptions): Promise<void> {
 
 /** Read the declared links stored for a pane (staleness already resolved). */
 async function cmdLinks(options: CliOptions): Promise<void> {
-  const paneId = await resolvePaneId(options.args);
+  validateFlags(options.args, {});
+  assertMaxPositionals(options.args, [], 1, "links <pane_id>");
+  const selection = resolvePaneSelection(options.args);
+  const paneId = selection.paneId;
   const now = new Date();
   const snapshot = await sessionSnapshot(options);
+  if (selection.ambient) {
+    assertAmbientPaneIdentity(await findPane(snapshot, paneId), selection.ambient);
+  }
   const state = await loadState();
   const entries = state.sessions[sessionKeyFor(options)] ?? {};
   resolveState(entries, snapshot.agents ?? {}, now);
@@ -748,8 +980,16 @@ function emitLine(payload: unknown): void {
  * Stops on SIGINT/SIGTERM (exit 0) or unexpected stream end (exit 1).
  */
 async function cmdWatch(options: CliOptions): Promise<void> {
-  const intervalSec = Number(flagValue(options.args, "--interval") ?? "60");
-  const intervalMs = (Number.isFinite(intervalSec) && intervalSec > 0 ? intervalSec : 60) * 1000;
+  // watch reconciles (state writes + metadata projection) on every tick.
+  options.mutation = true;
+  validateFlags(options.args, { "--interval": "value" });
+  assertMaxPositionals(options.args, ["--interval"], 0, "watch");
+  const intervalRaw = flagValue(options.args, "--interval");
+  const intervalSec = intervalRaw === undefined ? 60 : Number(intervalRaw);
+  if (!Number.isFinite(intervalSec) || intervalSec <= 0) {
+    fail(`invalid --interval: ${intervalRaw} (expected a positive number of seconds)`, 2);
+  }
+  const intervalMs = intervalSec * 1000;
 
   const subscription = subscribeAgentEvents(options);
   await subscription.started;
@@ -813,6 +1053,12 @@ const GIT_PLUGIN_ID = "rebuildup.git";
 const WATCH_PR_DEFAULT_INTERVAL_SEC = 120;
 /** Per git-plugin CLI call budget (covers ensureGh + the gh request). */
 const WATCH_PR_CALL_TIMEOUT_MS = 30_000;
+const WATCH_PR_FLAGS: Record<string, FlagKind> = {
+  "--interval": "value",
+  "--once": "boolean",
+  "--git-root": "value",
+};
+const WATCH_PR_VALUE_FLAGS = ["--interval", "--git-root"];
 
 interface PollOutcome {
   target: WatchTarget;
@@ -1174,13 +1420,20 @@ async function watchPrTick(
  * (ADR-0026); when not running, PR updates are simply not observed.
  */
 async function cmdWatchPr(options: CliOptions): Promise<void> {
+  // watch-pr clears hide-kind organize marks and rewrites pane metadata
+  // tokens: a mutation of herdr-visible state, so the target must be
+  // explicit or a consistent ambient context — never the implicit
+  // default socket.
+  options.mutation = true;
+  validateFlags(options.args, WATCH_PR_FLAGS);
+  assertMaxPositionals(options.args, WATCH_PR_VALUE_FLAGS, 1, "watch-pr [pane_id]");
   const intervalSec = Number(flagValue(options.args, "--interval") ?? "120");
   const intervalMs =
     (Number.isFinite(intervalSec) && intervalSec > 0
       ? intervalSec
       : WATCH_PR_DEFAULT_INTERVAL_SEC) * 1000;
   const once = options.args.includes("--once");
-  const paneFilter = positional(options.args)[0];
+  const paneFilter = positionals(options.args, WATCH_PR_VALUE_FLAGS)[0];
   const gitRootFlag = flagValue(options.args, "--git-root");
 
   const sessionKey = sessionKeyFor(options);
@@ -1284,11 +1537,71 @@ async function cmdWatchPr(options: CliOptions): Promise<void> {
   });
 }
 
+/**
+ * `transitions` — read-only page over the per-session organize-transition
+ * log (#182, ADR-0029). Consumers (rebuildup.projects settle triggers)
+ * drain it via `--after <seq>`; `head_seq`/`oldest_seq`/`dropped` let a
+ * consumer detect a cursor older than retention (`cursor_expired`)
+ * instead of silently missing transitions.
+ *
+ * Read-only: expirations resolve through the same in-memory `resolveState`
+ * path as `list` — nothing is persisted that `list` would not already
+ * resolve identically on its own reads.
+ */
+async function cmdTransitions(options: CliOptions): Promise<void> {
+  // Read-only: same in-memory resolve path as `list`; no mutation gating.
+  validateFlags(options.args, { "--after": "value", "--limit": "value" });
+  assertMaxPositionals(options.args, ["--after", "--limit"], 0, "transitions");
+  const now = new Date();
+  const snapshot = await sessionSnapshot(options);
+  const state = await loadState();
+  const sessionKey = sessionKeyFor(options);
+  const entries = state.sessions[sessionKey] ?? {};
+  resolveState(entries, snapshot.agents ?? {}, now);
+
+  const log = state.transitions?.[sessionKey];
+  const items = log?.items ?? [];
+  const headSeq = log?.seq ?? 0;
+  const oldestSeq = items.length > 0 ? (items[0] as InboxTransition).seq : null;
+
+  const afterRaw = flagValue(options.args, "--after");
+  let after: number | null = null;
+  if (afterRaw !== undefined) {
+    after = Number(afterRaw);
+    if (!Number.isInteger(after) || after < 0) {
+      fail("--after must be a non-negative integer seq", 2);
+    }
+  }
+  const limitRaw = flagValue(options.args, "--limit");
+  const limit = limitRaw === undefined ? 200 : Number(limitRaw);
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_TRANSITIONS_PER_SESSION) {
+    fail(`--limit must be an integer between 1 and ${MAX_TRANSITIONS_PER_SESSION}`, 2);
+  }
+
+  // `--after` is exclusive. Without it the newest page is returned;
+  // consumers always pass their stored cursor.
+  const page =
+    after === null ? items.slice(-limit) : items.filter((t) => t.seq > after).slice(0, limit);
+
+  emit({
+    contract: CONTRACT,
+    command: "transitions",
+    generated_at: now.toISOString(),
+    session_key: sessionKey,
+    head_seq: headSeq,
+    oldest_seq: oldestSeq,
+    dropped: log?.dropped ?? 0,
+    transitions: page,
+  });
+}
+
 async function cmdCapability(options: CliOptions): Promise<void> {
+  validateFlags(options.args, {});
+  assertMaxPositionals(options.args, [], 0, "capability");
   emit({
     contract: CONTRACT,
     plugin: PLUGIN_ID,
-    version: "0.4.0",
+    version: "0.5.0",
     commands: [
       "list",
       "settle",
@@ -1303,6 +1616,7 @@ async function cmdCapability(options: CliOptions): Promise<void> {
       "unlink",
       "links",
       "reconcile",
+      "transitions",
       "watch",
       "watch-pr",
       "capability",
@@ -1332,6 +1646,7 @@ Usage:
   inbox links <pane_id> [--session NAME]
   inbox list [--attention] [--organize settled|snoozed|archived|none] [--search <text>] [--workspace <id>]
   inbox reconcile [--session NAME]
+  inbox transitions [--after <seq>] [--limit <n>] [--session NAME]
   inbox watch [--interval SECONDS] [--session NAME]
   inbox watch-pr [pane_id] [--interval SECONDS] [--once] [--git-root PATH] [--session NAME]
   inbox capability [--session NAME]
@@ -1363,6 +1678,8 @@ async function main(): Promise<void> {
       return cmdLinks(options);
     case "reconcile":
       return cmdReconcile(options);
+    case "transitions":
+      return cmdTransitions(options);
     case "_wake":
       return cmdWake(options);
     case "watch":
@@ -1383,6 +1700,16 @@ async function main(): Promise<void> {
 
 if (import.meta.main) {
   main().catch((err) => {
+    if (err instanceof TargetResolutionError) {
+      process.stderr.write(
+        `${JSON.stringify({
+          contract: CONTRACT,
+          ok: false,
+          error: { code: err.code, message: err.message },
+        })}\n`,
+      );
+      process.exit(err.usage ? 2 : 1);
+    }
     process.stderr.write(
       `${JSON.stringify({
         contract: CONTRACT,
