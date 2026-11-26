@@ -10,7 +10,7 @@
 
 import { spawn } from "node:child_process";
 
-export type GhErrorKind = "gh_missing" | "timeout" | "gh_error";
+export type GhErrorKind = "gh_missing" | "timeout" | "gh_error" | "stale_head";
 
 export class GhError extends Error {
   readonly kind: GhErrorKind;
@@ -397,6 +397,26 @@ async function ghApiJson(
   return JSON.parse(out) as unknown;
 }
 
+/**
+ * `gh api` POST with a JSON body piped through stdin (`--input -`). The
+ * payload never appears in argv, matching the `--body-file -` rule for
+ * `pr create` — review/comment text may be arbitrarily long or sensitive.
+ */
+async function ghApiPost(
+  repoRoot: string,
+  repo: string,
+  endpoint: string,
+  payload: Record<string, unknown>,
+  options: { timeoutMs?: number } = {},
+): Promise<Record<string, unknown>> {
+  const out = await ghOk(
+    repoRoot,
+    ["api", `repos/${repo}/${endpoint}`, "--method", "POST", "--input", "-"],
+    { ...options, input: JSON.stringify(payload) },
+  );
+  return asRecord(JSON.parse(out) as unknown);
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
 }
@@ -770,5 +790,303 @@ export async function collectPrLogs(
     head_sha: headSha,
     runs: runs.map(mapGhRun),
     runs_truncated: Array.isArray(parsed) && parsed.length > PR_RUNS_MAX,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// PR review/comment mutations (Issue #172, still ADR-0008 gh-CLI discipline).
+//
+// Every mutation re-fetches `GET pulls/{n}` immediately before writing and
+// refuses with GhError("stale_head") when the live head sha differs from the
+// caller-supplied `--expect-head` — a review must never land on a commit the
+// caller did not last read. Review submission additionally pins
+// `commit_id` to that verified head sha in the POST body, so the object
+// GitHub records is bound to exactly the sha that passed the guard.
+//
+// github-delivery boundary: these are explicit user/agent invocations only.
+// There is no automation path that submits reviews, posts comments, or
+// touches release PRs — in particular the plugin never approves or merges a
+// release-* -> main PR on its own.
+// ---------------------------------------------------------------------------
+
+/** 40-hex (sha1) or 64-hex (sha256) object id; short shas are rejected. */
+const HEAD_SHA_PATTERN = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/i;
+
+export function isValidHeadSha(value: string): boolean {
+  return HEAD_SHA_PATTERN.test(value);
+}
+
+export interface PrMutationRequest extends PrNumberRequest {
+  /**
+   * Stale-head guard (mandatory): the full head sha the caller last
+   * observed via a read surface (`head.sha` in `pr view`/`pr reviews`/
+   * `pr comments`/`pr checks`/`pr logs` payloads).
+   */
+  expectHead: string;
+}
+
+/**
+ * Re-fetch the PR and require `head.sha === expectHead`. Returns the refs
+ * so callers can echo head/base (and pin `commit_id`) without a second
+ * fetch. A moved or unreadable head is a structured refusal, never a
+ * silent proceed.
+ */
+async function assertHeadFresh(
+  repoRoot: string,
+  repo: string,
+  number: number,
+  expectHead: string,
+  options: { timeoutMs?: number } = {},
+): Promise<PrRefs> {
+  const refs = await fetchPrRefs(repoRoot, repo, number, options);
+  const headSha = refs.head.sha;
+  if (!headSha) {
+    throw new GhError("gh_error", "pull request head sha unavailable for mutation");
+  }
+  if (headSha !== expectHead) {
+    throw new GhError(
+      "stale_head",
+      `pull request #${number} head moved: expected ${expectHead}, current ${headSha}`,
+    );
+  }
+  return refs;
+}
+
+export type PrReviewEvent = "APPROVE" | "REQUEST_CHANGES" | "COMMENT";
+
+export interface PrLineComment {
+  path: string;
+  /** Line on the RIGHT (new) or LEFT (old) side of the diff. */
+  line: number;
+  side?: "RIGHT" | "LEFT" | undefined;
+  body: string;
+}
+
+export interface PrReviewRequest extends PrMutationRequest {
+  event: PrReviewEvent;
+  /** Review summary body; may be empty for bare approve/request-changes. */
+  body?: string | undefined;
+  /** Optional line comments anchored to the diff (REST `comments` array). */
+  comments?: PrLineComment[] | undefined;
+}
+
+function validateLineComments(comments: PrLineComment[]): void {
+  for (const [i, c] of comments.entries()) {
+    if (typeof c.path !== "string" || c.path.length === 0 || c.path.length > 4096) {
+      throw new GhError("gh_error", `line comment ${i}: invalid path`);
+    }
+    if (!Number.isInteger(c.line) || c.line < 1) {
+      throw new GhError("gh_error", `line comment ${i}: line must be a positive integer`);
+    }
+    if (c.side !== undefined && c.side !== "RIGHT" && c.side !== "LEFT") {
+      throw new GhError("gh_error", `line comment ${i}: side must be RIGHT or LEFT`);
+    }
+    if (typeof c.body !== "string" || c.body.trim().length === 0) {
+      throw new GhError("gh_error", `line comment ${i}: body must be non-empty`);
+    }
+  }
+}
+
+/** Bounded echo of the review object gh api returns. */
+function mapGhReview(raw: Record<string, unknown>): Record<string, unknown> {
+  const body = boundBody(raw.body, PR_BODY_MAX_CHARS);
+  const item: Record<string, unknown> = {
+    id: raw.id ?? null,
+    author: (asRecord(raw.user).login as string) ?? null,
+    state: raw.state ?? null,
+    commit_id: raw.commit_id ?? null,
+    submitted_at: raw.submitted_at ?? null,
+    url: raw.html_url ?? null,
+    body: body.text,
+  };
+  if (body.truncated) item.body_truncated = true;
+  return item;
+}
+
+/** Bounded echo of an issue/line comment object gh api returns. */
+function mapGhComment(raw: Record<string, unknown>): Record<string, unknown> {
+  const body = boundBody(raw.body, PR_BODY_MAX_CHARS);
+  const item: Record<string, unknown> = {
+    id: raw.id ?? null,
+    author: (asRecord(raw.user).login as string) ?? null,
+    body: body.text,
+    created_at: raw.created_at ?? null,
+    updated_at: raw.updated_at ?? null,
+    url: raw.html_url ?? null,
+  };
+  if (body.truncated) item.body_truncated = true;
+  return item;
+}
+
+function mapReviewRequests(refs: PrRefs): Record<string, unknown> {
+  return {
+    users: refs.requested_reviewers.map((u) => u.login),
+    teams: refs.requested_teams.map((t) => t.name ?? t.slug),
+  };
+}
+
+/**
+ * `pr review`: submit APPROVE / REQUEST_CHANGES / COMMENT via
+ * `POST pulls/{n}/reviews`. One transport covers both plain reviews and
+ * reviews carrying line comments (`comments[]` with path/line/side/body)
+ * because `gh pr review` cannot express the latter. The POST pins
+ * `commit_id` to the head sha verified by the stale-head guard.
+ */
+export async function submitPrReview(
+  repoRoot: string,
+  request: PrReviewRequest,
+  options: { timeoutMs?: number } = {},
+): Promise<Record<string, unknown>> {
+  const refs = await assertHeadFresh(
+    repoRoot,
+    request.repo,
+    request.number,
+    request.expectHead,
+    options,
+  );
+  const comments = request.comments ?? [];
+  validateLineComments(comments);
+  const payload: Record<string, unknown> = {
+    commit_id: refs.head.sha,
+    event: request.event,
+  };
+  if (request.body !== undefined) payload.body = request.body;
+  if (comments.length > 0) {
+    payload.comments = comments.map((c) => {
+      const entry: Record<string, unknown> = {
+        path: c.path,
+        line: c.line,
+        body: c.body,
+      };
+      if (c.side) entry.side = c.side;
+      return entry;
+    });
+  }
+  const review = await ghApiPost(
+    repoRoot,
+    request.repo,
+    `pulls/${request.number}/reviews`,
+    payload,
+    options,
+  );
+  return {
+    number: request.number,
+    head: refs.head,
+    base: refs.base,
+    review: mapGhReview(review),
+  };
+}
+
+/**
+ * `pr comment`: post a PR-conversation comment via
+ * `POST issues/{n}/comments` (`gh pr comment` equivalent; issues and PRs
+ * share the endpoint).
+ */
+export async function submitPrComment(
+  repoRoot: string,
+  request: PrMutationRequest & { body: string },
+  options: { timeoutMs?: number } = {},
+): Promise<Record<string, unknown>> {
+  const refs = await assertHeadFresh(
+    repoRoot,
+    request.repo,
+    request.number,
+    request.expectHead,
+    options,
+  );
+  const comment = await ghApiPost(
+    repoRoot,
+    request.repo,
+    `issues/${request.number}/comments`,
+    { body: request.body },
+    options,
+  );
+  return {
+    number: request.number,
+    head: refs.head,
+    base: refs.base,
+    comment: mapGhComment(comment),
+  };
+}
+
+/**
+ * `pr reply`: reply inside a review thread via
+ * `POST pulls/{n}/comments/{commentId}/replies`.
+ */
+export async function submitPrReply(
+  repoRoot: string,
+  request: PrMutationRequest & { commentId: number; body: string },
+  options: { timeoutMs?: number } = {},
+): Promise<Record<string, unknown>> {
+  const refs = await assertHeadFresh(
+    repoRoot,
+    request.repo,
+    request.number,
+    request.expectHead,
+    options,
+  );
+  const comment = await ghApiPost(
+    repoRoot,
+    request.repo,
+    `pulls/${request.number}/comments/${request.commentId}/replies`,
+    { body: request.body },
+    options,
+  );
+  return {
+    number: request.number,
+    comment_id: request.commentId,
+    head: refs.head,
+    base: refs.base,
+    comment: mapGhComment(comment),
+  };
+}
+
+const REVIEWER_LOGIN_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9_])?$/;
+
+export interface PrReviewersRequest extends PrMutationRequest {
+  add?: string[] | undefined;
+  remove?: string[] | undefined;
+}
+
+/**
+ * `pr reviewers`: request/dismiss reviewers via `gh pr edit
+ * --add-reviewer/--remove-reviewer`. Re-fetches refs afterwards so the
+ * echoed `review_requests` reflect the post-mutation state.
+ */
+export async function updatePrReviewers(
+  repoRoot: string,
+  request: PrReviewersRequest,
+  options: { timeoutMs?: number } = {},
+): Promise<Record<string, unknown>> {
+  await assertHeadFresh(repoRoot, request.repo, request.number, request.expectHead, options);
+  const add = request.add ?? [];
+  const remove = request.remove ?? [];
+  for (const [list, what] of [
+    [add, "--add-reviewer"],
+    [remove, "--remove-reviewer"],
+  ] as const) {
+    for (const login of list) {
+      if (!REVIEWER_LOGIN_PATTERN.test(login)) {
+        throw new GhError(
+          "gh_error",
+          `invalid reviewer login for ${what}: ${JSON.stringify(login)}`,
+        );
+      }
+    }
+  }
+  if (add.length === 0 && remove.length === 0) {
+    throw new GhError("gh_error", "at least one of --add-reviewer/--remove-reviewer is required");
+  }
+  const args = ["pr", "edit", String(request.number), "--repo", request.repo];
+  if (add.length > 0) args.push("--add-reviewer", add.join(","));
+  if (remove.length > 0) args.push("--remove-reviewer", remove.join(","));
+  await ghOk(repoRoot, args, options);
+  // Echo the post-mutation state: requested reviewers may have changed.
+  const after = await fetchPrRefs(repoRoot, request.repo, request.number, options);
+  return {
+    number: request.number,
+    head: after.head,
+    base: after.base,
+    review_requests: mapReviewRequests(after),
   };
 }
