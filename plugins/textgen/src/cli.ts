@@ -302,6 +302,19 @@ async function cmdCapability(options: CliOptions): Promise<void> {
     config: redactConfig(config),
     config_warnings: warnings,
     commands: ["capability", "generate", "git-context", "watch-next-prompt", "config"],
+    // Commands with side effects (#224): `generate` and
+    // `watch-next-prompt` drive herdr agent panes (agent.start/prompt)
+    // and record pane metadata; the listed `config` subcommands write
+    // config.json (`config show` is a read). `capability` and
+    // `git-context` are read-only.
+    mutation_commands: [
+      "generate",
+      "watch-next-prompt",
+      "config set-default-provider",
+      "config set-default-model",
+      "config add-api-generator",
+      "config remove-api-generator",
+    ],
     generated_at: now(),
   });
 }

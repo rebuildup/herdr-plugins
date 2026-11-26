@@ -252,8 +252,33 @@ describe("inbox transitions surface (#182)", () => {
   test("capability advertises transitions (additive since v0.4.0)", async () => {
     const cap = await cli(["capability"]);
     expect(cap.status).toBe(0);
-    expect(cap.json?.version).toBe("0.5.0");
+    expect(cap.json?.version).toBe("0.6.0");
     expect(cap.json?.commands).toContain("transitions");
+  });
+
+  test("capability advertises mutation_commands (#224)", async () => {
+    const cap = await cli(["capability"]);
+    expect(cap.status).toBe(0);
+    const mutations = cap.json?.mutation_commands as string[];
+    expect(mutations).toEqual([
+      "settle",
+      "snooze",
+      "restore",
+      "pin",
+      "unpin",
+      "archive",
+      "unarchive",
+      "order",
+      "link",
+      "unlink",
+      "reconcile",
+      "watch",
+      "watch-pr",
+    ]);
+    // Read-only commands stay out of the mutation set.
+    for (const readOnly of ["list", "links", "transitions", "capability"]) {
+      expect(mutations).not.toContain(readOnly);
+    }
   });
 });
 

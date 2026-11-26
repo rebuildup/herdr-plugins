@@ -53,6 +53,16 @@ semantics) and changes nothing.
 `capability` (the MCP `tools/call` discovery tool and the CLI
 `capability` command) always reports the negotiated `access_level`.
 
+**No `mutation_commands` field (#224).** The CLI-plugin convention of
+advertising mutating command names does not fit this plugin: `mcp` is
+a stdio MCP server whose executable surface is `serve` (protocol
+JSON-RPC), not per-feature CLI commands, and its mutation surface is
+the MCP *tool* table. Mutation gating is already advertised per-tool
+(`tools[].access` / `tools[].read_only` in `capability`) and
+enforced by the access-level matrix above — clients feature-detect
+mutations through those fields, so a `mutation_commands` list would
+duplicate information in a shape that does not match this contract.
+
 ## Identity echo (invariant)
 
 Every tool result that touches a herdr object carries an `identity`

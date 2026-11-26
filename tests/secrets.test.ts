@@ -236,6 +236,8 @@ describe("capability", () => {
       "noauth",
     ]);
     expect(JSON.stringify(result.json)).not.toContain(FAKE_VALUE);
+    // mutation_commands (#224): side-effecting commands only.
+    expect(result.json?.mutation_commands).toEqual(["run", "inject", "config"]);
   });
 });
 

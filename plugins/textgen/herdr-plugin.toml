@@ -1,6 +1,6 @@
 id = "rebuildup.textgen"
 name = "TextGen"
-version = "0.6.0"
+version = "0.7.0"
 min_herdr_version = "0.9.0"
 description = "Text generation contract (herdr-plugins.textgen/v1): six generation tasks (thread title, branch name, commit message, PR content, review guide, next prompt) resolved across agent-pane providers and opt-in API generators, with a strict input boundary and validated outputs. Generation only — git/forge execution stays with the caller."
 platforms = ["linux", "macos", "windows"]

@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -19,6 +20,7 @@ import {
 } from "../plugins/handoff/src/model";
 import { missingRefCount, resolvePayloadRefs } from "../plugins/handoff/src/refs";
 import { emptyState, loadState, pruneHandoffs, updateState } from "../plugins/handoff/src/state";
+import { testEnv } from "./helpers/test-env";
 
 const dirs: string[] = [];
 const savedStateDir = process.env.HERDR_PLUGIN_STATE_DIR;
@@ -302,5 +304,35 @@ describe("state: persistence", () => {
     const removed = pruneHandoffs(handoffs, 5);
     expect(removed).toEqual(["ho-done"]);
     expect(Object.keys(handoffs)).toHaveLength(5);
+  });
+});
+
+describe("capability document (#224)", () => {
+  test("advertises mutation_commands for record/herdr writes only", () => {
+    const cli = path.join(import.meta.dir, "../plugins/handoff/src/cli.ts");
+    const res = spawnSync(process.execPath, [cli, "capability"], {
+      env: testEnv(),
+      encoding: "utf8",
+    });
+    expect(res.status).toBe(0);
+    const doc = JSON.parse(res.stdout) as {
+      version: string;
+      commands: string[];
+      mutation_commands: string[];
+    };
+    expect(doc.version).toBe("0.7.0");
+    expect(doc.mutation_commands).toEqual([
+      "create",
+      "status",
+      "execute",
+      "delegate",
+      "merge-back",
+    ]);
+    for (const readOnly of ["list", "resume-info", "remote-probe", "capability"]) {
+      expect(doc.mutation_commands).not.toContain(readOnly);
+    }
+    for (const mutation of doc.mutation_commands) {
+      expect(doc.commands).toContain(mutation);
+    }
   });
 });
