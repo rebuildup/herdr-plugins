@@ -1,5 +1,10 @@
 # Research: T3 Code feature inventory vs herdr
 
+> **Note (Issue #40)**: 本書は初期調査の履歴として保持する。機能台帳・
+> 依存グラフ・後続リリース計画の正本は [`docs/program/`](../program/README.md)
+> (`feature-ledger.json` + `README.md`) に移行した。新規の分類・対応付けは
+> 正本側を更新すること。
+
 Pinned revisions: `t3code` @ `9cc4018c`, `herdr` @ `e430afb` (source) +
 installed v0.9.5, `herdr-t3` @ `e430afb`… see repo notes; `project-init` @
 `285b139b`.

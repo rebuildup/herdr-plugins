@@ -12,7 +12,7 @@ import { realpathSync } from "node:fs";
 import { mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { pluginDirs, resolveSocketPath } from "../../../packages/herdr-client/src/socket";
+import { pluginDirs, resolveTarget } from "../../../packages/herdr-client/src/socket";
 
 export const PLUGIN_ID = "rebuildup.inbox";
 export const STATE_SCHEMA_VERSION = 2;
@@ -82,8 +82,13 @@ export function sessionEntries(state: InboxState, sessionKey: string): Record<st
 export function sessionKeyFor(options: {
   session?: string | undefined;
   socketPath?: string | undefined;
+  mutation?: boolean | undefined;
 }): string {
-  const socketPath = options.socketPath ?? resolveSocketPath({ session: options.session });
+  const socketPath = resolveTarget({
+    session: options.session,
+    socketPath: options.socketPath,
+    mutation: options.mutation,
+  }).socketPath;
   let canonical = socketPath;
   try {
     canonical = realpathSync(socketPath);

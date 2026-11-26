@@ -14,6 +14,10 @@
       "name": "@herdr-plugins/client",
       "version": "0.1.0",
     },
+    "plugins/git": {
+      "name": "@herdr-plugins/git",
+      "version": "0.2.0",
+    },
     "plugins/inbox": {
       "name": "@herdr-plugins/inbox",
       "version": "0.1.0",
@@ -39,6 +43,8 @@
     "@biomejs/cli-win32-x64": ["@biomejs/cli-win32-x64@2.2.4", "", { "os": "win32", "cpu": "x64" }, "sha512-3Y4V4zVRarVh/B/eSHczR4LYoSVyv3Dfuvm3cWs5w/HScccS0+Wt/lHOcDTRYeHjQmMYVC3rIRWqyN2EI52+zg=="],
 
     "@herdr-plugins/client": ["@herdr-plugins/client@workspace:packages/herdr-client"],
+
+    "@herdr-plugins/git": ["@herdr-plugins/git@workspace:plugins/git"],
 
     "@herdr-plugins/inbox": ["@herdr-plugins/inbox@workspace:plugins/inbox"],
 

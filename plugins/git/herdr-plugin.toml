@@ -1,0 +1,44 @@
+id = "rebuildup.git"
+name = "Git"
+version = "0.2.0"
+min_herdr_version = "0.9.0"
+description = "Git status/diff for agent panes: branch, change counts, per-file changes, bounded patches, and pane metadata projection."
+platforms = ["linux", "macos", "windows"]
+
+# No build step: the plugin is dependency-free TypeScript executed by Bun
+# (runtime prerequisite, see plugins/git/README.md).
+
+[[actions]]
+id = "status"
+title = "Git: pane status"
+description = "Show the git status of the focused pane's repository as JSON."
+contexts = ["pane"]
+command = ["bun", "run", "src/cli.ts", "status"]
+
+[[actions]]
+id = "files"
+title = "Git: pane changed files"
+description = "List the git changed files of the focused pane's repository as JSON."
+contexts = ["pane"]
+command = ["bun", "run", "src/cli.ts", "files"]
+
+[[actions]]
+id = "log"
+title = "Git: pane commit history"
+description = "Show recent commits of the focused pane's repository as JSON."
+contexts = ["pane"]
+command = ["bun", "run", "src/cli.ts", "log"]
+
+[[actions]]
+id = "compare"
+title = "Git: pane branch comparison"
+description = "Compare the focused pane's branch against its base as JSON."
+contexts = ["pane"]
+command = ["bun", "run", "src/cli.ts", "compare"]
+
+[[actions]]
+id = "project"
+title = "Git: project pane metadata"
+description = "Refresh git_branch/git_changes pane metadata tokens for the focused pane."
+contexts = ["pane"]
+command = ["bun", "run", "src/cli.ts", "project"]
