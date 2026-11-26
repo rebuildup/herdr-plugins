@@ -39,9 +39,42 @@ export interface Project {
   updated_at: string;
 }
 
+/**
+ * Pending auto-trigger mark recorded by `src/hook.ts` (#180). One mark
+ * per delivered `worktree.created` hook event; drained lazily by the
+ * next `scripts`-family CLI invocation (no daemon, ADR-0002 — same
+ * mark+drain shape as plugins/automations #146 and plugins/checkpoints
+ * auto-capture).
+ */
+export interface PendingTriggerMark {
+  /** Canonical dotted event name; v1 only records `worktree.created`. */
+  event: string;
+  received_at: string;
+  /**
+   * Socket the emitting herdr session resolved to at hook time
+   * (`HERDR_SOCKET_PATH`/session resolution). The drain runs triggered
+   * scripts against THIS socket — the session that owns the worktree —
+   * regardless of which session the draining CLI targets.
+   */
+  socket_path: string;
+  /** Absolute checkout path from the event's `worktree.path`. */
+  worktree_path: string;
+  /** `workspace.workspace_id` from the event payload, when present. */
+  workspace_id: string | null;
+  /** Raw event `data` payload, kept for audit/future triggers. */
+  data: Record<string, unknown>;
+}
+
 export interface ProjectsState {
   version: typeof STATE_SCHEMA_VERSION;
   projects: Record<string, Project>;
+  /**
+   * Undrained auto-trigger marks. Optional on disk — registries written
+   * before #180 lack the fields and load as empty/zero.
+   */
+  pending_triggers?: PendingTriggerMark[];
+  /** Count of marks dropped at the pending-triggers cap. */
+  pending_triggers_dropped?: number;
 }
 
 export function emptyState(): ProjectsState {
@@ -82,7 +115,25 @@ export async function loadState(): Promise<ProjectsState> {
     ) {
       return emptyState();
     }
-    return { version: STATE_SCHEMA_VERSION, projects: parsed.projects };
+    // Pending trigger marks are best-effort backlog: malformed entries
+    // are dropped individually rather than failing the whole registry.
+    const pendingRaw = Array.isArray(parsed.pending_triggers) ? parsed.pending_triggers : undefined;
+    const pendingTriggers = (pendingRaw ?? []).filter(
+      (m): m is PendingTriggerMark =>
+        typeof m === "object" &&
+        m !== null &&
+        typeof (m as PendingTriggerMark).event === "string" &&
+        typeof (m as PendingTriggerMark).worktree_path === "string" &&
+        typeof (m as PendingTriggerMark).socket_path === "string",
+    );
+    const dropped = parsed.pending_triggers_dropped;
+    return {
+      version: STATE_SCHEMA_VERSION,
+      projects: parsed.projects,
+      pending_triggers: pendingTriggers,
+      pending_triggers_dropped:
+        typeof dropped === "number" && Number.isInteger(dropped) && dropped >= 0 ? dropped : 0,
+    };
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return emptyState();
     throw err;

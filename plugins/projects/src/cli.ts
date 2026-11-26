@@ -47,9 +47,10 @@ import {
   updateState,
 } from "./state";
 import { loadT3ProjectFile, T3JsonError, type T3ProjectFileScript } from "./t3json";
+import { drainWorktreeTriggers, type TriggerDrainReport } from "./triggers";
 
 const CONTRACT = "herdr-plugins.projects/v1";
-const PLUGIN_VERSION = "0.1.0";
+const PLUGIN_VERSION = "0.2.0";
 const DEFAULT_TIMEOUT_MS = 10_000;
 
 interface PluginConfig {
@@ -92,8 +93,47 @@ function parseArgs(argv: string[]): CliOptions {
   return options;
 }
 
+/**
+ * Lazy auto-trigger drain report for the current invocation, merged
+ * into the emitted payload as `triggers` when non-empty (#180). Set by
+ * `drainTriggers` at the top of the `scripts` execution-family commands
+ * and `scripts tick`; `list`/`capability`/`help` never drain (the
+ * checkpoints `auto_captures` precedent).
+ */
+let triggerReport: TriggerDrainReport | null = null;
+
 function emit(payload: unknown): void {
-  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+  const body =
+    triggerReport !== null &&
+    (triggerReport.fired.length > 0 ||
+      triggerReport.skipped.length > 0 ||
+      triggerReport.duplicates > 0 ||
+      triggerReport.session_unreachable === true)
+      ? { ...(payload as Record<string, unknown>), triggers: triggerReport }
+      : payload;
+  process.stdout.write(`${JSON.stringify(body, null, 2)}\n`);
+}
+
+/**
+ * Drain pending `worktree.created` marks recorded by `src/hook.ts`.
+ * Best-effort by contract: unreachable sessions keep their marks and
+ * per-worktree failures land in `triggers.skipped` — the drain never
+ * fails the calling command.
+ */
+async function drainTriggers(options: CliOptions, config: PluginConfig): Promise<void> {
+  const callOptions: CallOptions = {};
+  if (options.session !== undefined) callOptions.session = options.session;
+  if (options.socketPath !== undefined) callOptions.socketPath = options.socketPath;
+  if (options.timeoutMs !== undefined) callOptions.timeoutMs = options.timeoutMs;
+  triggerReport = await drainWorktreeTriggers(
+    callOptions,
+    {
+      waitTimeoutMs: config.runTimeoutMs,
+      logMaxBytes: config.runLogMaxBytes,
+      stopGraceMs: config.stopGraceMs,
+    },
+    config.defaultScripts,
+  );
 }
 
 function fail(message: string, code = 1, kind?: string, extra?: Record<string, unknown>): never {
@@ -861,6 +901,7 @@ function pickScript(scripts: ResolvedScript[], wanted: string): ResolvedScript {
  */
 async function cmdScriptsRun(options: CliOptions): Promise<void> {
   const config = await loadConfig();
+  await drainTriggers(options, config);
   const parsed = parseCommandArgs(options.args, new Set(["--repo"]));
   const [projectId, name] = parsed.positionals;
   if (!projectId || !name || parsed.positionals.length > 2) {
@@ -921,6 +962,7 @@ async function cmdScriptsRun(options: CliOptions): Promise<void> {
  */
 async function cmdScriptsStop(options: CliOptions): Promise<void> {
   const config = await loadConfig();
+  await drainTriggers(options, config);
   const parsed = parseCommandArgs(options.args, new Set());
   const target = parsed.positionals[0];
   if (!target || parsed.positionals.length > 1) {
@@ -946,6 +988,7 @@ async function cmdScriptsStop(options: CliOptions): Promise<void> {
 /** `scripts results [project]` — run records, lazily reconciling panes. */
 async function cmdScriptsResults(options: CliOptions): Promise<void> {
   const config = await loadConfig();
+  await drainTriggers(options, config);
   const parsed = parseCommandArgs(options.args, new Set());
   const projectId = parsed.positionals[0];
   if (parsed.positionals.length > 1) {
@@ -974,6 +1017,7 @@ async function cmdScriptsResults(options: CliOptions): Promise<void> {
 /** `scripts logs <run-id>` — bounded stored/captured log for one run. */
 async function cmdScriptsLogs(options: CliOptions): Promise<void> {
   const config = await loadConfig();
+  await drainTriggers(options, config);
   const parsed = parseCommandArgs(options.args, new Set());
   const wanted = parsed.positionals[0];
   if (!wanted || parsed.positionals.length > 1) {
@@ -1001,6 +1045,18 @@ async function cmdScriptsLogs(options: CliOptions): Promise<void> {
     log: result.log,
     generated_at: now(),
   });
+}
+
+/**
+ * `scripts tick` — explicit lazy drain for pending `worktree.created`
+ * trigger marks (#180). This is also the entrypoint an external
+ * scheduler/watch process can call; the same drain runs implicitly at
+ * the top of `scripts run|stop|results|logs`.
+ */
+async function cmdScriptsTick(options: CliOptions): Promise<void> {
+  const config = await loadConfig();
+  await drainTriggers(options, config);
+  emit({ contract: CONTRACT, command: "scripts tick", generated_at: now() });
 }
 
 async function cmdCapability(): Promise<void> {
@@ -1038,11 +1094,21 @@ async function cmdCapability(): Promise<void> {
       "settings unset",
       "scripts run",
       "scripts stop",
+      "scripts tick",
+    ],
+    triggers: [
+      {
+        event: "worktree.created",
+        script_flag: "runOnWorktreeCreate",
+        mechanism:
+          "manifest [[events]] hook → pending mark → lazy drain on scripts tick|run|stop|results|logs",
+      },
     ],
     requires: {
       git: true,
       bun: true,
-      herdr: "session snapshot (discover); pane execution (scripts run/stop/results/logs)",
+      herdr:
+        "session snapshot (discover + trigger drain preflight); pane execution (scripts run/stop/results/logs)",
     },
     defaults: { timeoutMs: config.timeoutMs ?? DEFAULT_TIMEOUT_MS },
   });
@@ -1066,6 +1132,7 @@ Usage:
   projects scripts stop <run-id|project>
   projects scripts results [project]
   projects scripts logs <run-id>
+  projects scripts tick
   projects repos list <project>
   projects repos add <project> --path DIR [--path DIR]...
   projects repos remove <project> --path DIR [--path DIR]...
@@ -1109,6 +1176,8 @@ async function main(): Promise<void> {
           return cmdScriptsResults(options);
         case "logs":
           return cmdScriptsLogs(options);
+        case "tick":
+          return cmdScriptsTick(options);
         default:
           return fail(`unknown scripts subcommand: ${sub ?? ""}`, 2);
       }

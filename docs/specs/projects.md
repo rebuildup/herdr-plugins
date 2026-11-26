@@ -41,6 +41,7 @@ Foundation delivered by #49 (CRUD/overrides), #50 (t3.json/scripts),
 | `scripts stop <run-id\|project>` | ctrl+c + close the recorded pane of running run(s); only plugin-owned pane ids. |
 | `scripts results [project]` | Run records newest-first; `running` records lazily reconciled via `pane.get`. |
 | `scripts logs <run-id>` | Bounded stored/captured log tail for one run. |
+| `scripts tick` | Explicit lazy drain of pending `worktree.created` trigger marks (also runs implicitly atop `scripts run|stop|results|logs`). |
 | `repos list <project>` | Member repos with live `branch`/`dirty`/`has_submodules`; unreachable members reported in `skipped`. |
 | `repos add <project> --path DIR` | Add a repo/checkout to a project; same code path and errors as `update --repo-add`. |
 | `repos remove <project> --path DIR` | Drop membership (live or stale path); same code path as `update --repo-remove`. |
@@ -150,17 +151,41 @@ CLI invocations — no manifest actions.
 - Concurrency: unlimited runs; `run_id = run-<ts36>-<rand6>`; stop and
   results address only recorded pane ids (herdr socket panes carry no
   ownership token — client-side discipline per ADR-0010).
-- **Auto triggers gap:** `runOnWorktreeCreate`/`runOnSettle`/
-  `stopOnSettle` are listed but not executed — no faithful herdr event
-  mapping exists (upstream gap, follow-up Issue). Scheduled/event
-  execution belongs to #32 automations.
-- `mutation_commands` += `scripts run`, `scripts stop`.
+- `mutation_commands` += `scripts run`, `scripts stop`, `scripts tick`.
+
+## Auto trigger: runOnWorktreeCreate (#180)
+
+- Manifest `[[events]] on="worktree.created"` → `src/hook.ts` appends a
+  `PendingTriggerMark` to `state.json.pending_triggers` (cap 200,
+  oldest-dropped counted; identical event+session+path marks collapse).
+  The hook does no socket/git/script work — ADR-0002, same shape as
+  automations #146 / checkpoints auto-capture.
+- Lazy drain on the next `scripts tick|run|stop|results|logs` call
+  (`list`/`capability`/`help` never drain): worktree path →
+  `resolveRepo` → `git-common-dir` → non-archived `repos[]` membership
+  → #50 layered script resolution on the EVENT worktree root →
+  `runOnWorktreeCreate` scripts only → unchanged ADR-0010 `startRun`
+  against the mark's recorded session socket.
+- Skips are reported in the payload's `triggers` block
+  (`repo_not_registered`, `ambiguous_project`, `worktree_gone`, git
+  kinds, `t3json_invalid`/`invalid_script_list`/`unknown_script`,
+  `no_run_on_worktree_create_scripts`, `session_unreachable`,
+  `run_start_failed`) — never silent, never guessed. Unreachable
+  session sockets keep marks pending; consumed marks cannot double-fire
+  across concurrent drains.
+- `ScriptRun.trigger` records `{kind:"manual"|"worktree.created",
+  worktree_path?, event_received_at?}` (additive; manual runs get
+  `kind:"manual"`).
+- `runOnSettle`/`stopOnSettle` remain unimplemented — settle is
+  plugin-owned organize state, not a herdr event (#181 design / #182
+  implementation).
 
 ## Non-goals
 
 - No worktree/workspace creation for projects themselves — herdr/
   Worktrunk own lifecycle (script runs do create dedicated execution
   workspaces per ADR-0010).
-- No auto triggers (`runOnWorktreeCreate`/`runOnSettle`/`stopOnSettle`)
-  — upstream gap, manual run/stop only this release.
+- No `runOnSettle`/`stopOnSettle` triggers — no faithful event source
+  yet (#181/#182). `runOnWorktreeCreate` ships via the `worktree.created`
+  hook + lazy drain (#180).
 - No per-session namespacing of the registry.

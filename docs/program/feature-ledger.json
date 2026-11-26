@@ -204,10 +204,10 @@
       "title_ja": "Project Scripts: プロジェクト定義コマンドの実行・停止・結果管理",
       "upstream_refs": ["docs/user/project-settings.md", "docs/user/source-control.md"],
       "classification": "plugin",
-      "issues": [3, 26, 50, 52, 53],
+      "issues": [3, 26, 50, 52, 53, 180, 181, 182],
       "depends_on": ["projects-multi-repo"],
       "acceptance": "セットアップ (worktree 作成後含む)・定義済みコマンドの一覧・起動・停止・再実行・exit code/ログ・状態・開発サーバー実行先を扱う。PTY テキストから実行成功を捏造しない。#32 automation と責務分離。",
-      "verification": "#53 (release-0-3-0) で手動 run/stop/results/logs を実装。ADR-0010 の dedicated-pane 方式: workspace.create→pane.send_input→pane.wait_for_output センチネル (__HERDR_DONE_<run-id>__=$?) で exit code を構造化取得。result enum: running|success|failed|stopped|unknown (成功捏造なし)。runs.json は専用 lock+atomic rename、ログは bounded tail。fake-transport 契約テスト + herdr 0.9.5 隔離セッション実機検証済み (success/failed/unknown/stopped・stop 競合)。自動トリガー (runOnWorktreeCreate/runOnSettle/stopOnSettle) は上流イベント gap で未実装—後続 Issue。"
+      "verification": "#53 (release-0-3-0) で手動 run/stop/results/logs を実装。ADR-0010 の dedicated-pane 方式: workspace.create→pane.send_input→pane.wait_for_output センチネル (__HERDR_DONE_<run-id>__=$?) で exit code を構造化取得。result enum: running|success|failed|stopped|unknown (成功捏造なし)。runs.json は専用 lock+atomic rename、ログは bounded tail。fake-transport 契約テスト + herdr 0.9.5 隔離セッション実機検証済み (success/failed/unknown/stopped・stop 競合)。#180 (release-0-9-0) で runOnWorktreeCreate を実装: manifest [[events]] worktree.created hook → state.json pending_triggers mark → scripts tick/run|stop|results|logs の lazy drain (daemon なし)。repo 同定は git-common-dir→repos[] membership、script 解決は #50 layered resolution を event worktree root に適用、実行は ADR-0010 runner 流用。ScriptRun.trigger additive、capability triggers 広告、skip は triggers ブロックに誠実報告。runOnSettle/stopOnSettle は #181/#182 で継続。"
     },
     {
       "id": "checkpoints",

@@ -37,6 +37,7 @@ import { pluginDirs } from "../../../packages/herdr-client/src/socket";
 import {
   loadRuns,
   type RunResult,
+  type RunTrigger,
   readRunLog,
   runsDir as runsDirPath,
   type ScriptRun,
@@ -283,6 +284,11 @@ export interface StartRunInput {
   /** Canonical member repo root the script executes against. */
   repoRoot: string;
   remote: string | null;
+  /**
+   * Run origin (#180). Defaults to `{kind:"manual"}`; the trigger drain
+   * passes `{kind:"worktree.created", worktree_path, event_received_at}`.
+   */
+  trigger?: RunTrigger;
 }
 
 /**
@@ -341,6 +347,7 @@ export async function startRun(input: StartRunInput, deps: RunnerDeps): Promise<
     result: "running",
     log_path: null,
     error: null,
+    trigger: input.trigger ?? { kind: "manual" },
   };
 
   // Persist BEFORE injecting: a crash after this point still leaves an
