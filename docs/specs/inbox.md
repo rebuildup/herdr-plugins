@@ -1,8 +1,10 @@
 # Spec: Inbox plugin (`rebuildup.inbox`)
 
-Port of T3 Code's thread inbox / settle / snooze semantics to standalone
-herdr plugins, per `rebuildup/herdr-t3` issue #173 and
-`docs/design/info-architecture.md` §6.2.
+Port of T3 Code's thread inbox / settle / snooze / pin / archive / manual
+ordering semantics to standalone herdr plugins, per `rebuildup/herdr-t3`
+issue #173, `docs/design/info-architecture.md` §6.2, and herdr-plugins
+issues #33/#176 (upstream refs `docs/user/thread-sidebar.md`,
+`docs/user/triage.md` @ `9cc4018c`).
 
 ## Sources
 
@@ -18,11 +20,29 @@ herdr plugins, per `rebuildup/herdr-t3` issue #173 and
 ## Model
 
 Organize state is per-pane, user-owned, and stored in the plugin state dir.
-Each mark records:
+Each entry carries:
 
-- `seq` — `state_change_seq` at organize time (generation signal)
-- `agent_session` — fingerprint `{agent, kind, value}` when available
-- `at` / `until` — wall-clock timestamps
+- hide-kind marks — `settled`, `snoozed`, `archived` — mutually exclusive
+  (applying one clears the others):
+  - `seq` — `state_change_seq` at organize time (generation signal)
+  - `agent_session` — fingerprint `{agent, kind, value}` when available
+  - `at` / `until` — wall-clock timestamps (`until` on snooze only)
+- `pinned` — a generation-guarded mark (`at`/`seq`/`agent_session`) that
+  sorts the pane first in `list` output. Pin is a placement flag, never a
+  hide-kind: it does not affect `in_inbox`.
+- `order` — a manual rank (integer, lower sorts first) written by the
+  `order` command. A layout hint scoped to the pane id: it is NOT
+  generation-guarded (reordering is meaningless to withhold from a new
+  agent generation on the same pane) and is cleared by `restore`,
+  `pane.closed`, and retention pruning like every other field.
+
+`settled`/`snoozed`/`archived` are hide-kinds: they remove the pane from
+the default inbox view (`in_inbox: false`) until resolved. `archived` is
+the T3 "filed away" state — semantically distinct from `settled` but
+mechanically identical in v1 (same generation guard, same attention
+override). `pin`/`order` are orthogonal and survive hide-kind changes;
+`unpin`/`unarchive` clear only their own field, `restore` clears
+everything.
 
 ### Resolution (read-side, deterministic)
 
@@ -35,20 +55,29 @@ On every read (`list`, `reconcile`, event hook) each mark is resolved:
 3. **Generation advance** — live `state_change_seq > mark.seq` → mark
    cleared (auto-restore, per herdr-t3 §6.2).
 
-If both marks are cleared the entry is deleted. Marks recorded without an
+If every mark is cleared the entry is deleted (entries that still carry a
+pin or an order rank are retained). Marks recorded without an
 `agent_session` fingerprint (non-agent panes, older herdr) fall back to
 seq comparison only.
 
 ### Attention invariant
 
 `agent_status == "blocked"` (and future attention statuses) forces
-`in_inbox: true` regardless of organize marks. In practice a transition to
-`blocked` bumps `state_change_seq`, which already clears marks; the flag is
-a defense-in-depth guarantee, not the primary mechanism.
+`in_inbox: true` regardless of organize marks — including `archived`.
+An archived pane whose agent reports attention stays in the inbox while
+keeping its `archived` mark, so it returns to the archived view once
+attention clears; a generation advance clears the mark entirely (auto-
+restore). In practice a transition to `blocked` bumps `state_change_seq`,
+which already clears marks; the flag is a defense-in-depth guarantee, not
+the primary mechanism.
 
 ### What organize state is NOT
 
-- It never mutates herdr agent/pane execution state.
+- It never mutates herdr agent/pane execution state. `archive` in
+  particular only hides the pane from the default inbox view — it never
+  closes the pane, stops the agent, or touches the PTY (contract-tested:
+  organize commands emit only `session.snapshot` reads and
+  `pane.report_metadata` projections).
 - It never fabricates statuses from PTY text. T3 Code's richer signals
   (pending approval, user input request, subagent request) have no herdr
   equivalent; `blocked` is the only attention signal used. This gap is
@@ -63,12 +92,23 @@ of 500 entries evicts the oldest `updated_at` first. `pane.closed` event
 hooks delete the entry immediately. Live panes are never pruned — their
 marks expire via resolution instead.
 
+## List ordering
+
+`list` sorts items: `pinned` first, then `attention`, then `order` rank
+ascending (unordered items last, `pane_id` tiebreak). `order` ranks are
+dense integers scoped to the moved pane's display group (same
+`attention`/`pinned` flags); `order <pane> --first|--last|--before <p>|
+--after <p>` rewrites the whole sibling group's ranks under the state
+lock, so concurrent clients cannot interleave corrupt ranks. Ordering a
+hidden pane is rejected — restore/unarchive first.
+
 ## Snooze deadline materialization
 
 Expiry is resolved lazily at every read, and materialized promptly by
 four complementary paths:
 
-- on any CLI invocation (`list`, `settle`, `snooze`, `restore`, `reconcile`)
+- on any CLI invocation (`list`, `settle`, `snooze`, `restore`, `pin`,
+  `unpin`, `archive`, `unarchive`, `order`, `reconcile`)
 - on every `pane.agent_status_changed` / `pane.closed` event hook
 - once at server start via the manifest `startup` hook (`reconcile`)
 - a detached one-shot `_wake` process spawned by `snooze`: it sleeps on a
@@ -106,8 +146,10 @@ unscoped key would leak organize marks between sessions). Consequences:
 On organize/restore/reconcile the plugin writes pane metadata tokens via
 `pane.report_metadata`:
 
-- `inbox_state` = `settled` | `snoozed`; cleared (null) when unorganized
+- `inbox_state` = `settled` | `snoozed` | `archived`; cleared (null) when
+  no hide-kind survives
 - `inbox_snoozed_until` = ISO deadline (snoozed only)
+- `inbox_pinned` = `"true"` while a pin mark survives; cleared otherwise
 
 Tokens are namespaced `inbox.*` and merged by herdr; other plugins' tokens
 are untouched.
@@ -131,13 +173,17 @@ Hook failures are logged to the plugin command log and never affect herdr.
 
 ## Manifest actions
 
-`settle`, `restore`, `snooze` actions operate on the context pane
+`settle`, `restore`, `snooze`, `pin`, `unpin`, `archive`, `unarchive`
+actions operate on the context pane
 (`HERDR_PANE_ID` / `HERDR_PLUGIN_CONTEXT_JSON.focused_pane_id`). `snooze`
 with no `--until` uses `defaultSnooze` from the plugin `config.json`.
+`order` is CLI-only (it needs placement arguments).
 
-## Out of scope (v0.1)
+## Out of scope
 
 - TUI inbox pane / Agent View projection (herdr-t3 consumes the contract).
 - Multi-session namespacing beyond socket selection.
 - `pane.output_matched`-driven attention inference.
 - Checkpoint/handoff features (separate plugins/issues).
+- Remaining #33 scope: inbox search, PR linkage/attention-return,
+  work-group/side-chat semantics (later tickets of the #33 decomposition).

@@ -27,25 +27,41 @@ export interface AgentSessionRef {
   value?: string;
 }
 
-export interface SettledMark {
+/**
+ * Generation-guarded organize mark: clears when the pane's agent session
+ * fingerprint changes or `state_change_seq` advances (auto-restore on a new
+ * agent generation — see docs/specs/inbox.md).
+ */
+export interface GenerationMark {
   at: string;
-  /** state_change_seq observed when the pane was settled. */
+  /** state_change_seq observed when the mark was applied. */
   seq: number;
   agent_session?: AgentSessionRef | null;
 }
 
-export interface SnoozedMark {
-  at: string;
+export interface SettledMark extends GenerationMark {}
+
+export interface SnoozedMark extends GenerationMark {
   until: string;
-  seq: number;
-  agent_session?: AgentSessionRef | null;
 }
+
+export interface ArchivedMark extends GenerationMark {}
+
+export interface PinnedMark extends GenerationMark {}
 
 export interface InboxEntry {
   pane_id: string;
   workspace_id?: string | undefined;
   settled?: SettledMark | undefined;
   snoozed?: SnoozedMark | undefined;
+  archived?: ArchivedMark | undefined;
+  pinned?: PinnedMark | undefined;
+  /**
+   * Manual order rank (lower sorts first). A layout hint scoped to the pane
+   * id — not generation-guarded; cleared by `restore`, `pane.closed`, and
+   * retention pruning like every other organize field.
+   */
+  order?: number | undefined;
   updated_at: string;
 }
 
