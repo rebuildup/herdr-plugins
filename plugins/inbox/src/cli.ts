@@ -7,19 +7,28 @@
  *
  * Pane selection: explicit <pane_id> argument, else HERDR_PANE_ID, else
  * HERDR_PLUGIN_CONTEXT_JSON.focused_pane_id (manifest action context).
+ * Ambient pane ids are verified against the resolved session's snapshot
+ * (workspace/tab consistency); session/socket targeting follows
+ * `resolveTarget` — explicit flags beat ambient HERDR_* and contradictions
+ * fail closed (see docs/contracts/inbox-v1.md → Target selection).
  */
 
 import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import {
+  type AmbientIdentity,
+  ambientIdentity,
+  assertAmbientPaneIdentity,
   type CallOptions,
   type PaneInfo,
   pluginDirs,
   reportPaneMetadata,
+  resolveTarget,
   type SessionSnapshot,
   sessionSnapshot,
   subscribeAgentEvents,
+  TargetResolutionError,
 } from "../../../packages/herdr-client/src/index";
 import {
   applyInboxFilters,
@@ -70,6 +79,22 @@ interface CliOptions extends CallOptions {
   session: string | undefined;
 }
 
+function takeGlobalValue(args: string[], i: number, flag: string): string {
+  const value = args[i + 1];
+  if (value === undefined || value.length === 0 || value.startsWith("-")) {
+    fail(`option ${flag} requires a value`, 2);
+  }
+  return value;
+}
+
+function parseGlobalTimeout(raw: string): number {
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) {
+    fail(`invalid --timeout: ${raw} (expected a positive number of milliseconds)`, 2);
+  }
+  return value;
+}
+
 function parseArgs(argv: string[]): CliOptions {
   const args = [...argv];
   const command = args.shift() ?? "help";
@@ -78,12 +103,22 @@ function parseArgs(argv: string[]): CliOptions {
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i] as string;
     if (arg === "--session") {
-      options.session = args[++i];
+      options.session = takeGlobalValue(args, i, "--session");
+      i += 1;
+    } else if (arg.startsWith("--session=")) {
+      options.session = arg.slice("--session=".length);
+      if (options.session.length === 0) fail("option --session requires a value", 2);
     } else if (arg === "--socket") {
-      options.socketPath = args[++i];
+      options.socketPath = takeGlobalValue(args, i, "--socket");
+      i += 1;
+    } else if (arg.startsWith("--socket=")) {
+      options.socketPath = arg.slice("--socket=".length);
+      if (!options.socketPath) fail("option --socket requires a value", 2);
     } else if (arg === "--timeout") {
-      const value = Number(args[++i]);
-      if (Number.isFinite(value) && value > 0) options.timeoutMs = value;
+      options.timeoutMs = parseGlobalTimeout(takeGlobalValue(args, i, "--timeout"));
+      i += 1;
+    } else if (arg.startsWith("--timeout=")) {
+      options.timeoutMs = parseGlobalTimeout(arg.slice("--timeout=".length));
     } else {
       rest.push(arg);
     }
@@ -110,63 +145,113 @@ function fail(message: string, code = 1): never {
   emitError(message, code);
 }
 
+/**
+ * First value of a flag, in either `--name value` or `--name=value` form.
+ * Tokens after a `--` separator are positional and never match.
+ */
 function flagValue(args: string[], name: string): string | undefined {
-  const index = args.indexOf(name);
-  if (index === -1) return undefined;
-  return args[index + 1];
-}
-
-function positional(args: string[]): string[] {
-  const out: string[] = [];
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i] as string;
+    if (arg === "--") break;
+    if (arg === name) return args[i + 1];
+    if (arg.startsWith(`${name}=`)) return arg.slice(name.length + 1);
+  }
+  return undefined;
+}
+
+type FlagKind = "boolean" | "value";
+
+/**
+ * Strict option check: every `-`-prefixed token before a `--` separator
+ * must be a whitelisted flag for this command (`--name=value` counts as
+ * `--name`). Unknown options, `--flag=value` on boolean flags, and value
+ * flags with a missing/option-like value are usage errors (exit 2).
+ * A lone `-` is a positional, not an option.
+ */
+function validateFlags(args: string[], spec: Record<string, FlagKind>): void {
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i] as string;
+    if (arg === "--") break;
+    if (arg === "-" || !arg.startsWith("-")) continue;
+    const eq = arg.indexOf("=");
+    const name = eq === -1 ? arg : arg.slice(0, eq);
+    const kind = spec[name];
+    if (!kind) fail(`unknown option: ${arg}`, 2);
+    if (kind === "boolean") {
+      if (eq !== -1) fail(`option ${name} does not take a value`, 2);
+      continue;
+    }
+    if (eq !== -1) continue;
+    const next = args[i + 1];
     if (
-      arg === "--until" ||
-      arg === "--for" ||
-      arg === "--before" ||
-      arg === "--after" ||
-      arg === "--limit" ||
-      arg === "--organize" ||
-      arg === "--search" ||
-      arg === "--workspace" ||
-      arg === "--pr" ||
-      arg === "--issue" ||
-      arg === "--session" ||
-      arg === "--socket" ||
-      arg === "--timeout"
+      next === undefined ||
+      next === "--" ||
+      next.startsWith("--") ||
+      (next.length > 1 && next.startsWith("-") && next in spec)
     ) {
+      fail(`option ${name} requires a value`, 2);
+    }
+    i += 1;
+  }
+}
+
+/** Positional args, skipping flag values. Everything after `--` counts. */
+function positionals(args: string[], valueFlags: string[]): string[] {
+  const out: string[] = [];
+  let afterSeparator = false;
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i] as string;
+    if (afterSeparator) {
+      out.push(arg);
+      continue;
+    }
+    if (arg === "--") {
+      afterSeparator = true;
+      continue;
+    }
+    if (valueFlags.includes(arg)) {
       i += 1;
       continue;
     }
-    if (arg.startsWith("--")) continue;
+    if (arg.length > 1 && arg.startsWith("-")) continue;
     out.push(arg);
   }
   return out;
 }
 
-interface PluginContext {
-  focused_pane_id?: string;
-  workspace_id?: string;
-}
-
-function invocationContext(): PluginContext {
-  const raw = process.env.HERDR_PLUGIN_CONTEXT_JSON;
-  if (!raw) return {};
-  try {
-    return JSON.parse(raw) as PluginContext;
-  } catch {
-    return {};
+/** More positionals than the command accepts is a usage error. */
+function assertMaxPositionals(
+  args: string[],
+  valueFlags: string[],
+  max: number,
+  usage: string,
+): void {
+  const pos = positionals(args, valueFlags);
+  if (pos.length > max) {
+    fail(`${usage}: unexpected argument ${JSON.stringify(pos[max])}`, 2);
   }
 }
 
-async function resolvePaneId(args: string[]): Promise<string> {
-  const positionalArgs = positional(args);
-  const explicit =
-    positionalArgs[0] ?? process.env.HERDR_PANE_ID ?? invocationContext().focused_pane_id;
-  if (!explicit) {
+interface PaneSelection {
+  paneId: string;
+  /** Non-null when the pane id came from ambient env/context (not positional). */
+  ambient: AmbientIdentity | null;
+}
+
+/**
+ * Resolve the target pane. An explicit positional wins; otherwise the
+ * ambient identity bundle (HERDR_PANE_ID / context focused_pane_id) is
+ * used and kept for the post-snapshot consistency check — ambient
+ * workspace/tab ids that disagree with the resolved pane fail closed.
+ */
+function resolvePaneSelection(args: string[], valueFlags: string[] = []): PaneSelection {
+  const positional = positionals(args, valueFlags)[0];
+  if (positional) return { paneId: positional, ambient: null };
+  const identity = ambientIdentity();
+  if (!identity.paneId) {
     fail("pane id required (argument, HERDR_PANE_ID, or plugin context)", 2);
   }
-  return explicit;
+  return { paneId: identity.paneId as string, ambient: identity };
 }
 
 async function loadConfig(): Promise<{ defaultSnooze?: string }> {
@@ -254,8 +339,19 @@ function parseListFilters(args: string[]): InboxFilters {
   return filters;
 }
 
+const LIST_FLAGS: Record<string, FlagKind> = {
+  "--attention": "boolean",
+  "--organize": "value",
+  "--search": "value",
+  "--workspace": "value",
+};
+const LIST_VALUE_FLAGS = ["--organize", "--search", "--workspace"];
+
 async function cmdList(options: CliOptions): Promise<void> {
+  validateFlags(options.args, LIST_FLAGS);
+  assertMaxPositionals(options.args, LIST_VALUE_FLAGS, 0, "list");
   const now = new Date();
+  const target = resolveTarget({ session: options.session, socketPath: options.socketPath });
   const snapshot = await sessionSnapshot(options);
   const state = await loadState();
   const entries = state.sessions[sessionKeyFor(options)] ?? {};
@@ -270,7 +366,7 @@ async function cmdList(options: CliOptions): Promise<void> {
     contract: CONTRACT,
     generated_at: now.toISOString(),
     session: {
-      name: options.session ?? process.env.HERDR_SESSION ?? null,
+      name: target.session,
       socket: options.socketPath ?? process.env.HERDR_SOCKET_PATH ?? null,
     },
     state_file: stateFilePath(),
@@ -296,10 +392,20 @@ async function cmdList(options: CliOptions): Promise<void> {
 type OrganizeCommand = "settle" | "snooze" | "restore" | "pin" | "unpin" | "archive" | "unarchive";
 
 async function cmdOrganize(options: CliOptions, kind: OrganizeCommand): Promise<void> {
-  const paneId = await resolvePaneId(options.args);
+  // Every organize command mutates plugin state and pane metadata: the
+  // target must be explicit or a consistent ambient context, never the
+  // implicit default socket.
+  options.mutation = true;
+  const snoozeFlags: Record<string, FlagKind> = { "--until": "value", "--for": "value" };
+  const valueFlags = kind === "snooze" ? ["--until", "--for"] : [];
+  validateFlags(options.args, kind === "snooze" ? snoozeFlags : {});
+  assertMaxPositionals(options.args, valueFlags, 1, `${kind} <pane_id>`);
+  const selection = resolvePaneSelection(options.args, valueFlags);
+  const paneId = selection.paneId;
   const now = new Date();
   const snapshot = await sessionSnapshot(options);
   const pane = await findPane(snapshot, paneId);
+  if (selection.ambient) assertAmbientPaneIdentity(pane, selection.ambient);
   const agent = snapshot.agents?.[paneId];
 
   // Resolve the snooze deadline before taking the state lock: parse failures
@@ -516,6 +622,8 @@ async function reconcileOnce(options: CliOptions): Promise<ReconcileResult> {
  *
  * Explicit --socket/--session flags are forwarded because the child does not
  * inherit argv; HERDR_SOCKET_PATH/HERDR_SESSION env vars propagate naturally.
+ * Both paths stay consistent under `resolveTarget`: a contradictory ambient
+ * env + explicit flag combination fails closed in the parent before spawn.
  */
 function spawnSnoozeWake(options: CliOptions, until: Date): string | null {
   try {
@@ -539,6 +647,9 @@ const WAKE_MAX_SLEEP_MS = 2_000_000_000;
 
 /** Internal `_wake` command: sleep until the deadline, then reconcile once. */
 async function cmdWake(options: CliOptions): Promise<void> {
+  options.mutation = true;
+  validateFlags(options.args, { "--until": "value" });
+  assertMaxPositionals(options.args, ["--until"], 0, "_wake");
   const untilSpec = flagValue(options.args, "--until");
   if (!untilSpec) fail("_wake requires --until <iso8601>", 2);
   const until = parseUntilSpec(untilSpec, new Date());
@@ -551,6 +662,9 @@ async function cmdWake(options: CliOptions): Promise<void> {
 }
 
 async function cmdReconcile(options: CliOptions): Promise<void> {
+  options.mutation = true;
+  validateFlags(options.args, {});
+  assertMaxPositionals(options.args, [], 0, "reconcile");
   const result = await reconcileOnce(options);
   emit({ contract: CONTRACT, command: "reconcile", ...result });
 }
@@ -577,10 +691,26 @@ function parseOrderPlacement(args: string[]): OrderPlacement {
  * state — it is a layout hint only.
  */
 async function cmdOrder(options: CliOptions): Promise<void> {
-  const paneId = await resolvePaneId(options.args);
+  // order rewrites plugin state ranks and is a mutation of herdr-visible
+  // layout state: explicit or consistent ambient target required.
+  options.mutation = true;
+  const orderFlags: Record<string, FlagKind> = {
+    "--before": "value",
+    "--after": "value",
+    "--first": "boolean",
+    "--last": "boolean",
+  };
+  const orderValueFlags = ["--before", "--after"];
+  validateFlags(options.args, orderFlags);
+  assertMaxPositionals(options.args, orderValueFlags, 1, "order <pane_id>");
+  const selection = resolvePaneSelection(options.args, orderValueFlags);
+  const paneId = selection.paneId;
   const placement = parseOrderPlacement(options.args);
   const now = new Date();
   const snapshot = await sessionSnapshot(options);
+  if (selection.ambient) {
+    assertAmbientPaneIdentity(await findPane(snapshot, paneId), selection.ambient);
+  }
   const state = await loadState();
   const sessionKey = sessionKeyFor(options);
   const entries = state.sessions[sessionKey] ?? {};
@@ -710,12 +840,24 @@ function linkViews(links: PaneLink[] | undefined) {
  * session snapshot; re-linking the same ref re-validates its fingerprint.
  */
 async function cmdLink(options: CliOptions): Promise<void> {
-  const paneId = await resolvePaneId(options.args);
+  // link writes plugin state: explicit or consistent ambient target required.
+  options.mutation = true;
+  const linkFlags: Record<string, FlagKind> = {
+    "--pr": "value",
+    "--issue": "value",
+    "--verify": "boolean",
+  };
+  const linkValueFlags = ["--pr", "--issue"];
+  validateFlags(options.args, linkFlags);
+  assertMaxPositionals(options.args, linkValueFlags, 1, "link <pane_id>");
+  const selection = resolvePaneSelection(options.args, linkValueFlags);
+  const paneId = selection.paneId;
   const { kind, ref } = trackerKindAndRef(options.args);
   const { repo, number } = parseTrackerRef(ref);
   const now = new Date();
   const snapshot = await sessionSnapshot(options);
   const pane = await findPane(snapshot, paneId);
+  if (selection.ambient) assertAmbientPaneIdentity(pane, selection.ambient);
   const agent = snapshot.agents?.[paneId];
 
   const warnings: string[] = [];
@@ -743,12 +885,20 @@ async function cmdLink(options: CliOptions): Promise<void> {
 
 /** Remove one declared link; the pane must still exist in the snapshot. */
 async function cmdUnlink(options: CliOptions): Promise<void> {
-  const paneId = await resolvePaneId(options.args);
+  // unlink writes plugin state: explicit or consistent ambient target required.
+  options.mutation = true;
+  const unlinkFlags: Record<string, FlagKind> = { "--pr": "value", "--issue": "value" };
+  const unlinkValueFlags = ["--pr", "--issue"];
+  validateFlags(options.args, unlinkFlags);
+  assertMaxPositionals(options.args, unlinkValueFlags, 1, "unlink <pane_id>");
+  const selection = resolvePaneSelection(options.args, unlinkValueFlags);
+  const paneId = selection.paneId;
   const { kind, ref } = trackerKindAndRef(options.args);
   const { repo, number } = parseTrackerRef(ref);
   const now = new Date();
   const snapshot = await sessionSnapshot(options);
-  await findPane(snapshot, paneId);
+  const pane = await findPane(snapshot, paneId);
+  if (selection.ambient) assertAmbientPaneIdentity(pane, selection.ambient);
 
   const sessionKey = sessionKeyFor(options);
   const removed = await updateState((state) => {
@@ -772,9 +922,15 @@ async function cmdUnlink(options: CliOptions): Promise<void> {
 
 /** Read the declared links stored for a pane (staleness already resolved). */
 async function cmdLinks(options: CliOptions): Promise<void> {
-  const paneId = await resolvePaneId(options.args);
+  validateFlags(options.args, {});
+  assertMaxPositionals(options.args, [], 1, "links <pane_id>");
+  const selection = resolvePaneSelection(options.args);
+  const paneId = selection.paneId;
   const now = new Date();
   const snapshot = await sessionSnapshot(options);
+  if (selection.ambient) {
+    assertAmbientPaneIdentity(await findPane(snapshot, paneId), selection.ambient);
+  }
   const state = await loadState();
   const entries = state.sessions[sessionKeyFor(options)] ?? {};
   resolveState(entries, snapshot.agents ?? {}, now);
@@ -799,8 +955,16 @@ function emitLine(payload: unknown): void {
  * Stops on SIGINT/SIGTERM (exit 0) or unexpected stream end (exit 1).
  */
 async function cmdWatch(options: CliOptions): Promise<void> {
-  const intervalSec = Number(flagValue(options.args, "--interval") ?? "60");
-  const intervalMs = (Number.isFinite(intervalSec) && intervalSec > 0 ? intervalSec : 60) * 1000;
+  // watch reconciles (state writes + metadata projection) on every tick.
+  options.mutation = true;
+  validateFlags(options.args, { "--interval": "value" });
+  assertMaxPositionals(options.args, ["--interval"], 0, "watch");
+  const intervalRaw = flagValue(options.args, "--interval");
+  const intervalSec = intervalRaw === undefined ? 60 : Number(intervalRaw);
+  if (!Number.isFinite(intervalSec) || intervalSec <= 0) {
+    fail(`invalid --interval: ${intervalRaw} (expected a positive number of seconds)`, 2);
+  }
+  const intervalMs = intervalSec * 1000;
 
   const subscription = subscribeAgentEvents(options);
   await subscription.started;
@@ -868,6 +1032,9 @@ async function cmdWatch(options: CliOptions): Promise<void> {
  * resolve identically on its own reads.
  */
 async function cmdTransitions(options: CliOptions): Promise<void> {
+  // Read-only: same in-memory resolve path as `list`; no mutation gating.
+  validateFlags(options.args, { "--after": "value", "--limit": "value" });
+  assertMaxPositionals(options.args, ["--after", "--limit"], 0, "transitions");
   const now = new Date();
   const snapshot = await sessionSnapshot(options);
   const state = await loadState();
@@ -912,6 +1079,8 @@ async function cmdTransitions(options: CliOptions): Promise<void> {
 }
 
 async function cmdCapability(options: CliOptions): Promise<void> {
+  validateFlags(options.args, {});
+  assertMaxPositionals(options.args, [], 0, "capability");
   emit({
     contract: CONTRACT,
     plugin: PLUGIN_ID,
@@ -1010,6 +1179,16 @@ async function main(): Promise<void> {
 
 if (import.meta.main) {
   main().catch((err) => {
+    if (err instanceof TargetResolutionError) {
+      process.stderr.write(
+        `${JSON.stringify({
+          contract: CONTRACT,
+          ok: false,
+          error: { code: err.code, message: err.message },
+        })}\n`,
+      );
+      process.exit(err.usage ? 2 : 1);
+    }
     process.stderr.write(
       `${JSON.stringify({
         contract: CONTRACT,

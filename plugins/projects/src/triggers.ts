@@ -37,6 +37,7 @@ import {
   type CallOptions,
   HerdrRpcError,
   resolveSocketPath,
+  sessionKeyFor,
   sessionSnapshot,
 } from "../../../packages/herdr-client/src/index";
 import {
@@ -46,7 +47,7 @@ import {
   runInboxCli,
 } from "./inbox-source";
 import { canonicalRepoRoot } from "./model";
-import { herdrTransport, type RunnerDeps, startRun, stopRuns } from "./runner";
+import { herdrTransport, type RunnerDeps, type StopOutcome, startRun, stopRuns } from "./runner";
 import type { ScriptRun } from "./runs";
 import { loadRuns } from "./runs";
 import { BUILTIN_SCRIPTS, type ResolvedScript, resolveScripts, ScriptError } from "./scripts";
@@ -225,7 +226,7 @@ export interface SettleStop {
   project_id: string;
   script: string;
   pane_id: string;
-  action: "stopped" | "already_finished" | "pane_gone";
+  action: StopOutcome["action"];
   transition_seq: number;
 }
 
@@ -429,6 +430,10 @@ export async function drainWorktreeTriggers(
     waitTimeoutMs: config.waitTimeoutMs,
     logMaxBytes: config.logMaxBytes,
     stopGraceMs: config.stopGraceMs,
+    // Runs fired by the drain live on the mark's emitting socket, not the
+    // caller's ambient target — record that socket's session discriminator
+    // so ownership re-validation (#66) matches the pane's real session.
+    sessionKey: sessionKeyFor({ socketPath, mutation: true }),
   });
 
   const gitOptions = timeoutMs === undefined ? {} : { timeoutMs };
@@ -738,6 +743,10 @@ export async function drainSettleTriggers(
     waitTimeoutMs: config.waitTimeoutMs,
     logMaxBytes: config.logMaxBytes,
     stopGraceMs: config.stopGraceMs,
+    // Settle fires/stops mutate the session resolved above (`socketPath`),
+    // not necessarily the caller's ambient default — record that socket's
+    // session discriminator so #66 ownership re-validation matches.
+    sessionKey: sessionKeyFor({ socketPath, mutation: true }),
   };
 
   // stopOnSettle script resolution is cached per (worktree root,

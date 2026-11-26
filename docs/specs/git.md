@@ -38,6 +38,20 @@ invoked only on user/agent request.
   root (`--show-toplevel`), which is the correct unit for status/diff.
 - A pane whose cwd is not inside a work tree is a structured
   `not_a_repo` result, never a fabricated empty status.
+- **Target isolation (issue #83):** socket targeting and ambient pane
+  identity follow the same `resolveTarget` rules as `rebuildup.inbox`
+  (explicit flags beat ambient `HERDR_*`; contradictions fail closed;
+  mutating commands require an explicit/ambient target; ambient
+  workspace/tab ids are verified against the target session's snapshot).
+- **Child env hygiene (issue #96):** every `git`/`gh` spawn runs with a
+  sanitized environment (`src/git-env.ts`) that strips ambient
+  repo/index/object/config-redirecting `GIT_*` variables
+  (`GIT_DIR`, `GIT_INDEX_FILE`, `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_*`/
+  `GIT_CONFIG_VALUE_*`, etc.) and `gh` targeting vars (`GH_REPO`,
+  `GH_DEBUG`, `GH_FORCE_TTY`, `GH_PAGER`), while preserving user-level
+  config selection, commit identity, and auth/transport variables. The
+  plugin's own pins (`GIT_TERMINAL_PROMPT=0`, `GIT_OPTIONAL_LOCKS=0`,
+  `LC_ALL=C`, `GH_PROMPT_DISABLED=1`) are applied after stripping.
 
 ## Commands (contract `herdr-plugins.git/v1`)
 
@@ -68,7 +82,20 @@ are network-bound; `diff`/`compare` accept
 `files`/`diff`/`log` accept repeatable `--path <pathspec>` values, passed
 to git after `--`; values starting with `-` are rejected. All output is a
 single JSON document; errors are `{ok:false,error:{code,message}}` on
-stderr with exit 1 (2 for usage).
+stderr.
+
+**Exit-code contract:** `0` success, `1` handled runtime/environment
+failure (git missing/error/timeout, not-a-repo, pane lookup, gh
+auth/transport failures, `target_conflict`/`target_required`/
+`ambient_identity_mismatch`), `2` usage error (`error.code == "usage"`
+or `invalid_session`).
+Argument problems — unknown options, missing required arguments,
+conflicting flags, invalid flag values, extra positionals — are always
+exit 2 and are validated before any socket/git/gh access. Option
+parsing is strict: each command whitelists its flags (per-action for
+`pr`), rejects `--flag=value` on boolean flags, supports `--name=value`
+for value flags, honors a `--` end-of-options separator, and validates
+the global `--session`/`--socket`/`--timeout` flags the same way.
 
 ## Change accounting
 

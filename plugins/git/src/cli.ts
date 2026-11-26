@@ -6,17 +6,24 @@
  *
  * Pane selection: explicit <pane_id> argument, else HERDR_PANE_ID, else
  * HERDR_PLUGIN_CONTEXT_JSON.focused_pane_id (manifest action context).
+ * Ambient pane ids are verified against the resolved session's snapshot;
+ * session/socket targeting follows `resolveTarget` — explicit flags beat
+ * ambient HERDR_* and contradictions fail closed.
  */
 
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import {
+  type AmbientIdentity,
+  ambientIdentity,
+  assertAmbientPaneIdentity,
   type CallOptions,
   type PaneInfo,
   pluginDirs,
   reportPaneMetadata,
   type SessionSnapshot,
   sessionSnapshot,
+  TargetResolutionError,
 } from "../../../packages/herdr-client/src/index";
 import {
   collectPrChecks,
@@ -82,6 +89,22 @@ interface CliOptions extends CallOptions {
   session: string | undefined;
 }
 
+function takeGlobalValue(args: string[], i: number, flag: string): string {
+  const value = args[i + 1];
+  if (value === undefined || value.length === 0 || value.startsWith("-")) {
+    fail(`option ${flag} requires a value`, 2);
+  }
+  return value;
+}
+
+function parseGlobalTimeout(raw: string): number {
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) {
+    fail(`invalid --timeout: ${raw} (expected a positive number of milliseconds)`, 2);
+  }
+  return value;
+}
+
 function parseArgs(argv: string[]): CliOptions {
   const args = [...argv];
   const command = args.shift() ?? "help";
@@ -90,12 +113,22 @@ function parseArgs(argv: string[]): CliOptions {
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i] as string;
     if (arg === "--session") {
-      options.session = args[++i];
+      options.session = takeGlobalValue(args, i, "--session");
+      i += 1;
+    } else if (arg.startsWith("--session=")) {
+      options.session = arg.slice("--session=".length);
+      if (options.session.length === 0) fail("option --session requires a value", 2);
     } else if (arg === "--socket") {
-      options.socketPath = args[++i];
+      options.socketPath = takeGlobalValue(args, i, "--socket");
+      i += 1;
+    } else if (arg.startsWith("--socket=")) {
+      options.socketPath = arg.slice("--socket=".length);
+      if (!options.socketPath) fail("option --socket requires a value", 2);
     } else if (arg === "--timeout") {
-      const value = Number(args[++i]);
-      if (Number.isFinite(value) && value > 0) options.timeoutMs = value;
+      options.timeoutMs = parseGlobalTimeout(takeGlobalValue(args, i, "--timeout"));
+      i += 1;
+    } else if (arg.startsWith("--timeout=")) {
+      options.timeoutMs = parseGlobalTimeout(arg.slice("--timeout=".length));
     } else {
       rest.push(arg);
     }
@@ -122,63 +155,146 @@ function fail(message: string, code = 1, kind?: string): never {
   emitError(message, code, kind);
 }
 
+/**
+ * First value of a flag, in either `--name value` or `--name=value` form.
+ * Tokens after a `--` separator are positional and never match.
+ */
 function flagValue(args: string[], name: string): string | undefined {
-  const index = args.indexOf(name);
-  if (index === -1) return undefined;
-  return args[index + 1];
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i] as string;
+    if (arg === "--") break;
+    if (arg === name) return args[i + 1];
+    if (arg.startsWith(`${name}=`)) return arg.slice(name.length + 1);
+  }
+  return undefined;
 }
 
-/** All values of a repeatable value flag (e.g. --path a --path b). */
+/** All values of a repeatable value flag (`--path a --path=b`). */
 function flagValues(args: string[], name: string): string[] {
   const out: string[] = [];
   for (let i = 0; i < args.length; i += 1) {
-    if (args[i] === name && i + 1 < args.length) out.push(args[i + 1] as string);
+    const arg = args[i] as string;
+    if (arg === "--") break;
+    if (arg === name && i + 1 < args.length) {
+      out.push(args[i + 1] as string);
+    } else if (arg.startsWith(`${name}=`)) {
+      out.push(arg.slice(name.length + 1));
+    }
   }
   return out;
 }
 
 function hasFlag(args: string[], name: string): boolean {
-  return args.includes(name);
+  for (const arg of args) {
+    if (arg === "--") break;
+    if (arg === name) return true;
+  }
+  return false;
 }
 
-/** Positional args, skipping flag values. */
-function positionals(args: string[], valueFlags: string[]): string[] {
-  const out: string[] = [];
+type FlagKind = "boolean" | "value";
+
+/**
+ * Strict option check: every `-`-prefixed token before a `--` separator
+ * must be a whitelisted flag for this command (`--name=value` counts as
+ * `--name`). Unknown options, `--flag=value` on boolean flags, and value
+ * flags with a missing/option-like value are usage errors (exit 2).
+ * A lone `-` is a positional, not an option.
+ */
+function validateFlags(args: string[], spec: Record<string, FlagKind>): void {
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i] as string;
+    if (arg === "--") break;
+    if (arg === "-" || !arg.startsWith("-")) continue;
+    const eq = arg.indexOf("=");
+    const name = eq === -1 ? arg : arg.slice(0, eq);
+    const kind = spec[name];
+    if (!kind) fail(`unknown option: ${arg}`, 2);
+    if (kind === "boolean") {
+      if (eq !== -1) fail(`option ${name} does not take a value`, 2);
+      continue;
+    }
+    if (eq !== -1) continue;
+    const next = args[i + 1];
+    if (
+      next === undefined ||
+      next === "--" ||
+      next.startsWith("--") ||
+      (next.length > 1 && next.startsWith("-") && next in spec)
+    ) {
+      fail(`option ${name} requires a value`, 2);
+    }
+    i += 1;
+  }
+}
+
+/** Positional args, skipping flag values. Everything after `--` counts. */
+function positionals(args: string[], valueFlags: string[]): string[] {
+  const out: string[] = [];
+  let afterSeparator = false;
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i] as string;
+    if (afterSeparator) {
+      out.push(arg);
+      continue;
+    }
+    if (arg === "--") {
+      afterSeparator = true;
+      continue;
+    }
     if (valueFlags.includes(arg)) {
       i += 1;
       continue;
     }
-    if (arg.startsWith("--")) continue;
+    if (arg.length > 1 && arg.startsWith("-")) continue;
     out.push(arg);
   }
   return out;
 }
 
-interface PluginContext {
-  focused_pane_id?: string;
-}
-
-function invocationContext(): PluginContext {
-  const raw = process.env.HERDR_PLUGIN_CONTEXT_JSON;
-  if (!raw) return {};
-  try {
-    return JSON.parse(raw) as PluginContext;
-  } catch {
-    return {};
+/** More positionals than the command accepts is a usage error. */
+function assertMaxPositionals(
+  args: string[],
+  valueFlags: string[],
+  max: number,
+  usage: string,
+): void {
+  const pos = positionals(args, valueFlags);
+  if (pos.length > max) {
+    fail(`${usage}: unexpected argument ${JSON.stringify(pos[max])}`, 2);
   }
 }
 
-async function resolvePaneId(args: string[], valueFlags: string[] = []): Promise<string> {
-  const explicit =
-    positionals(args, valueFlags)[0] ??
-    process.env.HERDR_PANE_ID ??
-    invocationContext().focused_pane_id;
-  if (!explicit) {
+interface PaneSelection {
+  paneId: string;
+  /** Non-null when the pane id came from ambient env/context (not positional). */
+  ambient: AmbientIdentity | null;
+}
+
+/**
+ * Resolve the target pane. An explicit positional wins; otherwise the
+ * ambient identity bundle (HERDR_PANE_ID / context focused_pane_id) is
+ * used and kept for the post-snapshot consistency check — ambient
+ * workspace/tab ids that disagree with the resolved pane fail closed.
+ */
+function resolvePaneSelection(args: string[], valueFlags: string[] = []): PaneSelection {
+  const positional = positionals(args, valueFlags)[0];
+  if (positional) return { paneId: positional, ambient: null };
+  const identity = ambientIdentity();
+  if (!identity.paneId) {
     fail("pane id required (argument, HERDR_PANE_ID, or plugin context)", 2);
   }
-  return explicit;
+  return { paneId: identity.paneId as string, ambient: identity };
+}
+
+/** findPane + ambient identity verification for ambient-sourced pane ids. */
+async function findPaneChecked(
+  snapshot: SessionSnapshot,
+  selection: PaneSelection,
+): Promise<PaneInfo> {
+  const pane = await findPane(snapshot, selection.paneId);
+  if (selection.ambient) assertAmbientPaneIdentity(pane, selection.ambient);
+  return pane;
 }
 
 async function loadConfig(): Promise<PluginConfig> {
@@ -248,10 +364,13 @@ function statusPayload(
 }
 
 async function cmdStatus(options: CliOptions): Promise<void> {
+  validateFlags(options.args, {});
+  assertMaxPositionals(options.args, [], 1, "status <pane_id>");
   const config = await loadConfig();
-  const paneId = await resolvePaneId(options.args);
+  const selection = resolvePaneSelection(options.args);
+  const paneId = selection.paneId;
   const snapshot = await sessionSnapshot(options);
-  const pane = await findPane(snapshot, paneId);
+  const pane = await findPaneChecked(snapshot, selection);
   const cwd = paneCwd(pane);
   try {
     const report = await collectStatus(cwd, {
@@ -267,12 +386,23 @@ async function cmdStatus(options: CliOptions): Promise<void> {
 // Only flags that consume a value belong here; boolean flags are skipped
 // by the `--` prefix check in positionals().
 const DIFF_VALUE_FLAGS = ["--path", "--max-bytes"];
+const DIFF_FLAGS: Record<string, FlagKind> = {
+  "--path": "value",
+  "--max-bytes": "value",
+  "--staged": "boolean",
+  "--stat": "boolean",
+  "--name-status": "boolean",
+  "--numstat": "boolean",
+};
 
 async function cmdFiles(options: CliOptions): Promise<void> {
+  validateFlags(options.args, { "--path": "value" });
+  assertMaxPositionals(options.args, ["--path"], 1, "files <pane_id>");
   const config = await loadConfig();
-  const paneId = await resolvePaneId(options.args, ["--path"]);
+  const selection = resolvePaneSelection(options.args, ["--path"]);
+  const paneId = selection.paneId;
   const snapshot = await sessionSnapshot(options);
-  const pane = await findPane(snapshot, paneId);
+  const pane = await findPaneChecked(snapshot, selection);
   const cwd = paneCwd(pane);
 
   const pathspec = flagValues(options.args, "--path");
@@ -310,10 +440,13 @@ async function cmdFiles(options: CliOptions): Promise<void> {
 }
 
 async function cmdDiff(options: CliOptions): Promise<void> {
+  validateFlags(options.args, DIFF_FLAGS);
+  assertMaxPositionals(options.args, DIFF_VALUE_FLAGS, 3, "diff <pane_id> [rev [rev]]");
   const config = await loadConfig();
-  const paneId = await resolvePaneId(options.args, DIFF_VALUE_FLAGS);
+  const selection = resolvePaneSelection(options.args, DIFF_VALUE_FLAGS);
+  const paneId = selection.paneId;
   const snapshot = await sessionSnapshot(options);
-  const pane = await findPane(snapshot, paneId);
+  const pane = await findPaneChecked(snapshot, selection);
   const cwd = paneCwd(pane);
 
   // Revision args: positionals after the pane id that do not look like
@@ -400,6 +533,17 @@ async function cmdDiff(options: CliOptions): Promise<void> {
 }
 
 const LOG_VALUE_FLAGS = ["--limit", "--skip", "--author", "--grep", "--since", "--until", "--path"];
+const LOG_FLAGS: Record<string, FlagKind> = {
+  "--limit": "value",
+  "--skip": "value",
+  "--author": "value",
+  "--grep": "value",
+  "--since": "value",
+  "--until": "value",
+  "--path": "value",
+  "--all": "boolean",
+  "--first-parent": "boolean",
+};
 
 function positiveIntFlag(args: string[], name: string): number | undefined {
   const raw = flagValue(args, name);
@@ -412,10 +556,13 @@ function positiveIntFlag(args: string[], name: string): number | undefined {
 }
 
 async function cmdLog(options: CliOptions): Promise<void> {
+  validateFlags(options.args, LOG_FLAGS);
+  assertMaxPositionals(options.args, LOG_VALUE_FLAGS, 1, "log <pane_id>");
   const config = await loadConfig();
-  const paneId = await resolvePaneId(options.args, LOG_VALUE_FLAGS);
+  const selection = resolvePaneSelection(options.args, LOG_VALUE_FLAGS);
+  const paneId = selection.paneId;
   const snapshot = await sessionSnapshot(options);
-  const pane = await findPane(snapshot, paneId);
+  const pane = await findPaneChecked(snapshot, selection);
   const cwd = paneCwd(pane);
 
   const pathspec = flagValues(options.args, "--path");
@@ -468,10 +615,13 @@ async function cmdLog(options: CliOptions): Promise<void> {
 }
 
 async function cmdCompare(options: CliOptions): Promise<void> {
+  validateFlags(options.args, { "--max-bytes": "value" });
+  assertMaxPositionals(options.args, ["--max-bytes"], 3, "compare <pane_id> [base [head]]");
   const config = await loadConfig();
-  const paneId = await resolvePaneId(options.args, ["--max-bytes"]);
+  const selection = resolvePaneSelection(options.args, ["--max-bytes"]);
+  const paneId = selection.paneId;
   const snapshot = await sessionSnapshot(options);
-  const pane = await findPane(snapshot, paneId);
+  const pane = await findPaneChecked(snapshot, selection);
   const cwd = paneCwd(pane);
 
   const pos = positionals(options.args, ["--max-bytes"]);
@@ -535,9 +685,10 @@ async function repoRootForPane(
   config: PluginConfig,
   valueFlags: string[] = [],
 ): Promise<{ paneId: string; repoRoot: string }> {
-  const paneId = await resolvePaneId(options.args, valueFlags);
+  const selection = resolvePaneSelection(options.args, valueFlags);
+  const paneId = selection.paneId;
   const snapshot = await sessionSnapshot(options);
-  const pane = await findPane(snapshot, paneId);
+  const pane = await findPaneChecked(snapshot, selection);
   const cwd = paneCwd(pane);
   try {
     const repoRoot = (await resolveRepo(cwd, { timeoutMs: effectiveTimeoutMs(options, config) }))
@@ -574,12 +725,23 @@ function pathspecArgs(args: string[]): string[] {
   return paths;
 }
 
+const STAGE_FLAGS: Record<string, FlagKind> = { "--all": "boolean", "--path": "value" };
+
 async function cmdStageOrUnstage(options: CliOptions, unstaging: boolean): Promise<void> {
+  options.mutation = true;
   const command = unstaging ? "unstage" : "stage";
-  const config = await loadConfig();
-  const { paneId, repoRoot } = await repoRootForPane(options, config, ["--path"]);
+  validateFlags(options.args, STAGE_FLAGS);
+  assertMaxPositionals(options.args, ["--path"], 1, `${command} <pane_id>`);
   const paths = pathspecArgs(options.args);
   const all = hasFlag(options.args, "--all");
+  if (all && paths.length > 0) {
+    fail(`${command}: --all and --path are mutually exclusive`, 2);
+  }
+  if (!all && paths.length === 0) {
+    fail(`${command} requires --all or at least one --path`, 2);
+  }
+  const config = await loadConfig();
+  const { paneId, repoRoot } = await repoRootForPane(options, config, ["--path"]);
   try {
     const run = unstaging ? collectUnstage : collectStage;
     const output = await run(
@@ -595,10 +757,15 @@ async function cmdStageOrUnstage(options: CliOptions, unstaging: boolean): Promi
 }
 
 async function cmdCommit(options: CliOptions): Promise<void> {
+  options.mutation = true;
+  validateFlags(options.args, { "-m": "value", "--allow-empty": "boolean" });
+  assertMaxPositionals(options.args, ["-m"], 1, "commit <pane_id>");
+  const messages = flagValues(options.args, "-m");
+  if (messages.length === 0) fail("commit requires at least one -m <message>", 2);
+  if (messages.some((m) => m.length === 0)) fail("commit -m requires a non-empty message", 2);
+  const allowEmpty = hasFlag(options.args, "--allow-empty");
   const config = await loadConfig();
   const { paneId, repoRoot } = await repoRootForPane(options, config, ["-m"]);
-  const messages = flagValues(options.args, "-m");
-  const allowEmpty = hasFlag(options.args, "--allow-empty");
   try {
     const result = await collectCommit(
       repoRoot,
@@ -628,13 +795,15 @@ async function resolvePaneAndValue(
   config: PluginConfig,
   what: string,
 ): Promise<{ paneId: string; repoRoot: string; value: string }> {
-  const envPane = process.env.HERDR_PANE_ID ?? invocationContext().focused_pane_id;
+  const identity = ambientIdentity();
   const pos = positionals(options.args, []);
   let paneId: string;
   let value: string | undefined;
-  if (envPane) {
-    paneId = envPane;
+  let ambient: AmbientIdentity | null = null;
+  if (identity.paneId) {
+    paneId = identity.paneId;
     value = pos[0];
+    ambient = identity;
   } else {
     paneId = pos[0] ?? "";
     value = pos[1];
@@ -648,7 +817,7 @@ async function resolvePaneAndValue(
     throw err;
   }
   const snapshot = await sessionSnapshot(options);
-  const pane = await findPane(snapshot, paneId);
+  const pane = await findPaneChecked(snapshot, { paneId, ambient });
   const cwd = paneCwd(pane);
   try {
     const repoRoot = (await resolveRepo(cwd, { timeoutMs: effectiveTimeoutMs(options, config) }))
@@ -661,11 +830,15 @@ async function resolvePaneAndValue(
 }
 
 async function cmdBranch(options: CliOptions): Promise<void> {
+  options.mutation = true;
   const sub = options.args[0];
   if (sub !== "create" && sub !== "switch") {
     fail("branch requires a subcommand: create <pane> <name> [--switch] | switch <pane> <name>", 2);
   }
   const rest: CliOptions = { ...options, args: options.args.slice(1) };
+  // --switch only exists on `branch create`; `branch switch` takes none.
+  validateFlags(rest.args, sub === "create" ? { "--switch": "boolean" } : {});
+  assertMaxPositionals(rest.args, [], 2, `branch ${sub}`);
   const config = await loadConfig();
   const { paneId, repoRoot, value: name } = await resolvePaneAndValue(rest, config, "branch");
   try {
@@ -691,6 +864,9 @@ async function cmdBranch(options: CliOptions): Promise<void> {
 }
 
 async function cmdUpstream(options: CliOptions): Promise<void> {
+  options.mutation = true;
+  validateFlags(options.args, {});
+  assertMaxPositionals(options.args, [], 2, "upstream <pane_id> <upstream-ref>");
   const config = await loadConfig();
   const { paneId, repoRoot, value } = await resolvePaneAndValue(options, config, "upstream");
   try {
@@ -712,6 +888,9 @@ function extraPositionals(options: CliOptions, valueFlags: string[] = []): strin
 }
 
 async function cmdFetch(options: CliOptions): Promise<void> {
+  options.mutation = true;
+  validateFlags(options.args, { "--prune": "boolean" });
+  assertMaxPositionals(options.args, [], 2, "fetch <pane_id> [remote]");
   const config = await loadConfig();
   const { paneId, repoRoot } = await repoRootForPane(options, config);
   const extra = extraPositionals(options);
@@ -740,6 +919,12 @@ async function cmdFetch(options: CliOptions): Promise<void> {
 }
 
 async function cmdPush(options: CliOptions): Promise<void> {
+  options.mutation = true;
+  validateFlags(options.args, {
+    "--set-upstream": "boolean",
+    "--force-with-lease": "boolean",
+  });
+  assertMaxPositionals(options.args, [], 3, "push <pane_id> [remote] [refspec]");
   const config = await loadConfig();
   const { paneId, repoRoot } = await repoRootForPane(options, config);
   const extra = extraPositionals(options);
@@ -782,6 +967,8 @@ async function cmdPush(options: CliOptions): Promise<void> {
 }
 
 async function cmdRemote(options: CliOptions): Promise<void> {
+  validateFlags(options.args, {});
+  assertMaxPositionals(options.args, [], 1, "remote <pane_id>");
   const config = await loadConfig();
   const { paneId, repoRoot } = await repoRootForPane(options, config);
   try {
@@ -862,45 +1049,165 @@ function prBodyText(input: PrBodyInput): string | undefined {
 }
 
 /**
+ * Per-action option whitelist for `pr`. Flags are only valid on the
+ * action that documents them — e.g. `--state` on `pr create` is a
+ * usage error, not silently ignored.
+ */
+const PR_FLAG_SPECS: Record<string, Record<string, FlagKind>> = {
+  list: {
+    "--repo": "value",
+    "--limit": "value",
+    "--state": "value",
+    "--head": "value",
+  },
+  status: { "--repo": "value" },
+  view: { "--repo": "value" },
+  create: {
+    "--repo": "value",
+    "--title": "value",
+    "--body": "value",
+    "--body-file": "value",
+    "--base": "value",
+    "--head": "value",
+    "--draft": "boolean",
+  },
+  reviews: { "--repo": "value" },
+  comments: { "--repo": "value" },
+  checks: { "--repo": "value" },
+  logs: {
+    "--repo": "value",
+    "--run": "value",
+    "--job": "value",
+    "--lines": "value",
+  },
+  review: {
+    "--repo": "value",
+    "--expect-head": "value",
+    "--approve": "boolean",
+    "--request-changes": "boolean",
+    "--comment": "boolean",
+    "--body": "value",
+    "--body-file": "value",
+    "--comments-file": "value",
+  },
+  comment: {
+    "--repo": "value",
+    "--expect-head": "value",
+    "--body": "value",
+    "--body-file": "value",
+  },
+  reply: {
+    "--repo": "value",
+    "--expect-head": "value",
+    "--body": "value",
+    "--body-file": "value",
+  },
+  reviewers: {
+    "--repo": "value",
+    "--expect-head": "value",
+    "--add-reviewer": "value",
+    "--remove-reviewer": "value",
+  },
+  merge: {
+    "--repo": "value",
+    "--expect-head": "value",
+    "--squash": "boolean",
+    "--merge": "boolean",
+    "--rebase": "boolean",
+    "--auto": "boolean",
+    "--disable-auto": "boolean",
+  },
+};
+
+/**
  * `pr <action> <pane> [args]` — GitHub PR surface via the host `gh` CLI.
  * Positionals: [action, pane, ...rest]; pane falls back to env/context.
+ * All argument validation runs before any snapshot/gh access so usage
+ * errors exit 2 regardless of environment.
  */
 async function cmdPr(options: CliOptions): Promise<void> {
   const config = await loadConfig();
   const timeoutMs = effectiveRemoteTimeoutMs(options, config);
   const pos = positionals(options.args, PR_VALUE_FLAGS);
   const action = pos[0];
-  const paneId = pos[1] ?? process.env.HERDR_PANE_ID ?? invocationContext().focused_pane_id;
-  if (
-    !action ||
-    ![
-      "list",
-      "status",
-      "create",
-      "view",
-      "reviews",
-      "comments",
-      "checks",
-      "logs",
-      "review",
-      "comment",
-      "reply",
-      "reviewers",
-      "merge",
-    ].includes(action)
-  ) {
+  if (!action || !(action in PR_FLAG_SPECS)) {
     fail(
       "pr requires an action: list | status | create | view | reviews | comments | checks | logs | review | comment | reply | reviewers | merge",
       2,
     );
   }
+  const spec = PR_FLAG_SPECS[action] as Record<string, FlagKind>;
+  validateFlags(options.args, spec);
+  // Forge-mutating actions (`create`, `review`, `comment`, `reply`,
+  // `reviewers`) need an explicit or consistent ambient target, never the
+  // implicit default socket. Read actions keep the read-side resolution.
+  if (["create", "review", "comment", "reply", "reviewers", "merge"].includes(action)) {
+    options.mutation = true;
+  }
+  const identity = ambientIdentity();
+  const explicitPane = pos[1];
+  const paneId = explicitPane ?? identity.paneId;
+  const ambient = explicitPane === undefined ? identity : null;
   if (!paneId) {
     fail("pane id required (argument, HERDR_PANE_ID, or plugin context)", 2);
   }
   const rest = pos.slice(2);
 
+  // Per-action argument validation (all usage errors, exit 2).
+  if (action === "list" || action === "status") {
+    if (rest.length > 0) fail(`pr ${action} takes no positional arguments`, 2);
+  }
+  if (action === "view") {
+    const number = Number(rest[0]);
+    if (!Number.isInteger(number) || number < 1) {
+      fail("pr view requires a positive PR number", 2);
+    }
+    if (rest.length > 1) fail("pr view accepts at most one PR number", 2);
+  }
+  if (action === "list") {
+    const stateRaw = flagValue(options.args, "--state") ?? "open";
+    if (!["open", "closed", "merged", "all"].includes(stateRaw)) {
+      fail(`invalid --state: ${stateRaw}`, 2);
+    }
+    const limitRaw = flagValue(options.args, "--limit");
+    if (limitRaw !== undefined) {
+      const limit = Number(limitRaw);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
+        fail(`invalid --limit: ${limitRaw}`, 2);
+      }
+    }
+    const head = flagValue(options.args, "--head");
+    if (head?.startsWith("-")) {
+      fail("invalid --head value", 2);
+    }
+  }
+  if (action === "create") {
+    const title = flagValue(options.args, "--title");
+    if (!title) fail("pr create requires --title", 2);
+    if (
+      flagValue(options.args, "--body") !== undefined &&
+      flagValue(options.args, "--body-file") !== undefined
+    ) {
+      fail("--body and --body-file are mutually exclusive", 2);
+    }
+    if (rest.length > 0) fail("pr create takes no positional arguments", 2);
+    for (const what of ["base", "head"] as const) {
+      const value = flagValue(options.args, `--${what}`);
+      if (value?.startsWith("-")) {
+        fail(`invalid --${what} value`, 2);
+      }
+    }
+  }
+
+  const repoFlag = flagValue(options.args, "--repo");
+  if (repoFlag !== undefined) {
+    if (repoFlag.startsWith("-") || !/^[^\s/]+\/[^\s/]+$/.test(repoFlag)) {
+      fail(`invalid --repo value: ${JSON.stringify(repoFlag)}`, 2);
+    }
+  }
+
   const snapshot = await sessionSnapshot(options);
-  const pane = await findPane(snapshot, paneId);
+  const pane = await findPaneChecked(snapshot, { paneId, ambient });
   let repoRoot: string;
   try {
     repoRoot = (
@@ -918,9 +1225,6 @@ async function cmdPr(options: CliOptions): Promise<void> {
     throw err;
   }
 
-  const repoFlag = flagValue(options.args, "--repo");
-  if (repoFlag && repoFlag.startsWith("-")) fail("invalid --repo value", 2);
-
   const forgeBase = {
     contract: CONTRACT,
     command: "pr",
@@ -934,26 +1238,20 @@ async function cmdPr(options: CliOptions): Promise<void> {
     const ghOptions = { timeoutMs };
 
     if (action === "list") {
-      const stateRaw = flagValue(options.args, "--state") ?? "open";
-      if (!["open", "closed", "merged", "all"].includes(stateRaw)) {
-        fail(`invalid --state: ${stateRaw}`, 2);
-      }
+      const stateRaw = (flagValue(options.args, "--state") ?? "open") as
+        | "open"
+        | "closed"
+        | "merged"
+        | "all";
       const limitRaw = flagValue(options.args, "--limit");
-      let limit: number | undefined;
-      if (limitRaw !== undefined) {
-        limit = Number(limitRaw);
-        if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
-          fail(`invalid --limit: ${limitRaw}`, 2);
-        }
-      }
+      const limit = limitRaw === undefined ? undefined : Number(limitRaw);
       const head = flagValue(options.args, "--head");
-      if (head?.startsWith("-")) fail("invalid --head value", 2);
       const prs = await collectPrList(
         repoRoot,
         {
           repo,
           limit,
-          state: stateRaw as "open" | "closed" | "merged" | "all",
+          state: stateRaw,
           head,
         },
         ghOptions,
@@ -977,10 +1275,6 @@ async function cmdPr(options: CliOptions): Promise<void> {
 
     if (action === "view") {
       const number = Number(rest[0]);
-      if (!Number.isInteger(number) || number < 1) {
-        fail("pr view requires a positive PR number", 2);
-      }
-      if (rest.length > 1) fail("pr view accepts at most one PR number", 2);
       const pr = await collectPrView(repoRoot, { repo, number }, ghOptions);
       emit({ ...forgeBase, action: "view", repo, pr });
       return;
@@ -1241,13 +1535,6 @@ async function cmdPr(options: CliOptions): Promise<void> {
     const bodyInput = await resolvePrBody(options.args);
     const base = flagValue(options.args, "--base");
     const head = flagValue(options.args, "--head");
-    for (const [value, what] of [
-      [base, "base"],
-      [head, "head"],
-    ] as const) {
-      if (value?.startsWith("-")) fail(`invalid --${what} value`, 2);
-    }
-    if (rest.length > 0) fail("pr create takes no positional arguments", 2);
 
     const created = await collectPrCreate(
       repoRoot,
@@ -1278,10 +1565,15 @@ async function cmdPr(options: CliOptions): Promise<void> {
 }
 
 async function cmdProject(options: CliOptions): Promise<void> {
+  // project writes pane metadata tokens — a mutation of herdr state.
+  options.mutation = true;
+  validateFlags(options.args, {});
+  assertMaxPositionals(options.args, [], 1, "project <pane_id>");
   const config = await loadConfig();
-  const paneId = await resolvePaneId(options.args);
+  const selection = resolvePaneSelection(options.args);
+  const paneId = selection.paneId;
   const snapshot = await sessionSnapshot(options);
-  const pane = await findPane(snapshot, paneId);
+  const pane = await findPaneChecked(snapshot, selection);
   const cwd = paneCwd(pane);
 
   const warnings: string[] = [];
@@ -1341,6 +1633,8 @@ async function cmdProject(options: CliOptions): Promise<void> {
 }
 
 async function cmdCapability(options: CliOptions): Promise<void> {
+  validateFlags(options.args, {});
+  assertMaxPositionals(options.args, [], 0, "capability");
   const config = await loadConfig();
   emit({
     contract: CONTRACT,
@@ -1474,6 +1768,16 @@ async function main(): Promise<void> {
 
 if (import.meta.main) {
   main().catch((err) => {
+    if (err instanceof TargetResolutionError) {
+      process.stderr.write(
+        `${JSON.stringify({
+          contract: CONTRACT,
+          ok: false,
+          error: { code: err.code, message: err.message },
+        })}\n`,
+      );
+      process.exit(err.usage ? 2 : 1);
+    }
     process.stderr.write(
       `${JSON.stringify({
         contract: CONTRACT,

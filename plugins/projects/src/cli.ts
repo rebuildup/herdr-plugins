@@ -16,6 +16,7 @@ import {
   type CallOptions,
   pluginDirs,
   type SessionSnapshot,
+  sessionKeyFor,
   sessionSnapshot,
 } from "../../../packages/herdr-client/src/index";
 import {
@@ -31,6 +32,8 @@ import {
   listRuns,
   type RunnerDeps,
   runLog,
+  SHELL_OVERRIDE_VALUES,
+  type ShellOverride,
   type StopOutcome,
   startRun,
   stopRuns,
@@ -65,6 +68,8 @@ interface PluginConfig {
   runLogMaxBytes?: number | undefined;
   /** ctrl+c→close grace on `scripts stop`; default 2_000. */
   stopGraceMs?: number | undefined;
+  /** Bounded stop-exit confirmation window; default 5_000. */
+  stopConfirmMs?: number | undefined;
   /**
    * Override for the rebuildup.inbox plugin root used by the settle
    * drain (#182); falls back to `../inbox` sibling / `herdr plugin list`.
@@ -280,6 +285,10 @@ async function loadConfig(): Promise<PluginConfig> {
       stopGraceMs:
         typeof parsed.stopGraceMs === "number" && parsed.stopGraceMs >= 0
           ? parsed.stopGraceMs
+          : undefined,
+      stopConfirmMs:
+        typeof parsed.stopConfirmMs === "number" && parsed.stopConfirmMs > 0
+          ? parsed.stopConfirmMs
           : undefined,
       inboxRoot: typeof parsed.inboxRoot === "string" ? parsed.inboxRoot : undefined,
     };
@@ -933,6 +942,15 @@ function runnerDeps(options: CliOptions, config: PluginConfig): RunnerDeps {
     waitTimeoutMs: config.runTimeoutMs,
     logMaxBytes: config.runLogMaxBytes,
     stopGraceMs: config.stopGraceMs,
+    stopConfirmMs: config.stopConfirmMs,
+    // Session discriminator recorded on new runs and enforced before
+    // every pane action (#66): records from another session/socket are
+    // foreign and never receive input/close through this socket.
+    sessionKey: sessionKeyFor({
+      session: options.session,
+      socketPath: options.socketPath,
+      mutation: options.mutation,
+    }),
   };
 }
 
@@ -1000,10 +1018,18 @@ function pickScript(scripts: ResolvedScript[], wanted: string): ResolvedScript {
 async function cmdScriptsRun(options: CliOptions): Promise<void> {
   const config = await loadConfig();
   await drainTriggers(options, config);
-  const parsed = parseCommandArgs(options.args, new Set(["--repo"]));
+  const parsed = parseCommandArgs(options.args, new Set(["--repo", "--shell"]));
   const [projectId, name] = parsed.positionals;
   if (!projectId || !name || parsed.positionals.length > 2) {
-    fail("scripts run requires <project> <name> [--repo PATH]", 2);
+    fail("scripts run requires <project> <name> [--repo PATH] [--shell auto|sh|cmd|powershell]", 2);
+  }
+  const shellOpt = parsed.values.get("--shell");
+  if (shellOpt !== undefined && !(SHELL_OVERRIDE_VALUES as readonly string[]).includes(shellOpt)) {
+    fail(
+      `invalid --shell value: ${shellOpt} (expected ${SHELL_OVERRIDE_VALUES.join("|")})`,
+      1,
+      "invalid_shell",
+    );
   }
 
   const state = await loadState();
@@ -1033,6 +1059,9 @@ async function cmdScriptsRun(options: CliOptions): Promise<void> {
 
   let run: ScriptRun;
   try {
+    // scripts run creates a workspace/pane and submits input — a herdr-state
+    // mutation; fail closed when no explicit/ambient target resolves (#83).
+    options.mutation = true;
     run = await startRun(
       {
         project,
@@ -1044,6 +1073,7 @@ async function cmdScriptsRun(options: CliOptions): Promise<void> {
         },
         repoRoot: member.root,
         remote: member.remote,
+        shell: shellOpt as ShellOverride | undefined,
       },
       runnerDeps(options, config),
     );
@@ -1054,8 +1084,13 @@ async function cmdScriptsRun(options: CliOptions): Promise<void> {
 }
 
 /**
- * `scripts stop <run-id|project>` — ctrl+c the recorded pane, brief
- * grace, then close it. Only pane ids persisted in run records are
+ * `scripts stop <run-id|project>` — request stop on active runs, then
+ * confirm exit before recording `stopped` (#66). Ownership is
+ * re-validated via `pane.get` first: foreign/mismatched panes yield a
+ * `stale_pane` outcome with zero side effects. ctrl+c alone never counts
+ * as stopped — confirmation comes from pane absence or an empty
+ * foreground process list within `stopConfirmMs`; otherwise the run is
+ * `stop_unconfirmed`. Only pane ids persisted in run records are
  * addressed; nothing else in the session can be hit.
  */
 async function cmdScriptsStop(options: CliOptions): Promise<void> {
@@ -1068,11 +1103,14 @@ async function cmdScriptsStop(options: CliOptions): Promise<void> {
   }
   let outcomes: StopOutcome[];
   try {
+    // scripts stop closes/signals panes — a herdr-state mutation (#83).
+    options.mutation = true;
     outcomes = await stopRuns(target as string, runnerDeps(options, config));
   } catch (err) {
     runnerError(err);
   }
-  if (!outcomes.some((o) => o.action === "stopped")) {
+  const HANDLED = new Set(["stopped", "stop_unconfirmed", "stale_pane", "pane_gone"]);
+  if (!outcomes.some((o) => HANDLED.has(o.action))) {
     fail(`no running runs matched: ${target}`, 1, "no_running_runs", { target });
   }
   emit({
@@ -1234,7 +1272,7 @@ Usage:
   projects settings set <id> <key> <value>
   projects settings unset <id> <key>
   projects scripts list <project|repo> [--repo PATH]
-  projects scripts run <project> <name> [--repo PATH]
+  projects scripts run <project> <name> [--repo PATH] [--shell auto|sh|cmd|powershell]
   projects scripts stop <run-id|project>
   projects scripts results [project]
   projects scripts logs <run-id>

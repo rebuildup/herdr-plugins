@@ -17,7 +17,9 @@ import path from "node:path";
 import { pluginDirs } from "../../../packages/herdr-client/src/socket";
 import { PLUGIN_ID } from "./state";
 
-export const RUNS_SCHEMA_VERSION = 1;
+export const RUNS_SCHEMA_VERSION = 2;
+/** v1 records (pre-#66) load and are upgraded in memory; v3+ reads as empty. */
+const RUNS_READABLE_VERSIONS: ReadonlySet<number> = new Set([1, 2]);
 
 const LOCK_STALE_MS = 30_000;
 const LOCK_TIMEOUT_MS = 10_000;
@@ -26,11 +28,43 @@ const LOCK_RETRY_MS = 25;
 /**
  * Run lifecycle. `running` means the completion marker has not been
  * observed yet — it does NOT assert the process is alive (that is
- * re-checked lazily via `pane.get`). `unknown` means the pane vanished
+ * re-checked lazily via ownership-verified `pane.get`). `stopping` means
+ * a stop was requested (ctrl+c sent) but exit is NOT yet confirmed;
+ * `stop_unconfirmed` means the bounded confirmation window elapsed
+ * without evidence the process exited. `unknown` means the pane vanished
  * or the outcome can no longer be determined; it is never reported as
  * success (AGENTS §4).
  */
-export type RunResult = "running" | "success" | "failed" | "stopped" | "unknown";
+export type RunResult =
+  | "running"
+  | "stopping"
+  | "stop_unconfirmed"
+  | "success"
+  | "failed"
+  | "stopped"
+  | "unknown";
+
+/**
+ * Shell family the completion-marker wrapper was composed for (#67).
+ * `sh` covers POSIX shells (sh/bash/zsh/…); `cmd` is cmd.exe; `powershell`
+ * is Windows PowerShell / pwsh. Persisted so the injected `command_line`
+ * can be interpreted after the fact.
+ */
+export type ShellFamily = "sh" | "cmd" | "powershell";
+
+/**
+ * How the shell family was chosen: explicit `--shell` flag, the pane's
+ * `pane.process_info` foreground process, or the conservative host-OS
+ * default (`win32` → cmd, otherwise sh) when detection was inconclusive.
+ */
+export type ShellSource = "flag" | "process_info" | "host_default";
+
+/** Results that still address a live (or possibly live) execution pane. */
+export const ACTIVE_RUN_RESULTS: ReadonlySet<RunResult> = new Set([
+  "running",
+  "stopping",
+  "stop_unconfirmed",
+]);
 
 /**
  * What started a run (#180/#182, additive). `manual` = explicit
@@ -76,15 +110,35 @@ export interface ScriptRun {
   tab_id: string | null;
   /** Working directory the pane shell started in (repo root). */
   cwd: string;
-  /** The exact line injected into the pane (marker suffix included). */
+  /** The exact lines injected into the pane (marker line included). */
   command_line: string;
   /** Set when the command was too long for a single input line. */
   script_path: string | null;
+  /** Shell family the wrapper was built for (#67); null on v1 records. */
+  shell_family: ShellFamily | null;
+  /** How `shell_family` was chosen; null on v1 records. */
+  shell_source: ShellSource | null;
   started_at: string;
   finished_at: string | null;
   /** Parsed from the completion marker only — never from pane text. */
   exit_code: number | null;
   result: RunResult;
+  /**
+   * Host identity (`os.hostname()`) of the machine whose herdr session
+   * owns the pane. `null` on v1 records (unknown — ownership falls back
+   * to the pane context check only). Schema v2 (#66).
+   */
+  host: string | null;
+  /**
+   * Session discriminator (`sessionKeyFor`: hostname + canonical socket
+   * path) the pane lives in. `null` on v1 records. A record whose
+   * session_key differs from the invoking socket is FOREIGN — the plugin
+   * must never send input or close through the wrong session's socket
+   * (pane ids like `w1:p1` collide across sessions).
+   */
+  session_key: string | null;
+  /** ISO timestamp of the last accepted stop request (`stopping`). */
+  stop_requested_at: string | null;
   /** Relative path under the plugin state dir, when a log was captured. */
   log_path: string | null;
   /** Last structured error observed (pane gone, socket failure, …). */
@@ -138,13 +192,41 @@ export async function loadRuns(): Promise<RunsState> {
   if (
     parsed === null ||
     typeof parsed !== "object" ||
-    parsed.version !== RUNS_SCHEMA_VERSION ||
+    typeof parsed.version !== "number" ||
+    !RUNS_READABLE_VERSIONS.has(parsed.version) ||
     typeof parsed.runs !== "object" ||
     parsed.runs === null
   ) {
     return emptyRuns();
   }
-  return { version: RUNS_SCHEMA_VERSION, runs: parsed.runs };
+  // Normalize on load: v1 records lack the v2 ownership/stop fields;
+  // fill them with null so every consumer sees the full shape. Writes
+  // always emit the current schema version.
+  const runs: Record<string, ScriptRun> = {};
+  for (const [id, run] of Object.entries(parsed.runs)) {
+    if (typeof run !== "object" || run === null) continue;
+    const record = run as Partial<ScriptRun>;
+    runs[id] = {
+      ...record,
+      host: typeof record.host === "string" ? record.host : null,
+      session_key: typeof record.session_key === "string" ? record.session_key : null,
+      stop_requested_at:
+        typeof record.stop_requested_at === "string" ? record.stop_requested_at : null,
+      shell_family:
+        record.shell_family === "sh" ||
+        record.shell_family === "cmd" ||
+        record.shell_family === "powershell"
+          ? record.shell_family
+          : null,
+      shell_source:
+        record.shell_source === "flag" ||
+        record.shell_source === "process_info" ||
+        record.shell_source === "host_default"
+          ? record.shell_source
+          : null,
+    } as ScriptRun;
+  }
+  return { version: RUNS_SCHEMA_VERSION, runs };
 }
 
 async function acquireLock(file: string): Promise<() => Promise<void>> {

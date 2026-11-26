@@ -48,7 +48,10 @@ async function main(): Promise<void> {
   if (!paneId) return;
   const name = eventName(envelope);
 
-  const sessionKey = sessionKeyFor({});
+  // Hooks only run inside the herdr plugin runtime (HERDR_SOCKET_PATH is
+  // always set there); mutation:true keeps a manually-invoked hook from
+  // silently falling back to the implicit default session.
+  const sessionKey = sessionKeyFor({ mutation: true });
 
   if (name === "pane.closed") {
     await updateState((state) => {
@@ -76,7 +79,7 @@ async function main(): Promise<void> {
 
   if (name !== "pane.agent_status_changed") return;
 
-  const snapshot = await sessionSnapshot();
+  const snapshot = await sessionSnapshot({ mutation: true });
   const agent = snapshot.agents?.[paneId];
 
   const now = new Date();
@@ -121,7 +124,7 @@ async function main(): Promise<void> {
     inbox_pinned: outcome.pinned ? "true" : null,
   };
   try {
-    await reportPaneMetadata(paneId, tokens);
+    await reportPaneMetadata(paneId, tokens, { mutation: true });
   } catch (err) {
     console.error(`inbox hook: metadata projection failed for ${paneId}: ${String(err)}`);
   }
