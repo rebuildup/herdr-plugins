@@ -272,15 +272,230 @@ export function sessionSocketPath(session: string): string {
 }
 
 /**
- * Resolve which herdr socket to talk to, mirroring herdr's own precedence:
- * explicit path/env override > named session > default session socket.
+ * How the resolved socket target was chosen.
+ * - `flag`: explicit `--socket`/`--session` CLI options.
+ * - `env`: ambient `HERDR_SOCKET_PATH`/`HERDR_SESSION` (consistent pair).
+ * - `default`: no explicit or ambient target — the implicit default session
+ *   socket. Mutating operations must not use this (see `resolveTarget`).
  */
-export function resolveSocketPath(options: { session?: string | undefined } = {}): string {
-  const explicit = process.env.HERDR_SOCKET_PATH;
-  if (explicit) return explicit;
-  const session = options.session ?? process.env.HERDR_SESSION;
-  if (session) return sessionSocketPath(session);
-  return defaultSocketPath();
+export type TargetSource = "flag" | "env" | "default";
+
+export interface ResolvedTarget {
+  socketPath: string;
+  source: TargetSource;
+  /**
+   * Session name when the target is a named-session socket (`default` for
+   * the default session); `null` for custom socket paths whose session
+   * cannot be named.
+   */
+  session: string | null;
+}
+
+export type TargetErrorCode =
+  | "target_conflict"
+  | "target_required"
+  | "invalid_session"
+  | "ambient_identity_mismatch";
+
+/**
+ * Structured target-resolution failure. `usage` marks errors caused by an
+ * explicit CLI value (callers map them to exit code 2); ambient conflicts
+ * and missing mutation targets are runtime errors (exit code 1).
+ */
+export class TargetResolutionError extends Error {
+  readonly code: TargetErrorCode;
+  readonly usage: boolean;
+  constructor(code: TargetErrorCode, message: string, usage = false) {
+    super(message);
+    this.name = "TargetResolutionError";
+    this.code = code;
+    this.usage = usage;
+  }
+}
+
+export interface ResolveTargetOptions {
+  /** Explicit `--session NAME`. */
+  session?: string | undefined;
+  /** Explicit `--socket PATH`. */
+  socketPath?: string | undefined;
+  /**
+   * When true (mutating operations), the implicit default-session fallback
+   * is rejected: the target must come from explicit flags or a consistent
+   * ambient environment.
+   */
+  mutation?: boolean | undefined;
+}
+
+/** Mirrors herdr's `validate_name` (src/session.rs): ASCII alnum + `.` `_` `-`. */
+const SESSION_NAME_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+
+export function isValidSessionName(name: string): boolean {
+  // "default" is a valid name upstream; socketPathForSession maps it to the
+  // default session socket, mirroring herdr's active_name() filter.
+  return SESSION_NAME_PATTERN.test(name) && name !== "." && name !== "..";
+}
+
+/**
+ * Canonicalize a socket path for equality checks: resolve symlinks when the
+ * path exists (herdr state dirs are often symlinked, e.g. /var → /private/var
+ * on macOS), otherwise normalize lexically.
+ */
+function canonicalPath(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    return path.resolve(p);
+  }
+}
+
+function samePath(a: string, b: string): boolean {
+  return canonicalPath(a) === canonicalPath(b);
+}
+
+function nonEmpty(value: string | undefined | null): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
+ * Session-name → socket path. The session name `default` (and an unset
+ * HERDR_SESSION) maps to the default session socket, mirroring herdr's
+ * `data_dir_for(None)`; named sessions live under `sessions/<name>/`.
+ */
+export function socketPathForSession(session: string): string {
+  if (session === "default") return defaultSocketPath();
+  return sessionSocketPath(session);
+}
+
+function validateSessionName(name: string, source: "flag" | "env"): string {
+  if (!isValidSessionName(name)) {
+    throw new TargetResolutionError(
+      "invalid_session",
+      `${source === "flag" ? "--session" : "HERDR_SESSION"} is not a valid herdr session name: ${JSON.stringify(name)}`,
+      source === "flag",
+    );
+  }
+  return name;
+}
+
+/**
+ * Resolve which herdr socket to talk to.
+ *
+ * Precedence mirrors herdr's own `active_api_socket_path` with explicit
+ * plugin flags promoted above ambient environment (upstream:
+ * `--session` > `HERDR_SOCKET_PATH` > `HERDR_SESSION` > default):
+ *
+ * 1. `--socket PATH` — wins over everything; must be consistent with any
+ *    ambient `HERDR_SOCKET_PATH`/`HERDR_SESSION` that is set.
+ * 2. `--session NAME` — the named session's socket; must be consistent
+ *    with ambient `HERDR_SOCKET_PATH`/`HERDR_SESSION`.
+ * 3. Ambient context — `HERDR_SOCKET_PATH` wins over `HERDR_SESSION`
+ *    (upstream order); when both are set they must agree on the same
+ *    socket or resolution fails closed.
+ * 4. Default session socket — implicit fallback, rejected for mutations
+ *    (`mutation: true`) with `target_required`.
+ *
+ * Any contradiction between explicit targets and ambient environment —
+ * or between the two explicit flags — throws TargetResolutionError
+ * (`target_conflict`) instead of silently picking one side.
+ */
+export function resolveTarget(options: ResolveTargetOptions = {}): ResolvedTarget {
+  const flagSocket = nonEmpty(options.socketPath);
+  const flagSessionRaw = nonEmpty(options.session);
+  const envSocket = nonEmpty(process.env.HERDR_SOCKET_PATH);
+  const envSessionRaw = nonEmpty(process.env.HERDR_SESSION);
+
+  const flagSession = flagSessionRaw ? validateSessionName(flagSessionRaw, "flag") : undefined;
+  const envSession = envSessionRaw ? validateSessionName(envSessionRaw, "env") : undefined;
+
+  const conflict = (message: string): never => {
+    throw new TargetResolutionError("target_conflict", message);
+  };
+
+  if (flagSocket && flagSession) {
+    const sessionSocket = socketPathForSession(flagSession);
+    if (!samePath(flagSocket, sessionSocket)) {
+      conflict(`--socket ${flagSocket} does not match --session ${flagSession} (${sessionSocket})`);
+    }
+  }
+
+  if (flagSocket) {
+    if (envSocket && !samePath(flagSocket, envSocket)) {
+      conflict(
+        `--socket ${flagSocket} conflicts with ambient HERDR_SOCKET_PATH ${envSocket}; ` +
+          `unset the ambient variable or drop the explicit flag`,
+      );
+    }
+    if (envSession) {
+      const envSocketPath = socketPathForSession(envSession);
+      if (!samePath(flagSocket, envSocketPath)) {
+        conflict(
+          `--socket ${flagSocket} conflicts with ambient HERDR_SESSION ${envSession} ` +
+            `(${envSocketPath}); unset the ambient variable or drop the explicit flag`,
+        );
+      }
+    }
+    return {
+      socketPath: flagSocket,
+      source: "flag",
+      session: flagSession ?? envSession ?? null,
+    };
+  }
+
+  if (flagSession) {
+    const resolved = socketPathForSession(flagSession);
+    if (envSocket && !samePath(resolved, envSocket)) {
+      conflict(
+        `--session ${flagSession} (${resolved}) conflicts with ambient HERDR_SOCKET_PATH ` +
+          `${envSocket}; unset the ambient variable or drop the explicit flag`,
+      );
+    }
+    if (envSession && envSession !== flagSession) {
+      conflict(
+        `--session ${flagSession} conflicts with ambient HERDR_SESSION ${envSession}; ` +
+          `unset the ambient variable or drop the explicit flag`,
+      );
+    }
+    return { socketPath: resolved, source: "flag", session: flagSession };
+  }
+
+  if (envSocket) {
+    if (envSession) {
+      const sessionSocket = socketPathForSession(envSession);
+      if (!samePath(envSocket, sessionSocket)) {
+        conflict(
+          `ambient HERDR_SOCKET_PATH ${envSocket} is inconsistent with ambient ` +
+            `HERDR_SESSION ${envSession} (${sessionSocket})`,
+        );
+      }
+    }
+    return { socketPath: envSocket, source: "env", session: envSession ?? null };
+  }
+
+  if (envSession) {
+    return {
+      socketPath: socketPathForSession(envSession),
+      source: "env",
+      session: envSession,
+    };
+  }
+
+  if (options.mutation) {
+    throw new TargetResolutionError(
+      "target_required",
+      "mutating operations require an explicit target: pass --socket/--session or run " +
+        "inside a herdr context that exports HERDR_SOCKET_PATH/HERDR_SESSION",
+    );
+  }
+  return { socketPath: defaultSocketPath(), source: "default", session: null };
+}
+
+/**
+ * Resolve which herdr socket to talk to. Kept for callers that only need
+ * the path; prefer `resolveTarget` when the source/session matters.
+ */
+export function resolveSocketPath(options: ResolveTargetOptions = {}): string {
+  return resolveTarget(options).socketPath;
 }
 
 /**
@@ -294,8 +509,13 @@ export function resolveSocketPath(options: { session?: string | undefined } = {}
 export function sessionKeyFor(options: {
   session?: string | undefined;
   socketPath?: string | undefined;
+  mutation?: boolean | undefined;
 }): string {
-  const socketPath = options.socketPath ?? resolveSocketPath({ session: options.session });
+  const socketPath = resolveTarget({
+    session: options.session,
+    socketPath: options.socketPath,
+    mutation: options.mutation,
+  }).socketPath;
   let canonical = socketPath;
   try {
     canonical = realpathSync(socketPath);
@@ -338,23 +558,113 @@ export function herdrStateDir(): string {
 /**
  * Plugin config/state directories for external (non-plugin) clients.
  * Mirrors `herdr plugin config-dir` / the plugin state dir layout.
- * `HERDR_PLUGIN_CONFIG_DIR` / `HERDR_PLUGIN_STATE_DIR` win when set
- * (plugin runtime environment).
+ * Explicit options win; `HERDR_PLUGIN_CONFIG_DIR` / `HERDR_PLUGIN_STATE_DIR`
+ * (plugin runtime environment) come next; derived platform dirs last.
  */
 export function pluginDirs(
   pluginId: string,
   options: { configDir?: string; stateDir?: string } = {},
 ): { configDir: string; stateDir: string } {
   const component = pluginPathComponent(pluginId);
+  // Explicit options win over the ambient plugin-runtime env, mirroring the
+  // socket-target precedence (explicit > ambient > derived default).
   const configDir =
-    process.env.HERDR_PLUGIN_CONFIG_DIR ??
     options.configDir ??
+    process.env.HERDR_PLUGIN_CONFIG_DIR ??
     path.join(herdrConfigDir(), "plugins", "config", component);
   const stateDir =
-    process.env.HERDR_PLUGIN_STATE_DIR ??
     options.stateDir ??
+    process.env.HERDR_PLUGIN_STATE_DIR ??
     path.join(herdrStateDir(), "plugins", component);
   return { configDir, stateDir };
+}
+
+/**
+ * Ambient pane/workspace/tab identity exported by herdr into agent panes
+ * (`HERDR_PANE_ID`, `HERDR_WORKSPACE_ID`, `HERDR_TAB_ID`) and plugin
+ * invocations (`HERDR_PLUGIN_CONTEXT_JSON`). Values that disagree between
+ * the env vars and the context JSON — or that do not match the pane found
+ * in the resolved target session — fail closed.
+ */
+export interface AmbientIdentity {
+  paneId?: string | undefined;
+  workspaceId?: string | undefined;
+  tabId?: string | undefined;
+}
+
+interface PluginContextIdentity {
+  focused_pane_id?: string;
+  workspace_id?: string;
+  tab_id?: string;
+}
+
+function pluginContextIdentity(): PluginContextIdentity {
+  const raw = process.env.HERDR_PLUGIN_CONTEXT_JSON;
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw) as PluginContextIdentity;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Read the ambient identity bundle. Explicit env vars win over the plugin
+ * context JSON for each field; a pane id present in both with different
+ * values is a contradiction and throws `ambient_identity_mismatch`.
+ */
+export function ambientIdentity(): AmbientIdentity {
+  const context = pluginContextIdentity();
+  const envPane = nonEmpty(process.env.HERDR_PANE_ID);
+  const ctxPane = nonEmpty(context.focused_pane_id);
+  if (envPane && ctxPane && envPane !== ctxPane) {
+    throw new TargetResolutionError(
+      "ambient_identity_mismatch",
+      `HERDR_PANE_ID ${envPane} conflicts with ` +
+        `HERDR_PLUGIN_CONTEXT_JSON.focused_pane_id ${ctxPane}`,
+    );
+  }
+  return {
+    paneId: envPane ?? ctxPane,
+    workspaceId: nonEmpty(process.env.HERDR_WORKSPACE_ID) ?? nonEmpty(context.workspace_id),
+    tabId: nonEmpty(process.env.HERDR_TAB_ID) ?? nonEmpty(context.tab_id),
+  };
+}
+
+/**
+ * Verify that ambient workspace/tab identity is consistent with the pane
+ * resolved in the target session. Call only when the pane id itself came
+ * from the ambient identity (an explicit positional pane id overrides the
+ * ambient pane id and is verified by session membership alone). Snapshot
+ * `PaneInfo` always carries `workspace_id`/`tab_id` on the wire; a missing
+ * field cannot be verified and fails closed.
+ */
+export function assertAmbientPaneIdentity(
+  pane: { pane_id: string; workspace_id?: string; tab_id?: string },
+  identity: AmbientIdentity,
+): void {
+  const mismatches: string[] = [];
+  if (identity.workspaceId !== undefined) {
+    if (pane.workspace_id !== identity.workspaceId) {
+      mismatches.push(
+        `workspace_id ${JSON.stringify(pane.workspace_id ?? null)} != ambient ${JSON.stringify(identity.workspaceId)}`,
+      );
+    }
+  }
+  if (identity.tabId !== undefined) {
+    if (pane.tab_id !== identity.tabId) {
+      mismatches.push(
+        `tab_id ${JSON.stringify(pane.tab_id ?? null)} != ambient ${JSON.stringify(identity.tabId)}`,
+      );
+    }
+  }
+  if (mismatches.length > 0) {
+    throw new TargetResolutionError(
+      "ambient_identity_mismatch",
+      `ambient identity does not belong to resolved pane ${pane.pane_id} in the target ` +
+        `session: ${mismatches.join("; ")}`,
+    );
+  }
 }
 
 /** Path-safe encoding of a plugin id, mirroring herdr's `plugin_config_path_component`. */

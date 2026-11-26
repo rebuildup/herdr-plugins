@@ -808,7 +808,11 @@ function runnerDeps(options: CliOptions, config: PluginConfig): RunnerDeps {
     // Session discriminator recorded on new runs and enforced before
     // every pane action (#66): records from another session/socket are
     // foreign and never receive input/close through this socket.
-    sessionKey: sessionKeyFor({ session: options.session, socketPath: options.socketPath }),
+    sessionKey: sessionKeyFor({
+      session: options.session,
+      socketPath: options.socketPath,
+      mutation: options.mutation,
+    }),
   };
 }
 
@@ -916,6 +920,9 @@ async function cmdScriptsRun(options: CliOptions): Promise<void> {
 
   let run: ScriptRun;
   try {
+    // scripts run creates a workspace/pane and submits input — a herdr-state
+    // mutation; fail closed when no explicit/ambient target resolves (#83).
+    options.mutation = true;
     run = await startRun(
       {
         project,
@@ -956,6 +963,8 @@ async function cmdScriptsStop(options: CliOptions): Promise<void> {
   }
   let outcomes: StopOutcome[];
   try {
+    // scripts stop closes/signals panes — a herdr-state mutation (#83).
+    options.mutation = true;
     outcomes = await stopRuns(target as string, runnerDeps(options, config));
   } catch (err) {
     runnerError(err);

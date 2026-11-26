@@ -8,6 +8,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { sanitizedChildEnv } from "./git-env";
 
 export type GitErrorKind = "git_missing" | "timeout" | "git_error" | "not_a_repo" | "bare_repo";
 
@@ -43,12 +44,11 @@ export function runGit(
   return new Promise((resolve, reject) => {
     const child = spawn("git", args, {
       cwd,
-      env: {
-        ...process.env,
+      env: sanitizedChildEnv({
         GIT_TERMINAL_PROMPT: "0",
         GIT_OPTIONAL_LOCKS: "0",
         LC_ALL: "C",
-      },
+      }),
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
     });
