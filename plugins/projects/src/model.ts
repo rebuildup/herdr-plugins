@@ -94,15 +94,17 @@ export async function discoverRepos(
 
 /**
  * Live per-repo inspection for `repos list`: current branch, dirty flag,
- * and submodule presence. Three cheap git calls (rev-parse, status
- * --porcelain, submodule status), each under the caller's timeout.
- * `has_submodules` is false when `git submodule status` exits non-zero
- * or prints nothing. Throws GitError when the repo is unreachable.
+ * and submodule presence. Two cheap git calls (rev-parse, status
+ * --porcelain) must succeed for the repo to count as reachable; the
+ * `submodule status` probe is best-effort — a non-zero exit or a probe
+ * failure (timeout/git_missing) reports `has_submodules: null`
+ * (unknown), never a guessed `false`. Three timeout-bounded calls per
+ * repo. Throws GitError when the repo is unreachable.
  */
 export interface RepoLiveInfo {
   branch: string;
   dirty: boolean;
-  has_submodules: boolean;
+  has_submodules: boolean | null;
 }
 
 export async function inspectRepo(
@@ -112,12 +114,16 @@ export async function inspectRepo(
   const [branch, status, submodules] = await Promise.all([
     gitOk(root, ["rev-parse", "--abbrev-ref", "HEAD"], options).then((s) => s.trim()),
     gitOk(root, ["status", "--porcelain"], options),
-    runGit(root, ["submodule", "status"], options),
+    runGit(root, ["submodule", "status"], options).then(
+      (r) => r,
+      () => null,
+    ),
   ]);
   return {
     branch,
     dirty: status.trim().length > 0,
-    has_submodules: submodules.code === 0 && submodules.stdout.trim().length > 0,
+    has_submodules:
+      submodules === null || submodules.code !== 0 ? null : submodules.stdout.trim().length > 0,
   };
 }
 

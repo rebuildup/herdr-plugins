@@ -482,7 +482,9 @@ describe("scripts tick drain (fake hook events)", () => {
       // Execution surface: dedicated workspace created IN the worktree.
       expect(fake.createdCwds).toEqual([worktree]);
       expect(fake.inputs[0]).toContain("echo setup-ran");
-      expect(fake.inputs[0]).toContain("__HERDR_DONE_");
+      // The runner injects command and marker as separate send_input
+      // lines (#67 per-line parsing); assert across all injected input.
+      expect(fake.inputs.join("\n")).toContain("__HERDR_DONE_");
 
       // Run record carries the trigger provenance.
       const runs = await loadRuns();

@@ -51,12 +51,34 @@ An external client resolves the CLI as follows:
 ## Target selection (Host / Session)
 
 The CLI always talks to **the herdr server owning the socket it resolves**.
-Resolution order:
+Explicit flags win over ambient environment; any contradiction between
+explicit and ambient targets — or between the two ambient variables — is a
+`target_conflict` error (exit 1), never a silent pick:
 
-1. `--socket PATH` (explicit; local socket path — see Remote hosts)
-2. `HERDR_SOCKET_PATH`
-3. `--session NAME` / `HERDR_SESSION` → `<config>/sessions/<name>/herdr.sock`
-4. default session socket `<config>/herdr.sock`
+1. `--socket PATH` / `--session NAME` (explicit; local socket path — see
+   Remote hosts). `--session NAME` resolves to
+   `<config>/sessions/<name>/herdr.sock` (`default` → `<config>/herdr.sock`).
+   When both flags are given they must agree on the same socket.
+2. Ambient context, consistent pair required when both are set:
+   `HERDR_SOCKET_PATH` wins over `HERDR_SESSION` →
+   `<config>/sessions/<name>/herdr.sock`; if both are set they must resolve
+   to the same socket.
+3. default session socket `<config>/herdr.sock` — implicit fallback.
+
+**Mutation gating**: `settle`, `snooze`, `restore`, `reconcile`, `watch`,
+and `_wake` mutate plugin state and pane metadata, so they require an
+explicit or ambient target — the implicit default socket is rejected with
+`target_required` (exit 1). Read commands (`list`, `capability`) may use
+the default fallback.
+
+**Ambient pane identity**: when the pane id comes from `HERDR_PANE_ID` or
+`HERDR_PLUGIN_CONTEXT_JSON.focused_pane_id` (not an explicit positional),
+the ambient `HERDR_WORKSPACE_ID`/`HERDR_TAB_ID` (or context
+`workspace_id`/`tab_id`) must match the pane's `workspace_id`/`tab_id` in
+the resolved session snapshot; a mismatch fails closed with
+`ambient_identity_mismatch` before any metadata write. An explicit
+positional pane id overrides the ambient pane id and is verified by
+session membership alone.
 
 Operating-system rules match herdr: unix socket on macOS/Linux, named pipe
 `\\.\pipe\<path>` on Windows (handled inside the client).
@@ -100,7 +122,14 @@ not globally unique.
 | `capability` | — | Discovery document (above). |
 
 Global flags (after the command): `--session NAME`, `--socket PATH`,
-`--timeout MS` (per-request timeout, default 10000).
+`--timeout MS` (per-request timeout, default 10000). Global flags also
+accept `--name=value` form.
+
+Option parsing is strict: every `-`-prefixed token must be a flag the
+command documents (`--until`/`--for` on `snooze`, `--until` on `_wake`,
+`--interval` on `watch`); unknown options, `--flag=value` on boolean
+flags, missing flag values, invalid values, and extra positionals are
+usage errors (exit 2). A `--` separator ends option parsing.
 
 `--until` accepts ISO 8601, `+30m`/`+2h`/`+1d`, or bare `30m`. Without
 `--until`, `snooze` reads `defaultSnooze` from the plugin config dir's
@@ -154,9 +183,11 @@ only `session.snapshot` — no metadata projection, no execution surfaces.
 - Success: exactly one JSON document on stdout (pretty-printed, except
   `watch` which is JSONL — one compact object per line).
 - Failure: one JSON object on **stderr**,
-  `{"contract","ok":false,"error":{"code":"usage"|"error","message"}}`,
-  plus exit code `2` (usage) or `1` (handled error). Socket/transport
-  failures are errors — never an empty inbox.
+  `{"contract","ok":false,"error":{"code","message"}}`, plus exit code
+  `2` (usage: `"usage"` or `invalid_session`) or `1` (handled error:
+  `"error"`, `target_conflict`, `target_required`,
+  `ambient_identity_mismatch`). Socket/transport failures are errors —
+  never an empty inbox.
 - `pane_id` may be omitted when `HERDR_PANE_ID` or
   `HERDR_PLUGIN_CONTEXT_JSON.focused_pane_id` is set (manifest actions,
   event-hook contexts).

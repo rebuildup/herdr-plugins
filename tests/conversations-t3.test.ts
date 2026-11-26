@@ -84,10 +84,21 @@ function parseCliOutput(stdout: string, stderr: string, status: number): CliResu
   return { status, stdout, stderr, json, error };
 }
 
+/** Keep ambient HERDR_SOCKET_PATH consistent with an explicit --socket flag
+ *  (resolveTarget fails closed on contradiction, #83). */
+function socketConsistentEnv(
+  args: string[],
+  extraEnv?: Record<string, string>,
+): Record<string, string> | undefined {
+  const i = args.indexOf("--socket");
+  const socket = i >= 0 ? args[i + 1] : undefined;
+  return socket ? { HERDR_SOCKET_PATH: socket, ...extraEnv } : extraEnv;
+}
+
 function runCli(args: string[], extraEnv?: Record<string, string>): CliResult {
   const result = spawnSync(process.execPath, [CLI, ...args], {
     encoding: "utf8",
-    env: cliEnv(extraEnv),
+    env: cliEnv(socketConsistentEnv(args, extraEnv)),
     timeout: 30_000,
   });
   return parseCliOutput(result.stdout, result.stderr, result.status ?? -1);
@@ -95,7 +106,9 @@ function runCli(args: string[], extraEnv?: Record<string, string>): CliResult {
 
 function runCliAsync(args: string[], extraEnv?: Record<string, string>): Promise<CliResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [CLI, ...args], { env: cliEnv(extraEnv) });
+    const child = spawn(process.execPath, [CLI, ...args], {
+      env: cliEnv(socketConsistentEnv(args, extraEnv)),
+    });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk: Buffer) => {

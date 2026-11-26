@@ -34,6 +34,7 @@ import {
 import {
   type CallOptions,
   HerdrRpcError,
+  sessionKeyFor,
   sessionSnapshot,
 } from "../../../packages/herdr-client/src/index";
 import { canonicalRepoRoot } from "./model";
@@ -382,6 +383,10 @@ export async function drainWorktreeTriggers(
     waitTimeoutMs: config.waitTimeoutMs,
     logMaxBytes: config.logMaxBytes,
     stopGraceMs: config.stopGraceMs,
+    // Runs fired by the drain live on the mark's emitting socket, not the
+    // caller's ambient target — record that socket's session discriminator
+    // so ownership re-validation (#66) matches the pane's real session.
+    sessionKey: sessionKeyFor({ socketPath, mutation: true }),
   });
 
   const gitOptions = timeoutMs === undefined ? {} : { timeoutMs };
