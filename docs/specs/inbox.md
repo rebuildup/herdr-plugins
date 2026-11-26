@@ -83,6 +83,26 @@ as expired at read time, so no client ever observes a stale "snoozed" state.
 stays correct. `reconcile` re-projects tokens for every organized pane,
 which is the repair path for partial projection failures.
 
+## Target selection and ambient isolation
+
+Socket targeting follows `docs/contracts/inbox-v1.md` → Target selection
+(implemented in `packages/herdr-client` `resolveTarget`):
+
+- Explicit `--socket`/`--session` beat ambient `HERDR_SOCKET_PATH`/
+  `HERDR_SESSION`; any explicit↔ambient or ambient↔ambient contradiction
+  fails closed with `target_conflict` — an ambient `HERDR_SOCKET_PATH`
+  exported for session A can never silently redirect an explicit
+  `--session B` invocation (issue #83).
+- Mutating commands (`settle`/`snooze`/`restore`/`reconcile`/`watch`/
+  `_wake`, and the event hooks which run with `mutation: true`) require
+  an explicit or consistent ambient target; the implicit default socket
+  is rejected with `target_required`.
+- Ambient pane identity (`HERDR_PANE_ID`, `HERDR_WORKSPACE_ID`,
+  `HERDR_TAB_ID`, `HERDR_PLUGIN_CONTEXT_JSON`) is verified against the
+  resolved session's snapshot before metadata writes
+  (`ambient_identity_mismatch`); an explicit positional pane id bypasses
+  the ambient check but must exist in the target session.
+
 ## Pane and session identity
 
 State entries are keyed by `pane_id` **within a session namespace**. The

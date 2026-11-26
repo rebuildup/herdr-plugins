@@ -7,19 +7,28 @@
  *
  * Pane selection: explicit <pane_id> argument, else HERDR_PANE_ID, else
  * HERDR_PLUGIN_CONTEXT_JSON.focused_pane_id (manifest action context).
+ * Ambient pane ids are verified against the resolved session's snapshot
+ * (workspace/tab consistency); session/socket targeting follows
+ * `resolveTarget` — explicit flags beat ambient HERDR_* and contradictions
+ * fail closed (see docs/contracts/inbox-v1.md → Target selection).
  */
 
 import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import {
+  type AmbientIdentity,
+  ambientIdentity,
+  assertAmbientPaneIdentity,
   type CallOptions,
   type PaneInfo,
   pluginDirs,
   reportPaneMetadata,
+  resolveTarget,
   type SessionSnapshot,
   sessionSnapshot,
   subscribeAgentEvents,
+  TargetResolutionError,
 } from "../../../packages/herdr-client/src/index";
 import { buildInbox, pruneState, resolveState, restorePane, settlePane, snoozePane } from "./model";
 import {
@@ -194,29 +203,26 @@ function assertMaxPositionals(
   }
 }
 
-interface PluginContext {
-  focused_pane_id?: string;
-  workspace_id?: string;
+interface PaneSelection {
+  paneId: string;
+  /** Non-null when the pane id came from ambient env/context (not positional). */
+  ambient: AmbientIdentity | null;
 }
 
-function invocationContext(): PluginContext {
-  const raw = process.env.HERDR_PLUGIN_CONTEXT_JSON;
-  if (!raw) return {};
-  try {
-    return JSON.parse(raw) as PluginContext;
-  } catch {
-    return {};
-  }
-}
-
-async function resolvePaneId(args: string[], valueFlags: string[] = []): Promise<string> {
-  const positionalArgs = positionals(args, valueFlags);
-  const explicit =
-    positionalArgs[0] ?? process.env.HERDR_PANE_ID ?? invocationContext().focused_pane_id;
-  if (!explicit) {
+/**
+ * Resolve the target pane. An explicit positional wins; otherwise the
+ * ambient identity bundle (HERDR_PANE_ID / context focused_pane_id) is
+ * used and kept for the post-snapshot consistency check — ambient
+ * workspace/tab ids that disagree with the resolved pane fail closed.
+ */
+function resolvePaneSelection(args: string[], valueFlags: string[] = []): PaneSelection {
+  const positional = positionals(args, valueFlags)[0];
+  if (positional) return { paneId: positional, ambient: null };
+  const identity = ambientIdentity();
+  if (!identity.paneId) {
     fail("pane id required (argument, HERDR_PANE_ID, or plugin context)", 2);
   }
-  return explicit;
+  return { paneId: identity.paneId as string, ambient: identity };
 }
 
 async function loadConfig(): Promise<{ defaultSnooze?: string }> {
@@ -277,6 +283,7 @@ async function cmdList(options: CliOptions): Promise<void> {
   validateFlags(options.args, {});
   assertMaxPositionals(options.args, [], 0, "list");
   const now = new Date();
+  const target = resolveTarget({ session: options.session, socketPath: options.socketPath });
   const snapshot = await sessionSnapshot(options);
   const state = await loadState();
   const entries = state.sessions[sessionKeyFor(options)] ?? {};
@@ -287,7 +294,7 @@ async function cmdList(options: CliOptions): Promise<void> {
     contract: CONTRACT,
     generated_at: now.toISOString(),
     session: {
-      name: options.session ?? process.env.HERDR_SESSION ?? null,
+      name: target.session,
       socket: options.socketPath ?? process.env.HERDR_SOCKET_PATH ?? null,
     },
     state_file: stateFilePath(),
@@ -305,6 +312,10 @@ async function cmdOrganize(
   options: CliOptions,
   kind: "settle" | "snooze" | "restore",
 ): Promise<void> {
+  // settle/snooze/restore mutate plugin state and pane metadata: the target
+  // must be explicit or a consistent ambient context, never the implicit
+  // default socket.
+  options.mutation = true;
   const snoozeFlags: Record<string, FlagKind> = { "--until": "value", "--for": "value" };
   validateFlags(options.args, kind === "snooze" ? snoozeFlags : {});
   assertMaxPositionals(
@@ -313,10 +324,15 @@ async function cmdOrganize(
     1,
     `${kind} <pane_id>`,
   );
-  const paneId = await resolvePaneId(options.args, kind === "snooze" ? ["--until", "--for"] : []);
+  const selection = resolvePaneSelection(
+    options.args,
+    kind === "snooze" ? ["--until", "--for"] : [],
+  );
+  const paneId = selection.paneId;
   const now = new Date();
   const snapshot = await sessionSnapshot(options);
   const pane = await findPane(snapshot, paneId);
+  if (selection.ambient) assertAmbientPaneIdentity(pane, selection.ambient);
   const agent = snapshot.agents?.[paneId];
 
   // Resolve the snooze deadline before taking the state lock: parse failures
@@ -440,6 +456,8 @@ async function reconcileOnce(options: CliOptions): Promise<ReconcileResult> {
  *
  * Explicit --socket/--session flags are forwarded because the child does not
  * inherit argv; HERDR_SOCKET_PATH/HERDR_SESSION env vars propagate naturally.
+ * Both paths stay consistent under `resolveTarget`: a contradictory ambient
+ * env + explicit flag combination fails closed in the parent before spawn.
  */
 function spawnSnoozeWake(options: CliOptions, until: Date): string | null {
   try {
@@ -463,6 +481,7 @@ const WAKE_MAX_SLEEP_MS = 2_000_000_000;
 
 /** Internal `_wake` command: sleep until the deadline, then reconcile once. */
 async function cmdWake(options: CliOptions): Promise<void> {
+  options.mutation = true;
   validateFlags(options.args, { "--until": "value" });
   assertMaxPositionals(options.args, ["--until"], 0, "_wake");
   const untilSpec = flagValue(options.args, "--until");
@@ -477,6 +496,7 @@ async function cmdWake(options: CliOptions): Promise<void> {
 }
 
 async function cmdReconcile(options: CliOptions): Promise<void> {
+  options.mutation = true;
   validateFlags(options.args, {});
   assertMaxPositionals(options.args, [], 0, "reconcile");
   const result = await reconcileOnce(options);
@@ -493,6 +513,8 @@ function emitLine(payload: unknown): void {
  * Stops on SIGINT/SIGTERM (exit 0) or unexpected stream end (exit 1).
  */
 async function cmdWatch(options: CliOptions): Promise<void> {
+  // watch reconciles (state writes + metadata projection) on every tick.
+  options.mutation = true;
   validateFlags(options.args, { "--interval": "value" });
   assertMaxPositionals(options.args, ["--interval"], 0, "watch");
   const intervalRaw = flagValue(options.args, "--interval");
@@ -616,6 +638,16 @@ async function main(): Promise<void> {
 
 if (import.meta.main) {
   main().catch((err) => {
+    if (err instanceof TargetResolutionError) {
+      process.stderr.write(
+        `${JSON.stringify({
+          contract: CONTRACT,
+          ok: false,
+          error: { code: err.code, message: err.message },
+        })}\n`,
+      );
+      process.exit(err.usage ? 2 : 1);
+    }
     process.stderr.write(
       `${JSON.stringify({
         contract: CONTRACT,

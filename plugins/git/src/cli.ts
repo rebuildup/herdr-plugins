@@ -6,17 +6,24 @@
  *
  * Pane selection: explicit <pane_id> argument, else HERDR_PANE_ID, else
  * HERDR_PLUGIN_CONTEXT_JSON.focused_pane_id (manifest action context).
+ * Ambient pane ids are verified against the resolved session's snapshot;
+ * session/socket targeting follows `resolveTarget` — explicit flags beat
+ * ambient HERDR_* and contradictions fail closed.
  */
 
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import {
+  type AmbientIdentity,
+  ambientIdentity,
+  assertAmbientPaneIdentity,
   type CallOptions,
   type PaneInfo,
   pluginDirs,
   reportPaneMetadata,
   type SessionSnapshot,
   sessionSnapshot,
+  TargetResolutionError,
 } from "../../../packages/herdr-client/src/index";
 import {
   collectPrCreate,
@@ -246,29 +253,36 @@ function assertMaxPositionals(
   }
 }
 
-interface PluginContext {
-  focused_pane_id?: string;
+interface PaneSelection {
+  paneId: string;
+  /** Non-null when the pane id came from ambient env/context (not positional). */
+  ambient: AmbientIdentity | null;
 }
 
-function invocationContext(): PluginContext {
-  const raw = process.env.HERDR_PLUGIN_CONTEXT_JSON;
-  if (!raw) return {};
-  try {
-    return JSON.parse(raw) as PluginContext;
-  } catch {
-    return {};
-  }
-}
-
-async function resolvePaneId(args: string[], valueFlags: string[] = []): Promise<string> {
-  const explicit =
-    positionals(args, valueFlags)[0] ??
-    process.env.HERDR_PANE_ID ??
-    invocationContext().focused_pane_id;
-  if (!explicit) {
+/**
+ * Resolve the target pane. An explicit positional wins; otherwise the
+ * ambient identity bundle (HERDR_PANE_ID / context focused_pane_id) is
+ * used and kept for the post-snapshot consistency check — ambient
+ * workspace/tab ids that disagree with the resolved pane fail closed.
+ */
+function resolvePaneSelection(args: string[], valueFlags: string[] = []): PaneSelection {
+  const positional = positionals(args, valueFlags)[0];
+  if (positional) return { paneId: positional, ambient: null };
+  const identity = ambientIdentity();
+  if (!identity.paneId) {
     fail("pane id required (argument, HERDR_PANE_ID, or plugin context)", 2);
   }
-  return explicit;
+  return { paneId: identity.paneId as string, ambient: identity };
+}
+
+/** findPane + ambient identity verification for ambient-sourced pane ids. */
+async function findPaneChecked(
+  snapshot: SessionSnapshot,
+  selection: PaneSelection,
+): Promise<PaneInfo> {
+  const pane = await findPane(snapshot, selection.paneId);
+  if (selection.ambient) assertAmbientPaneIdentity(pane, selection.ambient);
+  return pane;
 }
 
 async function loadConfig(): Promise<PluginConfig> {
@@ -341,9 +355,10 @@ async function cmdStatus(options: CliOptions): Promise<void> {
   validateFlags(options.args, {});
   assertMaxPositionals(options.args, [], 1, "status <pane_id>");
   const config = await loadConfig();
-  const paneId = await resolvePaneId(options.args);
+  const selection = resolvePaneSelection(options.args);
+  const paneId = selection.paneId;
   const snapshot = await sessionSnapshot(options);
-  const pane = await findPane(snapshot, paneId);
+  const pane = await findPaneChecked(snapshot, selection);
   const cwd = paneCwd(pane);
   try {
     const report = await collectStatus(cwd, {
@@ -372,9 +387,10 @@ async function cmdFiles(options: CliOptions): Promise<void> {
   validateFlags(options.args, { "--path": "value" });
   assertMaxPositionals(options.args, ["--path"], 1, "files <pane_id>");
   const config = await loadConfig();
-  const paneId = await resolvePaneId(options.args, ["--path"]);
+  const selection = resolvePaneSelection(options.args, ["--path"]);
+  const paneId = selection.paneId;
   const snapshot = await sessionSnapshot(options);
-  const pane = await findPane(snapshot, paneId);
+  const pane = await findPaneChecked(snapshot, selection);
   const cwd = paneCwd(pane);
 
   const pathspec = flagValues(options.args, "--path");
@@ -415,9 +431,10 @@ async function cmdDiff(options: CliOptions): Promise<void> {
   validateFlags(options.args, DIFF_FLAGS);
   assertMaxPositionals(options.args, DIFF_VALUE_FLAGS, 3, "diff <pane_id> [rev [rev]]");
   const config = await loadConfig();
-  const paneId = await resolvePaneId(options.args, DIFF_VALUE_FLAGS);
+  const selection = resolvePaneSelection(options.args, DIFF_VALUE_FLAGS);
+  const paneId = selection.paneId;
   const snapshot = await sessionSnapshot(options);
-  const pane = await findPane(snapshot, paneId);
+  const pane = await findPaneChecked(snapshot, selection);
   const cwd = paneCwd(pane);
 
   // Revision args: positionals after the pane id that do not look like
@@ -530,9 +547,10 @@ async function cmdLog(options: CliOptions): Promise<void> {
   validateFlags(options.args, LOG_FLAGS);
   assertMaxPositionals(options.args, LOG_VALUE_FLAGS, 1, "log <pane_id>");
   const config = await loadConfig();
-  const paneId = await resolvePaneId(options.args, LOG_VALUE_FLAGS);
+  const selection = resolvePaneSelection(options.args, LOG_VALUE_FLAGS);
+  const paneId = selection.paneId;
   const snapshot = await sessionSnapshot(options);
-  const pane = await findPane(snapshot, paneId);
+  const pane = await findPaneChecked(snapshot, selection);
   const cwd = paneCwd(pane);
 
   const pathspec = flagValues(options.args, "--path");
@@ -588,9 +606,10 @@ async function cmdCompare(options: CliOptions): Promise<void> {
   validateFlags(options.args, { "--max-bytes": "value" });
   assertMaxPositionals(options.args, ["--max-bytes"], 3, "compare <pane_id> [base [head]]");
   const config = await loadConfig();
-  const paneId = await resolvePaneId(options.args, ["--max-bytes"]);
+  const selection = resolvePaneSelection(options.args, ["--max-bytes"]);
+  const paneId = selection.paneId;
   const snapshot = await sessionSnapshot(options);
-  const pane = await findPane(snapshot, paneId);
+  const pane = await findPaneChecked(snapshot, selection);
   const cwd = paneCwd(pane);
 
   const pos = positionals(options.args, ["--max-bytes"]);
@@ -654,9 +673,10 @@ async function repoRootForPane(
   config: PluginConfig,
   valueFlags: string[] = [],
 ): Promise<{ paneId: string; repoRoot: string }> {
-  const paneId = await resolvePaneId(options.args, valueFlags);
+  const selection = resolvePaneSelection(options.args, valueFlags);
+  const paneId = selection.paneId;
   const snapshot = await sessionSnapshot(options);
-  const pane = await findPane(snapshot, paneId);
+  const pane = await findPaneChecked(snapshot, selection);
   const cwd = paneCwd(pane);
   try {
     const repoRoot = (await resolveRepo(cwd, { timeoutMs: effectiveTimeoutMs(options, config) }))
@@ -696,6 +716,7 @@ function pathspecArgs(args: string[]): string[] {
 const STAGE_FLAGS: Record<string, FlagKind> = { "--all": "boolean", "--path": "value" };
 
 async function cmdStageOrUnstage(options: CliOptions, unstaging: boolean): Promise<void> {
+  options.mutation = true;
   const command = unstaging ? "unstage" : "stage";
   validateFlags(options.args, STAGE_FLAGS);
   assertMaxPositionals(options.args, ["--path"], 1, `${command} <pane_id>`);
@@ -724,6 +745,7 @@ async function cmdStageOrUnstage(options: CliOptions, unstaging: boolean): Promi
 }
 
 async function cmdCommit(options: CliOptions): Promise<void> {
+  options.mutation = true;
   validateFlags(options.args, { "-m": "value", "--allow-empty": "boolean" });
   assertMaxPositionals(options.args, ["-m"], 1, "commit <pane_id>");
   const messages = flagValues(options.args, "-m");
@@ -761,13 +783,15 @@ async function resolvePaneAndValue(
   config: PluginConfig,
   what: string,
 ): Promise<{ paneId: string; repoRoot: string; value: string }> {
-  const envPane = process.env.HERDR_PANE_ID ?? invocationContext().focused_pane_id;
+  const identity = ambientIdentity();
   const pos = positionals(options.args, []);
   let paneId: string;
   let value: string | undefined;
-  if (envPane) {
-    paneId = envPane;
+  let ambient: AmbientIdentity | null = null;
+  if (identity.paneId) {
+    paneId = identity.paneId;
     value = pos[0];
+    ambient = identity;
   } else {
     paneId = pos[0] ?? "";
     value = pos[1];
@@ -781,7 +805,7 @@ async function resolvePaneAndValue(
     throw err;
   }
   const snapshot = await sessionSnapshot(options);
-  const pane = await findPane(snapshot, paneId);
+  const pane = await findPaneChecked(snapshot, { paneId, ambient });
   const cwd = paneCwd(pane);
   try {
     const repoRoot = (await resolveRepo(cwd, { timeoutMs: effectiveTimeoutMs(options, config) }))
@@ -794,6 +818,7 @@ async function resolvePaneAndValue(
 }
 
 async function cmdBranch(options: CliOptions): Promise<void> {
+  options.mutation = true;
   const sub = options.args[0];
   if (sub !== "create" && sub !== "switch") {
     fail("branch requires a subcommand: create <pane> <name> [--switch] | switch <pane> <name>", 2);
@@ -827,6 +852,7 @@ async function cmdBranch(options: CliOptions): Promise<void> {
 }
 
 async function cmdUpstream(options: CliOptions): Promise<void> {
+  options.mutation = true;
   validateFlags(options.args, {});
   assertMaxPositionals(options.args, [], 2, "upstream <pane_id> <upstream-ref>");
   const config = await loadConfig();
@@ -850,6 +876,7 @@ function extraPositionals(options: CliOptions, valueFlags: string[] = []): strin
 }
 
 async function cmdFetch(options: CliOptions): Promise<void> {
+  options.mutation = true;
   validateFlags(options.args, { "--prune": "boolean" });
   assertMaxPositionals(options.args, [], 2, "fetch <pane_id> [remote]");
   const config = await loadConfig();
@@ -880,6 +907,7 @@ async function cmdFetch(options: CliOptions): Promise<void> {
 }
 
 async function cmdPush(options: CliOptions): Promise<void> {
+  options.mutation = true;
   validateFlags(options.args, {
     "--set-upstream": "boolean",
     "--force-with-lease": "boolean",
@@ -1001,7 +1029,14 @@ async function cmdPr(options: CliOptions): Promise<void> {
   }
   const spec = PR_FLAG_SPECS[action] as Record<string, FlagKind>;
   validateFlags(options.args, spec);
-  const paneId = pos[1] ?? process.env.HERDR_PANE_ID ?? invocationContext().focused_pane_id;
+  // `pr create` mutates the forge: it needs an explicit or consistent
+  // ambient target, never the implicit default socket. Read actions keep
+  // the read-side resolution.
+  if (action === "create") options.mutation = true;
+  const identity = ambientIdentity();
+  const explicitPane = pos[1];
+  const paneId = explicitPane ?? identity.paneId;
+  const ambient = explicitPane === undefined ? identity : null;
   if (!paneId) {
     fail("pane id required (argument, HERDR_PANE_ID, or plugin context)", 2);
   }
@@ -1061,7 +1096,7 @@ async function cmdPr(options: CliOptions): Promise<void> {
   }
 
   const snapshot = await sessionSnapshot(options);
-  const pane = await findPane(snapshot, paneId);
+  const pane = await findPaneChecked(snapshot, { paneId, ambient });
   let repoRoot: string;
   try {
     repoRoot = (
@@ -1183,12 +1218,15 @@ async function cmdPr(options: CliOptions): Promise<void> {
 }
 
 async function cmdProject(options: CliOptions): Promise<void> {
+  // project writes pane metadata tokens — a mutation of herdr state.
+  options.mutation = true;
   validateFlags(options.args, {});
   assertMaxPositionals(options.args, [], 1, "project <pane_id>");
   const config = await loadConfig();
-  const paneId = await resolvePaneId(options.args);
+  const selection = resolvePaneSelection(options.args);
+  const paneId = selection.paneId;
   const snapshot = await sessionSnapshot(options);
-  const pane = await findPane(snapshot, paneId);
+  const pane = await findPaneChecked(snapshot, selection);
   const cwd = paneCwd(pane);
 
   const warnings: string[] = [];
@@ -1360,6 +1398,16 @@ async function main(): Promise<void> {
 
 if (import.meta.main) {
   main().catch((err) => {
+    if (err instanceof TargetResolutionError) {
+      process.stderr.write(
+        `${JSON.stringify({
+          contract: CONTRACT,
+          ok: false,
+          error: { code: err.code, message: err.message },
+        })}\n`,
+      );
+      process.exit(err.usage ? 2 : 1);
+    }
     process.stderr.write(
       `${JSON.stringify({
         contract: CONTRACT,
