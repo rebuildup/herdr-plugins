@@ -252,7 +252,7 @@ describe("inbox transitions surface (#182)", () => {
   test("capability advertises transitions (additive since v0.4.0)", async () => {
     const cap = await cli(["capability"]);
     expect(cap.status).toBe(0);
-    expect(cap.json?.version).toBe("0.6.0");
+    expect(cap.json?.version).toBe("0.7.0");
     expect(cap.json?.commands).toContain("transitions");
   });
 
