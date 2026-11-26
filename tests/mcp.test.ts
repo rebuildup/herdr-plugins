@@ -102,14 +102,15 @@ describe("herdr-plugins.mcp/v1 contract skeleton (T1, #135)", () => {
       expect(stderr).toBe("");
       const doc = JSON.parse(stdout);
       expect(doc.contract).toBe(CONTRACT);
-      expect(doc.contract_status).toBe("draft");
+      expect(doc.contract_status).toBe("stable");
       expect(doc.plugin).toBe("rebuildup.mcp");
       expect(doc.negotiated_access_level).toBe("read-only");
       expect(doc.access_levels.levels).toEqual(["read-only", "supervised", "full"]);
       expect(doc.tools.length).toBe(TOOL_TABLE.length);
       const implemented = doc.tools.filter((t: { status: string }) => t.status === "implemented");
-      expect(implemented.length).toBe(20); // T2 reads (#138) + T3 mutations (#139)
+      expect(implemented.length).toBe(24); // T2 reads + T3 mutations + T4 events
       expect(doc.surfaces.read).toBe("stable");
+      expect(doc.surfaces.events).toBe("stable");
       expect(Array.isArray(doc.plugins)).toBe(true);
       expect(doc.session_resolution.resolved_via).toBeDefined();
       expect(doc.session.reachable).toBe(false);

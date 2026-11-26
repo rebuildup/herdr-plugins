@@ -1,28 +1,29 @@
 /**
- * rebuildup.mcp contract model — `herdr-plugins.mcp/v1` (draft).
+ * rebuildup.mcp contract model — `herdr-plugins.mcp/v1` (stable).
  *
  * T1 (#135) fixes the boundary (ADR-0025), access levels, the planned
- * tool table, and the error model. T2 (#138) implements the stdio
- * server + read tools, T3 (#139) the mutation tools, T4 (#140) events.
+ * tool table, and the error model. T2 (#138) implemented the stdio
+ * server + read tools, T3 (#139) the mutation tools, T4 (#140) the
+ * event surface — all three surfaces are stable as of v1.
  */
 
 export const CONTRACT = "herdr-plugins.mcp/v1";
 export const PLUGIN_ID = "rebuildup.mcp";
-export const PLUGIN_VERSION = "0.1.0";
+export const PLUGIN_VERSION = "0.7.0";
 
-/** Contract lifecycle: draft until the T4 event surface lands. */
-export const CONTRACT_STATUS = "draft" as const;
+/** Contract lifecycle: stable since T4 (#140) completed the event surface. */
+export const CONTRACT_STATUS = "stable" as const;
 
 /**
  * Per-surface stability (contract "Versioning"): the read surface is
- * stable as of T2 (#138) and the mutation surface as of T3 (#139);
- * events land in T4 (#140). `capability` reports this map so clients
- * can detect what is implemented without parsing the tool table.
+ * stable as of T2 (#138), the mutation surface as of T3 (#139), and
+ * the event surface as of T4 (#140). `capability` reports this map so
+ * clients can detect what is implemented without parsing the tool table.
  */
 export const SURFACE_STATUS = {
   read: "stable",
   mutation: "stable",
-  events: "planned",
+  events: "stable",
 } as const;
 
 /**
@@ -203,14 +204,29 @@ export const TOOL_TABLE: readonly ToolSpec[] = [
     name: "events_subscribe",
     access: "read-only",
     readOnly: true,
-    status: "planned",
-    backs_onto: "events.subscribe/events.wait + session.snapshot resync",
+    status: "implemented",
+    backs_onto:
+      "events.subscribe + session.snapshot baseline (tool-polling alternative to MCP notifications)",
+  },
+  {
+    name: "events_poll",
+    access: "read-only",
+    readOnly: true,
+    status: "implemented",
+    backs_onto: "in-process subscription buffer (gap/resync notices)",
+  },
+  {
+    name: "events_wait",
+    access: "read-only",
+    readOnly: true,
+    status: "implemented",
+    backs_onto: "in-process subscription buffer, bounded blocking wait",
   },
   {
     name: "events_unsubscribe",
     access: "read-only",
     readOnly: true,
-    status: "planned",
+    status: "implemented",
     backs_onto: "subscription teardown",
   },
 ];

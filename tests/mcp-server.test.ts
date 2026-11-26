@@ -434,17 +434,24 @@ describe("rebuildup.mcp stdio server (T2, #138)", () => {
       );
       expect(wait.isError).toBeUndefined();
       expect((wait.structuredContent as { ok: boolean }).ok).toBe(true);
-      // Events remain planned until T4 (#140) and fail honestly.
+      // Events landed in T4 (#140): subscription tools are read-level
+      // observation and run at read-only.
       const events = toolPayload(
         await client.request("tools/call", {
           name: "events_subscribe",
           arguments: {},
         }),
       );
-      expect(events.isError).toBe(true);
-      expect((events.structuredContent as { error: { code: string } }).error.code).toBe(
-        "unsupported",
+      expect(events.isError).toBeUndefined();
+      const sub = (events.structuredContent as { ok: boolean; result: { id: string } }).result;
+      expect(sub.id).toMatch(/^sub-/);
+      const unsub = toolPayload(
+        await client.request("tools/call", {
+          name: "events_unsubscribe",
+          arguments: { subscription_id: sub.id },
+        }),
       );
+      expect((unsub.structuredContent as { ok: boolean }).ok).toBe(true);
     } finally {
       await client.close();
       await fake.close();
@@ -509,7 +516,7 @@ describe("rebuildup.mcp stdio server (T2, #138)", () => {
       expect(doc.result.resolved_session.socket).toBe(fake.socketPath);
       expect(doc.result.plugins.length).toBeGreaterThan(0);
       const implemented = doc.result.tools.filter((t) => t.status === "implemented");
-      expect(implemented.length).toBe(20); // T2 reads (#138) + T3 mutations (#139)
+      expect(implemented.length).toBe(24); // T2 reads + T3 mutations + T4 events
     } finally {
       await client.close();
       await fake.close();

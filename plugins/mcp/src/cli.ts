@@ -177,7 +177,9 @@ An MCP client with no ambient herdr env must pass --session/--socket
 (or set HERDR_SESSION/HERDR_SOCKET_PATH) in its server config.
 
 serve is a per-client stdio MCP server (newline-delimited JSON-RPC);
-stdout is protocol-only, diagnostics go to stderr.
+stdout is protocol-only, diagnostics go to stderr. Event subscriptions
+are in-process tools (events_subscribe/poll/wait/unsubscribe) that die
+with the client process; disconnects surface as gap+resync notices.
 Remote HTTP/OAuth is an upstream gap (herdrdev/herdr#6199), out of v1.
 `;
 

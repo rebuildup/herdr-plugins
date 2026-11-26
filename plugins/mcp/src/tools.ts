@@ -31,6 +31,7 @@ import {
   sessionSnapshot,
   workspaceCreate,
 } from "../../../packages/herdr-client/src/index";
+import { EventError, EventHub, parseSubscribeArgs, type SubscribeSpec } from "./events";
 import {
   ACCESS_LEVELS,
   type AccessLevel,
@@ -94,6 +95,8 @@ export interface ToolContext {
   timeoutMs: number;
   runPlugin: PluginRunner;
   probePlugin: PluginProber;
+  /** In-process event subscription hub (T4, #140); closed on server stop. */
+  events: EventHub;
 }
 
 export function defaultToolContext(target: ResolvedTarget, accessLevel: AccessLevel): ToolContext {
@@ -105,6 +108,7 @@ export function defaultToolContext(target: ResolvedTarget, accessLevel: AccessLe
     timeoutMs: 30_000,
     runPlugin: runPluginCli,
     probePlugin: resolvePluginSource,
+    events: new EventHub({ socketPath: target.socketPath, timeoutMs: 30_000 }),
   };
 }
 
@@ -141,6 +145,14 @@ function mapUpstreamError(err: unknown, what: string): ToolError {
     });
   }
   return new ToolError("internal", `${what}: ${err instanceof Error ? err.message : String(err)}`);
+}
+
+/** Map hub EventError onto ToolError; pass through everything else. */
+function mapEventError(err: unknown, what: string): ToolError {
+  if (err instanceof EventError) {
+    return new ToolError(err.code, `${what}: ${err.message}`, err.details);
+  }
+  return mapUpstreamError(err, what);
 }
 
 function callOptions(ctx: ToolContext): CallOptions {
@@ -970,10 +982,101 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     ),
     spec: TOOL_TABLE.find((t) => t.name === "handoff_invoke") as ToolSpec,
   },
+  // --- Events (T4, #140) -----------------------------------------------------
+  {
+    name: "events_subscribe",
+    description:
+      "Subscribe to herdr session events (events.subscribe surface) as an in-process MCP subscription. types[] selects subscription types (default pane.agent_status_changed); filters pane_id/workspace_id/agent_status/agent narrow delivery client-side; pane-parameterized types are expanded across the resolved pane set. Returns subscription_id, covered pane_ids, an initial session.snapshot baseline, and the reconnect policy. Read-only observation; events are pulled via events_poll/events_wait — a socket drop is always reported as gap+resync notices, never as 'no events'.",
+    inputSchema: schema(
+      {
+        types: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "subscription types (e.g. pane.agent_status_changed, pane.output_matched, pane.scroll_changed, workspace.created, pane.closed, layout.updated); default [pane.agent_status_changed]",
+        },
+        pane_id: { type: "string", description: "restrict to one pane (must exist live)" },
+        workspace_id: {
+          type: "string",
+          description: "restrict to panes in one workspace (must exist live)",
+        },
+        agent_status: {
+          type: "string",
+          enum: [...AGENT_STATUSES],
+          description: "client-side + upstream filter on agent_status",
+        },
+        agent: {
+          type: "string",
+          description: "client-side filter on event agent/display_agent",
+        },
+        match: {
+          type: "object",
+          description: "required with pane.output_matched: {type: substring|regex, value}",
+          properties: {
+            type: { type: "string", enum: ["substring", "regex"] },
+            value: { type: "string" },
+          },
+          required: ["type", "value"],
+          additionalProperties: false,
+        },
+        source: {
+          type: "string",
+          enum: ["visible", "recent", "recent_unwrapped", "detection"],
+          description: "pane.output_matched read source (default recent)",
+        },
+        lines: { type: "number", description: "pane.output_matched read window" },
+        strip_ansi: {
+          type: "boolean",
+          description: "pane.output_matched strip ANSI (default true upstream)",
+        },
+      },
+      [],
+    ),
+    spec: TOOL_TABLE.find((t) => t.name === "events_subscribe") as ToolSpec,
+  },
+  {
+    name: "events_poll",
+    description:
+      "Non-blocking read of a subscription's buffered events/notices newer than cursor (default 0 = whole retained buffer, capped at 1000 items). Returns events[], gap/resync notices[], next_cursor, status, reconnects.",
+    inputSchema: schema(
+      {
+        subscription_id: { type: "string" },
+        cursor: { type: "number", description: "seq cursor from a previous next_cursor" },
+      },
+      ["subscription_id"],
+    ),
+    spec: TOOL_TABLE.find((t) => t.name === "events_poll") as ToolSpec,
+  },
+  {
+    name: "events_wait",
+    description:
+      "Block until an event newer than cursor arrives on the subscription (or timeout_ms, default 30000, cap 120000). types[] optionally narrows matching event names. Returns the same shape as events_poll plus timed_out; gap/resync notices never satisfy the wait but are returned.",
+    inputSchema: schema(
+      {
+        subscription_id: { type: "string" },
+        cursor: { type: "number" },
+        types: {
+          type: "array",
+          items: { type: "string" },
+          description: "canonical event names to wait for",
+        },
+        timeout_ms: { type: "number" },
+      },
+      ["subscription_id"],
+    ),
+    spec: TOOL_TABLE.find((t) => t.name === "events_wait") as ToolSpec,
+  },
+  {
+    name: "events_unsubscribe",
+    description:
+      "Tear down an event subscription; buffered items are discarded (counted in discarded_items).",
+    inputSchema: schema({ subscription_id: { type: "string" } }, ["subscription_id"]),
+    spec: TOOL_TABLE.find((t) => t.name === "events_unsubscribe") as ToolSpec,
+  },
 ];
 
 // Planned tools still appear in tools/list (contract "unsupported"
-// semantics) but have no handler until T4 (#140 events).
+// semantics) but have no handler until their ticket lands.
 const PLANNED_DEFINITIONS: ToolDefinition[] = TOOL_TABLE.filter(
   (spec) => !TOOL_DEFINITIONS.some((d) => d.name === spec.name),
 ).map((spec) => ({
@@ -1612,6 +1715,74 @@ const HANDLERS: Record<string, ToolHandler> = {
       identity: identityBlock(ctx, snapshot),
       effects: [pluginCliEffect("rebuildup.handoff", operation, { id })],
     };
+  },
+
+  // --- Event handlers (T4, #140) ------------------------------------------------
+  //
+  // Read-level observation only: subscriptions never mutate herdr state.
+  // The hub owns the upstream events.subscribe connection(s); clients
+  // pull buffered items via poll/wait. Every disconnect is reported as
+  // gap+resync notices — never as "no events".
+
+  async events_subscribe(args, ctx) {
+    let spec: SubscribeSpec;
+    try {
+      spec = parseSubscribeArgs(args);
+    } catch (err) {
+      throw mapEventError(err, "events_subscribe");
+    }
+    let result: Awaited<ReturnType<EventHub["subscribe"]>>;
+    try {
+      result = await ctx.events.subscribe(spec);
+    } catch (err) {
+      throw mapEventError(err, "events_subscribe");
+    }
+    const snapshot = await liveSnapshot(ctx);
+    return { ...result, identity: identityBlock(ctx, snapshot) };
+  },
+
+  async events_poll(args, ctx) {
+    const subscriptionId = requireString(args, "subscription_id");
+    const cursor = optionalNumber(args, "cursor");
+    let result: ReturnType<EventHub["poll"]>;
+    try {
+      result = ctx.events.poll(subscriptionId, cursor);
+    } catch (err) {
+      throw mapEventError(err, "events_poll");
+    }
+    const snapshot = await liveSnapshot(ctx);
+    return { ...result, identity: identityBlock(ctx, snapshot) };
+  },
+
+  async events_wait(args, ctx) {
+    const subscriptionId = requireString(args, "subscription_id");
+    const cursor = optionalNumber(args, "cursor");
+    const types = optionalStringArray(args, "types");
+    const timeoutMs = optionalNumber(args, "timeout_ms");
+    const options: { cursor?: number; types?: string[]; timeoutMs?: number } = {};
+    if (cursor !== undefined) options.cursor = cursor;
+    if (types !== undefined) options.types = types;
+    if (timeoutMs !== undefined) options.timeoutMs = timeoutMs;
+    let result: Awaited<ReturnType<EventHub["wait"]>>;
+    try {
+      result = await ctx.events.wait(subscriptionId, options);
+    } catch (err) {
+      throw mapEventError(err, "events_wait");
+    }
+    const snapshot = await liveSnapshot(ctx);
+    return { ...result, identity: identityBlock(ctx, snapshot) };
+  },
+
+  async events_unsubscribe(args, ctx) {
+    const subscriptionId = requireString(args, "subscription_id");
+    let result: ReturnType<EventHub["unsubscribe"]>;
+    try {
+      result = ctx.events.unsubscribe(subscriptionId);
+    } catch (err) {
+      throw mapEventError(err, "events_unsubscribe");
+    }
+    const snapshot = await liveSnapshot(ctx);
+    return { ...result, identity: identityBlock(ctx, snapshot) };
   },
 };
 

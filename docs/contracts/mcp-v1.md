@@ -1,4 +1,4 @@
-# Contract: `herdr-plugins.mcp/v1` (draft — read + mutation surfaces stable)
+# Contract: `herdr-plugins.mcp/v1` (stable)
 
 Versioned structured interface for the `rebuildup.mcp` plugin — a
 **local stdio MCP server** that exposes herdr sessions and sibling
@@ -7,11 +7,11 @@ Boundary, access levels, session resolution, and the remote/HTTP/OAuth
 upstream gap are fixed by ADR-0025; the upstream inventory is canonized
 in `docs/research/mcp-upstream-inventory.md`.
 
-**Status: draft overall; the read surface is stable as of T2 (#138) and
-the mutation surface as of T3 (#139).** The event surface lands in T4
-(#140). `capability` (CLI and `herdr_capability` tool) reports
-`contract_status` plus a per-surface `surfaces` map and per-tool
-`status` so clients can detect what is implemented.
+**Status: stable.** The read surface landed in T2 (#138), the mutation
+surface in T3 (#139), and the event surface in T4 (#140); `capability`
+(CLI and `herdr_capability` tool) reports `contract_status: "stable"`
+plus a per-surface `surfaces` map and per-tool `status` so clients can
+detect what is implemented.
 
 ## Transport and lifecycle
 
@@ -100,9 +100,7 @@ annotation (`readOnlyHint`) · backing implementation · status.
 Names are snake_case per MCP convention; `t3_*`-style prefixes are not
 used — the server IS the herdr surface. **Implemented (stable):** all
 tools in the Capability/discovery, Plugin contract reads, and Mutations
-tables below (reads T2 #138, mutations T3 #139). Planned tools remain
-listed by `tools/list` and fail honestly with `unsupported` (or
-`capability_denied` below their access floor) until T4.
+tables below (reads T2 #138, mutations T3 #139, events T4 #140).
 
 Tool results are wrapped as
 `{contract, ok:true, tool, result}` in `structuredContent`; plugin-CLI
@@ -201,13 +199,101 @@ invalid kinds → `invalid_params`, transport kinds →
 `agent_not_ready` while agent registration settles) → `internal`); the
 original kind is always preserved in `error.details.plugin_kind`.
 
-### Events (T4, #140 — planned)
+### Events (implemented, T4 #140)
 
-`events_subscribe`/`events_unsubscribe` (or resource equivalents) over
-`events.subscribe`/`events.wait` with pane/agent/workspace/session
-filters, reconnect + `session.snapshot` resync, and structured `gap`
-reporting on missed events. Read-only clients may subscribe (read
-nature); notifications are observation only.
+The event surface is exposed as **tools**, the contract-sanctioned
+"tool polling structured alternative" to MCP resources/notifications:
+the stdio server is a per-client process, so subscriptions live
+in-process and clients pull buffered items. MCP server→client
+notifications are not used — there is no subscription registry to
+anchor them to, and polling keeps every result inside the
+request/response error model.
+
+| Tool | Level | Read-only | Backs onto |
+| --- | --- | --- | --- |
+| `events_subscribe` | read-only | yes | `events.subscribe` (expanded per pane where upstream requires `pane_id`) + `session.snapshot` baseline |
+| `events_poll` | read-only | yes | in-process subscription buffer |
+| `events_wait` | read-only | yes (bounded blocking observation) | in-process subscription buffer |
+| `events_unsubscribe` | read-only | yes | subscription teardown |
+
+All four run at `read-only` — subscription is observation only and
+never mutates herdr state, at any access level.
+
+**`events_subscribe` args:** `types[]` (subscription types; default
+`["pane.agent_status_changed"]`), filters `pane_id`, `workspace_id`,
+`agent_status`, `agent`, and — only valid with
+`pane.output_matched` in `types` — `match {type: substring|regex,
+value}`, `source` (default `recent`), `lines`, `strip_ansi`.
+
+Accepted `types` are exactly herdr's `events.subscribe` subscription
+set (protocol 22): the lifecycle types `workspace.*`, `worktree.*`,
+`tab.*`, `pane.created|closed|updated|focused|moved|exited|
+agent_detected`, `layout.updated`, plus the pane-parameterized
+`pane.agent_status_changed`, `pane.output_matched`,
+`pane.scroll_changed`. `pane.output_changed` is an emitted event kind
+but is **not subscribable** upstream and is rejected `invalid_params`.
+
+**Pane expansion.** Upstream requires `pane_id` for the three
+parameterized types, so the hub expands them across the resolved pane
+set: explicit `pane_id` → that pane (must exist live, else
+`not_found`); `workspace_id` → every pane in that workspace (must
+exist live, else `not_found`); neither → every pane in the live
+`session.snapshot`. The pane set is **re-resolved on every
+reconnect**, so panes created while disconnected are picked up;
+panes covered only by parameterized types that appear *after* a
+subscribe without a reconnect are not covered until then (lifecycle
+types like `pane.created` still report them). `agent_status` is
+forwarded upstream as a subscription parameter AND applied
+client-side.
+
+**Result.** `events_subscribe` returns `id` (`subscription_id` for
+subsequent calls), `status`, `types`, `filters`, `pane_ids`,
+`pane_count`, `upstream_subscriptions` (expanded count), a `baseline`
+(`session.snapshot`-derived per-pane `agent_status`/`state_change_seq`
+for the covered panes — the resync reference), and `reconnect_policy`.
+
+**Delivery.** `events_poll {subscription_id, cursor?}` returns
+`{events[], notices[], next_cursor, status, reconnects}` for items
+with `seq > cursor` (default 0 = whole retained buffer, capped at
+1000 items; overflow drops oldest and reports a `buffer_overflow`
+gap). `events_wait {subscription_id, cursor?, types?, timeout_ms?}`
+blocks until a matching event arrives or `timeout_ms` (default 30000,
+cap 120000) elapses, returning the same shape plus `timed_out`.
+`types` on wait/poll filters canonical event names. Events are
+normalized to canonical dotted names (`pane_agent_status_changed` on
+the wire → `pane.agent_status_changed`); unrecognized names pass
+through unchanged.
+
+**Filtering.** `pane_id`/`workspace_id`/`agent_status`/`agent` are
+applied client-side on event `data` fields (`agent` matches `agent`
+or `display_agent`). An event whose data lacks a filtered field is
+dropped — absence is never treated as a match.
+
+**Reconnect / gap / resync (acceptance: event loss is never faked).**
+The hub auto-resubscribes with capped exponential backoff (500 ms →
+5 s) until `events_unsubscribe` or server exit. Every disconnect
+produces, in seq order:
+
+1. a `gap` notice — `reason` is `stream_closed` (socket ended),
+   `events_lost` (upstream reported retained-history loss; requires
+   resync per herdr), `socket_unreachable`/`subscribe_failed`
+   (reconnect attempt failed, upstream error in `detail`), or
+   `target_gone` (an explicitly filtered pane/workspace vanished —
+   the subscription degrades to `closed` rather than retrying
+   forever);
+2. on the next successful resubscribe, a `resync` notice
+   (`reason: "reconnect"`) whose `detail.baseline` is a fresh
+   `session.snapshot` digest of the covered panes (or an honest
+   `error` when the snapshot itself fails).
+
+Missed events are reported as missed: the contract does **not**
+claim the stream is complete across a gap, and `baseline.note` states
+missed events are not reconstructable. Clients reconcile by diffing
+`baseline` pane states against their last seen state.
+
+**Lifetime.** Subscriptions are in-process and die with the MCP
+client process (ADR-0002 — no daemon). `serve` closes all
+subscriptions on stdin EOF.
 
 ### Explicitly out of scope for v1
 
@@ -270,11 +356,11 @@ one JSON document on stdout; errors on stderr, exit 1/2):
 
 ## Versioning
 
-`contract` is `herdr-plugins.mcp/vN`. Within v1 only additive optional
-fields and new tools may appear; renaming/removing tools, changing
-access-level semantics, or altering the error model requires v2.
+`contract` is `herdr-plugins.mcp/vN`. **v1 is stable** — all three
+surfaces (read, mutation, events) are implemented and verified.
+Within v1 only additive optional fields and new tools may appear;
+renaming/removing tools, changing access-level semantics, the error
+model, or the event notice/gap-resync semantics requires v2.
 Stability is declared per surface via `surfaces` in `capability`:
-`read` is **stable** (T2, #138 — protocol methods, read tools,
-identity echo, error model), `mutation` is **stable** (T3, #139 — the
-six mutation tools, access gating, permission-mode cap, `effects`
-echo), and `events` remains `planned` until #140 lands.
+`read` **stable** (T2, #138), `mutation` **stable** (T3, #139),
+`events` **stable** (T4, #140).
