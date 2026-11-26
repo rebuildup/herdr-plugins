@@ -1,13 +1,18 @@
 # Contract: `herdr-plugins.automations/v1`
 
-> **Status: DRAFT.** Defined by Issue #137 (parent #32 T1) alongside
+> **Status: STABLE (v1).** Finalized by #147 (parent #32 T5):
+> webhook triggers are permanently out of scope as an upstream gap
+> (ADR-0026); every other surface shipped through #144–#146.
+> Versioning: breaking changes require `herdr-plugins.automations/v2`
+> (new contract id); additive fields/commands may extend v1.
 > ADR-0022 (firing mechanism) and ADR-0023 (delivery, idempotency,
 > boundaries). #144 (T2) implemented the task-registry surface
 > (`create`/`list`/`get`/`update`/`set-enabled`/`delete`/`run-now`/
 > `runs`/`reconcile`); #145 (T3) implemented the firing drivers
 > (`fire`/`tick`/`watch`/`schedule`), run delivery, and driver
 > reporting; #146 (T4) implemented `event` schedules via manifest
-> `[[events]]` hooks; #147 fleshes out webhook triggers.
+> `[[events]]` hooks; #147 (T5) resolved webhook triggers as an
+> upstream gap — no `serve`, no inbound HTTP (ADR-0026).
 > External clients MUST depend only on this contract, never on the
 > plugin's internal state file format.
 
@@ -46,8 +51,8 @@ failures are errors — never silently treated as success.
   (`schedule install`), the opt-in `watch` process, or a manual call.
   The plugin holds no clock (ADR-0022).
 - **Trigger** — why a run exists: `schedule` | `manual` | `event` |
-  `webhook`. `schedule`, `manual`, and `event` are reachable; `webhook`
-  remains reserved for #147.
+  `webhook`. `schedule`, `manual`, and `event` are reachable;
+  `webhook` is reserved-but-unsupported in v1 (ADR-0026).
 
 ## Schedule schema
 
@@ -86,9 +91,10 @@ offset unless noted.
   "cooldown_ms": 60000,
   "max_fires": 10 }
 
-// RESERVED — schema may appear in stored tasks but `create`/`update`
-// MUST reject new ones with error code "unsupported_schedule" until
-// the owning ticket lands (#147 webhook).
+// UNSUPPORTED in v1 — schema may appear in stored tasks but
+// `create`/`update` MUST reject new ones with error code
+// "unsupported_schedule". Revisit only if herdr ships an inbound
+// HTTP/tunnel path (ADR-0026); there is no `serve` command.
 { "type": "webhook", "…": "reserved" }
 ```
 
@@ -194,7 +200,7 @@ occurrence (or `created_at` for the first), so effective period is
 | `watch [--interval SEC]` | implemented (#145) | Opt-in foreground driver: sleep-until-next-due (capped at `--interval`, default 60 s) + `tick` loop; registers a pid-checked `watch` driver record. |
 | `schedule install\|uninstall\|status` | implemented (#145) | OS scheduler adapter — ONE entry per plugin invoking `tick` (launchd / systemd --user timer / schtasks); records an `os-scheduler` driver record. |
 | `hook` (event entrypoint) | implemented (#146) | Manifest `[[events]]` handler (`src/hook.ts`, not a CLI command): records pending event marks; `tick`/`watch` drain them. See §Event triggers. |
-| `serve` (webhook) | #147 | Only if #147 adopts opt-in foreground serve; otherwise absent. |
+| `serve` (webhook) | absent (#147) | Rejected by ADR-0026: no inbound HTTP in herdr, opt-in listener would violate ADR-0002. `webhook` schedules stay `unsupported_schedule`. |
 
 ## Fire semantics (normative, #145)
 
@@ -362,7 +368,7 @@ JSON error object on stderr:
 | --- | --- |
 | `usage` | Bad args (exit 2). |
 | `invalid_schedule` | Schedule fails schema validation (incl. past `once.run_at`, bad zone/weekday). |
-| `unsupported_schedule` | Reserved type (`webhook`) or platform-inexpressible schedule. |
+| `unsupported_schedule` | Reserved/unsupported type (`webhook` — permanently out of v1 per ADR-0026) or platform-inexpressible schedule. |
 | `invalid_task` | Destination/name/prompt/misfire fails validation (#144 additive code). |
 | `task_not_found` | Unknown `task_id`. |
 | `destination_unavailable` | Pane closed / no live agent / surface gone at fire time. |
@@ -389,13 +395,15 @@ JSON error object on stderr:
 
 ## Boundaries (normative summary — see ADR-0023)
 
-- No daemon, no HTTP server (except a possible #147 opt-in `serve`,
-  which would be explicit foreground, localhost-bound).
+- No daemon, no HTTP server — including no webhook `serve`
+  (#147/ADR-0026 rejected the opt-in listener; webhook triggers are
+  an upstream gap).
 - Automations invoke `rebuildup.handoff`/`rebuildup.controls`
   surfaces; they never reimplement agent lifecycle, and there is no
   automatic handoff on failure/idle (ADR-0021 §6).
 - `event` schedules (#146) fire only on hook events herdr actually
   delivers through the manifest `[[events]]` entrypoint; `webhook`
-  remains reserved until #147; forge (Issue/PR) events and
-  multi-stage durable workflows are out of v1.
+  is unsupported in v1 (ADR-0026 — upstream gap, no filing planned);
+  forge (Issue/PR) events and multi-stage durable workflows are out
+  of v1.
 - CLI-only in v1; MCP exposure is #30's decision.

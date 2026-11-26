@@ -42,18 +42,18 @@ import {
 // T1 scaffold tests (#137) — kept, updated for the T2 command surface.
 // ---------------------------------------------------------------------------
 
-describe("automations capability (T1 scaffold, #137)", () => {
-  test("declares the draft v1 contract identity", () => {
+describe("automations capability (T1 scaffold, #137; finalized #147)", () => {
+  test("declares the stable v1 contract identity", () => {
     const doc = capabilityDocument();
     expect(doc.contract).toBe("herdr-plugins.automations/v1");
     expect(doc.contract).toBe(CONTRACT);
     expect(doc.plugin).toBe("rebuildup.automations");
     expect(doc.plugin).toBe(PLUGIN_ID);
     expect(doc.version).toBe(PLUGIN_VERSION);
-    expect(doc.contract_status).toBe("draft");
+    expect(doc.contract_status).toBe("stable");
   });
 
-  test("advertises implemented registry commands, plans serve", () => {
+  test("advertises implemented commands; serve rejected by ADR-0026", () => {
     const doc = capabilityDocument();
     for (const cmd of [
       "capability",
@@ -74,15 +74,16 @@ describe("automations capability (T1 scaffold, #137)", () => {
       expect(doc.commands).toContain(cmd);
     }
     // `hook` is a manifest [[events]] entrypoint (src/hook.ts), not a
-    // CLI command; `serve` remains planned for #147.
-    expect(doc.planned_commands).toEqual(["serve"]);
+    // CLI command; `serve` was rejected in #147 (webhook = upstream
+    // gap, ADR-0026) — nothing is planned.
+    expect(doc.planned_commands).toEqual([]);
     expect(doc.commands).not.toContain("hook");
     expect(doc.commands).not.toContain("serve");
     expect(doc.hook_entrypoint).toBe("src/hook.ts");
     expect(doc.hook_events).toContain("pane.agent_status_changed");
   });
 
-  test("v1 schedule scope: interval/fixed_time/once/event in, webhook reserved", () => {
+  test("v1 schedule scope: interval/fixed_time/once/event in, webhook unsupported", () => {
     const doc = capabilityDocument();
     expect(doc.schedules).toEqual(["interval", "fixed_time", "once", "event"]);
     expect(doc.reserved_schedules).toEqual(["webhook"]);
@@ -193,7 +194,7 @@ describe("schedule validation", () => {
     assertOnceInFuture(future, T0); // no throw
   });
 
-  test("reserved webhook schedule is unsupported_schedule; event is accepted (#146)", () => {
+  test("unsupported webhook schedule is unsupported_schedule; event is accepted (#146/#147)", () => {
     expectCode(() => parseSchedule({ type: "webhook" }), "unsupported_schedule");
     const event = parseSchedule({ type: "event", on: "pane.closed" });
     expect(event.type).toBe("event");

@@ -7,10 +7,10 @@ automations, adapted to herdr's no-daemon model.
 - Plugin ID: `rebuildup.automations`
 - Install: `herdr plugin install rebuildup/herdr-plugins/plugins/automations`
   (pre-release: append `--ref release-0-7-0` or a commit SHA)
-- Contract (DRAFT): `herdr-plugins.automations/v1` —
+- Contract (STABLE): `herdr-plugins.automations/v1` —
   `docs/contracts/automations-v1.md`
 - Spec: `docs/specs/automations.md`; decisions: ADR-0022 (firing),
-  ADR-0023 (delivery/boundaries)
+  ADR-0023 (delivery/boundaries), ADR-0026 (webhook = upstream gap)
 - Runtime prerequisite: [Bun](https://bun.sh) on `PATH`.
 
 ## Status
@@ -21,10 +21,12 @@ with misfire policies, `schedule install|uninstall|status` OS
 adapters (launchd / systemd --user / schtasks) and opt-in `watch`,
 run delivery via `agent.prompt`/`agent.start` with `[automations]`
 provenance, honest `driver.state` reporting, and `event` schedules
-fired by herdr `[[events]]` manifest hooks (see below). Webhook
-evaluation (if adopted) lands in #147. The plugin holds no clock
-and no daemon — external clocks call the idempotent `tick`/`fire`
-path and herdr calls the hook entrypoint (ADR-0022).
+fired by herdr `[[events]]` manifest hooks (see below). T5 (#147)
+finalized the contract as STABLE: webhook triggers are
+unsupported in v1 — an upstream gap (ADR-0026), see below. The
+plugin holds no clock and no daemon — external clocks call the
+idempotent `tick`/`fire` path and herdr calls the hook entrypoint
+(ADR-0022).
 
 ## Commands
 
@@ -57,7 +59,7 @@ Schedules: `interval` (`every_ms >= 60000`), `fixed_time`
 (`time_of_day` HH:MM + optional `weekdays` 0=Sun..6=Sat + optional IANA
 `time_zone`), `once` (ISO 8601 with explicit offset, must be future),
 `event` (below). `webhook` is schema-reserved →
-`unsupported_schedule` until #147.
+`unsupported_schedule` permanently in v1 (ADR-0026 — see §Webhook).
 
 ### Event schedules (#146)
 
@@ -85,6 +87,22 @@ anchor, same idempotency key). `pane.agent_status_changed` also
 records the observed status on the latest delivered run for that
 pane (`result.agent_status`/`agent_status_at`). Events herdr never
 delivers never fire — `tick` reports `events.fired:0`.
+
+### Webhook (#147) — unsupported in v1
+
+T3 Code's webhook automations need an inbound HTTP endpoint
+(HMAC-SHA256 verification, filters, dedupe/coalesce). herdr has no
+inbound HTTP or tunnel path, and an opt-in foreground `serve`
+listener would violate the ADR-0002 no-daemon invariant, so ADR-0026
+records `webhook` schedules as an **upstream gap**: `create`/`update`
+reject them with `unsupported_schedule`, there is no `serve`
+command, and `planned_commands` is empty. Offline semantics, had an
+endpoint existed, would still be sender-side retry only — the plugin
+never buffers requests it cannot receive. Resolution condition:
+herdr ships an inbound HTTP/tunnel API (or equivalent plugin hook);
+upstream Issues are currently not filed (prior feature requests were
+closed by the upstream rate-limit bot — see `docs/specs/automations.md`
+§Upstream gap candidates).
 
 `run-now` records and delivers a manual run
 (`trigger:"manual"`, `scheduled_for:null`) through the same

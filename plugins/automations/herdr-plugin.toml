@@ -1,8 +1,8 @@
 id = "rebuildup.automations"
 name = "Automations"
-version = "0.4.0"
+version = "0.7.0"
 min_herdr_version = "0.9.0"
-description = "Scheduled and triggered agent runs: interval/fixed_time/once tasks fired by OS schedulers or an opt-in watch process, plus event schedules fired by herdr lifecycle hooks (contract herdr-plugins.automations/v1, draft)."
+description = "Scheduled and triggered agent runs: interval/fixed_time/once tasks fired by OS schedulers or an opt-in watch process, plus event schedules fired by herdr lifecycle hooks (contract herdr-plugins.automations/v1, stable). Webhook triggers are unsupported in v1 — upstream gap, ADR-0026."
 platforms = ["linux", "macos", "windows"]
 
 # No build step: dependency-free TypeScript executed by Bun
@@ -13,8 +13,10 @@ platforms = ["linux", "macos", "windows"]
 # schedules — every herdr plugin-hook event is recorded as a pending
 # mark by src/hook.ts and drained lazily by the next `tick` (no
 # daemon, checkpoints auto-capture precedent); agent_status_changed
-# also folds observed status into delivered runs. Webhook evaluation
-# lands in #147.
+# also folds observed status into delivered runs. T5 (#147): webhook
+# triggers resolved as an upstream gap (ADR-0026) — no `serve`,
+# `webhook` schedules stay `unsupported_schedule`; contract v1
+# finalized STABLE.
 
 # Event hooks (#146): one [[events]] entry per upstream
 # PLUGIN_HOOK_EVENT_KINDS name so `event` schedules can subscribe to
