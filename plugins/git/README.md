@@ -48,6 +48,19 @@ bun run src/cli.ts pr review|comment|reply|reviewers <pane_id> [args]
     pr reply <pane> <number> <comment-id> --body B|--body-file PATH|-
     pr reviewers <pane> <number>
         [--add-reviewer LOGIN[,LOGIN]...] [--remove-reviewer LOGIN...]
+bun run src/cli.ts issue list|view|create|edit|comment|close
+    <pane_id> [args] [--repo owner/name]
+    issue list: [--limit N] [--state open|closed|all]
+        [--label L]... [--assignee U]... [--author U]
+    issue view <pane> <number>
+    issue edit <pane> <number> [--title T] [--body B | --body-file P|-]
+        [--add-label L]... [--remove-label L]... [--add-assignee U]...
+        [--remove-assignee U]... [--state open|closed]
+    issue comment <pane> <number> --body B|--body-file PATH|-
+    issue close <pane> <number> [--reason completed|"not planned"]
+bun run src/cli.ts issue link|unlink|links <pane_id> [args]
+    issue link <pane> <owner>/<repo>#<n> [--verify]
+    issue unlink <pane> <owner>/<repo>#<n>
 bun run src/cli.ts project <pane_id>
 ```
 
@@ -76,6 +89,15 @@ requests/dismisses reviewers (`gh pr edit`). Every forge mutation
 requires `--expect-head <full sha>` (the `head.sha` from a prior read);
 the plugin re-fetches the PR head and refuses with `stale_head` when
 it moved. Merge/auto-merge are intentionally not exposed.
+`issue` exposes GitHub issues through the same `gh` path —
+`list`/`view`/`create`/`edit`/`comment`/`close` with the same repo
+resolution, bounded reads, and never-in-argv body discipline. Issues
+have no head sha, so there is no `--expect-head` analog: forge
+mutations are gated by the mutation target-resolution rule and always
+echo the re-fetched post-mutation state. `issue link`/`unlink`/`links`
+delegate to `rebuildup.inbox` (ADR-0013 sibling-plugin resolution,
+`inboxPluginRoot` config override) — the git plugin keeps no link state;
+staleness follows inbox-v1 rules verbatim.
 `project` additionally reports `git_branch`, `git_changes`, and
 `git_ahead_behind` pane metadata tokens.
 
@@ -94,7 +116,14 @@ Design: ADR-0006/0007/0008.
   Merge/auto-merge and non-GitHub forges are later tickets. No
   destructive git operations are exposed (ADR-0007); force push
   requires the explicit `--force-with-lease` flag.
+  v0.6.0 adds the GitHub issue surface (`issue list|view|create|edit|
+  comment|close` via `gh`) and pane↔issue links (`issue link|unlink|
+  links`) delegated to `rebuildup.inbox` — inbox owns the link store
+  and its staleness/retention rules; this plugin stores no link state.
 - Remote herdr hosts: run the CLI on the target host (same rule as
   `rebuildup.inbox`).
 - Optional `config.json` in the plugin config dir:
-  `{"timeoutMs": 10000, "remoteTimeoutMs": 60000, "diffMaxBytes": 262144}`.
+  `{"timeoutMs": 10000, "remoteTimeoutMs": 60000, "diffMaxBytes": 262144,
+  "inboxPluginRoot": "/path/to/plugins/inbox"}` — `inboxPluginRoot`
+  overrides sibling-plugin resolution for `issue link|unlink|links`
+  (default: `../inbox`, then `herdr plugin list --json`).

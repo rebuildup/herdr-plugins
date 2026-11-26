@@ -3,6 +3,10 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
+  boundIssueView,
+  collectIssueCreate,
+  collectIssueList,
+  collectIssueView,
   collectPrChecks,
   collectPrComments,
   collectPrCreate,
@@ -14,9 +18,11 @@ import {
   ensureGh,
   isValidHeadSha,
   resolveForgeRepo,
+  submitIssueComment,
   submitPrComment,
   submitPrReply,
   submitPrReview,
+  updateIssue,
   updatePrReviewers,
   versionAtLeast,
 } from "../plugins/git/src/gh";
@@ -48,6 +54,12 @@ const ENV_KEYS = [
   "GH_STUB_CREATE_FAIL",
   "GH_STUB_CREATE_PARTIAL",
   "GH_STUB_STDIN_FILE",
+  "GH_STUB_ISSUE_LIST_JSON",
+  "GH_STUB_ISSUE_VIEW_JSON",
+  "GH_STUB_ISSUE_CREATE_URL",
+  "GH_STUB_ISSUE_CREATE_FAIL",
+  "GH_STUB_ISSUE_EDIT_FAIL",
+  "GH_STUB_ISSUE_CLOSE_FAIL",
 ];
 
 function tempDir(): string {
@@ -133,6 +145,33 @@ case "\${1:-}" in
         echo "\${GH_STUB_CREATE_URL:-https://github.com/octo/widgets/pull/42}"
         ;;
       edit) echo "https://github.com/octo/widgets/pull/7";;
+      *) exit 1;;
+    esac
+    exit 0;;
+  issue)
+    case "\${2:-}" in
+      list) cat "\${GH_STUB_ISSUE_LIST_JSON:-/dev/null}" 2>/dev/null || echo '[]';;
+      view) cat "\${GH_STUB_ISSUE_VIEW_JSON:-/dev/null}";;
+      create)
+        if [ "\${GH_STUB_ISSUE_CREATE_FAIL:-0}" = "1" ]; then
+          echo "gh issue create failed" >&2; exit 1
+        fi
+        if [ -n "\${GH_STUB_STDIN_FILE:-}" ]; then cat "$STDIN_RAW" > "$GH_STUB_STDIN_FILE"; fi
+        echo "\${GH_STUB_ISSUE_CREATE_URL:-https://github.com/octo/widgets/issues/9}"
+        ;;
+      edit)
+        if [ -n "\${GH_STUB_STDIN_FILE:-}" ]; then cat "$STDIN_RAW" > "$GH_STUB_STDIN_FILE"; fi
+        if [ "\${GH_STUB_ISSUE_EDIT_FAIL:-0}" = "1" ]; then
+          echo "gh issue edit failed" >&2; exit 1
+        fi
+        echo "edited";;
+      close)
+        if [ "\${GH_STUB_ISSUE_CLOSE_FAIL:-0}" = "1" ]; then
+          echo "gh issue close failed" >&2; exit 1
+        fi
+        echo "closed";;
+      reopen) echo "reopened";;
+      comment) echo "https://github.com/octo/widgets/issues/3#issuecomment-1";;
       *) exit 1;;
     esac
     exit 0;;
@@ -1063,5 +1102,258 @@ describe("pr reviewers mutation", () => {
       }),
     ).rejects.toMatchObject({ kind: "gh_error" });
     expect(stubCalls(logFile).some((c) => c.startsWith("pr edit"))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue surface (Issue #174): list/view reads plus create/edit/comment/close
+// mutations. Issues have no head sha — there is deliberately no
+// --expect-head analog; mutation safety is the CLI-side target gate.
+// ---------------------------------------------------------------------------
+
+const ISSUE_VIEW_RAW = {
+  number: 5,
+  title: "bug: widget crashes",
+  state: "OPEN",
+  stateReason: "",
+  closed: false,
+  author: { login: "alice" },
+  labels: [{ name: "bug" }, { name: "triage" }],
+  assignees: [{ login: "bob" }],
+  milestone: { title: "v1" },
+  body: "x".repeat(9000),
+  comments: Array.from({ length: 60 }, (_, i) => ({
+    id: i,
+    author: { login: `u${i}` },
+    body: i === 59 ? "y".repeat(5000) : `comment ${i}`,
+    createdAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T00:00:00Z",
+    url: `https://example.com/c/${i}`,
+  })),
+  reactionGroups: [{ content: "THUMBS_UP", users: { totalCount: 3 } }],
+  createdAt: "2026-01-01T00:00:00Z",
+  updatedAt: "2026-01-02T00:00:00Z",
+  url: "https://github.com/octo/widgets/issues/5",
+};
+
+describe("boundIssueView", () => {
+  test("bounds body, caps comments at newest 50, projects reactions", () => {
+    const out = boundIssueView(ISSUE_VIEW_RAW) as {
+      body: string;
+      body_truncated?: boolean;
+      comments: Array<{ id: number; body_truncated?: boolean }>;
+      comments_truncated: boolean;
+      reactions: Array<{ content: string; count: number }>;
+      labels: string[];
+      assignees: string[];
+      milestone: string | null;
+      state_reason: string;
+    };
+    expect(out.body_truncated).toBe(true);
+    expect(out.body.length).toBeLessThan(8100);
+    expect(out.comments).toHaveLength(50);
+    expect(out.comments[0]?.id).toBe(10); // newest 50 of 60
+    expect(out.comments[49]?.body_truncated).toBe(true);
+    expect(out.comments_truncated).toBe(true);
+    expect(out.reactions).toEqual([{ content: "THUMBS_UP", count: 3 }]);
+    expect(out.labels).toEqual(["bug", "triage"]);
+    expect(out.assignees).toEqual(["bob"]);
+    expect(out.milestone).toBe("v1");
+    expect(out.state_reason).toBe("");
+  });
+});
+
+describe("issue list", () => {
+  test("assembles argv and parses JSON output", async () => {
+    const { logFile, work } = installGhStub();
+    const listFile = writeStubJson(work, "issues.json", [
+      { number: 5, title: "t", state: "OPEN", url: "u" },
+    ]);
+    setEnv("GH_STUB_ISSUE_LIST_JSON", listFile);
+    const issues = await collectIssueList(tempDir(), {
+      repo: "octo/widgets",
+      limit: 7,
+      state: "all",
+      label: ["bug"],
+      assignee: ["bob"],
+      author: "alice",
+    });
+    expect(issues).toHaveLength(1);
+    const call = stubCalls(logFile).find((c) => c.startsWith("issue list"));
+    expect(call).toContain("--repo octo/widgets");
+    expect(call).toContain("--limit 7");
+    expect(call).toContain("--state all");
+    expect(call).toContain("--label bug");
+    expect(call).toContain("--assignee bob");
+    expect(call).toContain("--author alice");
+    expect(call).toContain("--json");
+  });
+});
+
+describe("issue view", () => {
+  test("returns the bounded projection", async () => {
+    const { work } = installGhStub();
+    setEnv("GH_STUB_ISSUE_VIEW_JSON", writeStubJson(work, "iview.json", ISSUE_VIEW_RAW));
+    const issue = (await collectIssueView(tempDir(), { repo: "octo/widgets", number: 5 })) as {
+      number: number;
+      comments_truncated: boolean;
+      body_truncated?: boolean;
+    };
+    expect(issue.number).toBe(5);
+    expect(issue.comments_truncated).toBe(true);
+    expect(issue.body_truncated).toBe(true);
+  });
+});
+
+describe("issue create", () => {
+  test("labels/assignees travel as argv; URL yields the issue number", async () => {
+    const { logFile } = installGhStub();
+    const result = await collectIssueCreate(tempDir(), {
+      repo: "octo/widgets",
+      title: "new bug",
+      body: "details",
+      labels: ["bug", "triage"],
+      assignees: ["bob"],
+    });
+    expect(result).toEqual({
+      url: "https://github.com/octo/widgets/issues/9",
+      number: 9,
+    });
+    const call = stubCalls(logFile).find((c) => c.startsWith("issue create"));
+    expect(call).toContain("--repo octo/widgets");
+    expect(call).toContain("--title new bug");
+    expect(call).toContain("--label bug");
+    expect(call).toContain("--label triage");
+    expect(call).toContain("--assignee bob");
+  });
+
+  test("long body travels via --body-file - stdin, never argv", async () => {
+    const { logFile, work } = installGhStub();
+    const stdinFile = path.join(work, "stdin.txt");
+    setEnv("GH_STUB_STDIN_FILE", stdinFile);
+    const bodyText = "issue body line\n".repeat(2000);
+    await collectIssueCreate(
+      tempDir(),
+      { repo: "octo/widgets", title: "t", bodyFile: "-" },
+      { bodyText },
+    );
+    const call = stubCalls(logFile).find((c) => c.startsWith("issue create"));
+    expect(call).toContain("--body-file -");
+    expect(call).not.toContain("issue body line");
+    expect(readFileSync(stdinFile, "utf8")).toBe(bodyText);
+  });
+
+  test("gh failure is a structured gh_error", async () => {
+    installGhStub();
+    setEnv("GH_STUB_ISSUE_CREATE_FAIL", "1");
+    await expect(
+      collectIssueCreate(tempDir(), { repo: "octo/widgets", title: "t" }),
+    ).rejects.toMatchObject({ kind: "gh_error" });
+  });
+});
+
+describe("issue comment mutation", () => {
+  test("posts to issues/{n}/comments via gh api stdin payload", async () => {
+    const { work, logFile } = installGhStub();
+    setEnv(
+      "GH_STUB_ISSUE_COMMENT_POST_JSON",
+      writeStubJson(work, "posted.json", {
+        id: 77,
+        user: { login: "alice" },
+        body: "hello",
+        created_at: "2026-01-03T00:00:00Z",
+        updated_at: "2026-01-03T00:00:00Z",
+        html_url: "https://example.com/c/77",
+      }),
+    );
+    const out = (await submitIssueComment(tempDir(), {
+      repo: "octo/widgets",
+      number: 5,
+      body: "hello",
+    })) as { number: number; comment: { id: number; author: string } };
+    expect(out.number).toBe(5);
+    expect(out.comment).toMatchObject({ id: 77, author: "alice" });
+    const calls = stubCalls(logFile);
+    expect(calls.some((c) => c.includes("api repos/octo/widgets/issues/5/comments"))).toBe(true);
+  });
+});
+
+describe("issue edit / close", () => {
+  test("edit assembles gh issue edit argv then echoes the post-state view", async () => {
+    const { work, logFile } = installGhStub();
+    setEnv("GH_STUB_ISSUE_VIEW_JSON", writeStubJson(work, "iview.json", ISSUE_VIEW_RAW));
+    const out = (await updateIssue(tempDir(), {
+      repo: "octo/widgets",
+      number: 5,
+      title: "renamed",
+      addLabels: ["urgent"],
+      removeLabels: ["triage"],
+      addAssignees: ["carol"],
+      state: "closed",
+      reason: "completed",
+    })) as { number: number; issue: { number: number; state: string } };
+    expect(out.number).toBe(5);
+    expect(out.issue.number).toBe(5);
+    const calls = stubCalls(logFile);
+    const edit = calls.find((c) => c.startsWith("issue edit"));
+    expect(edit).toContain("--title renamed");
+    expect(edit).toContain("--add-label urgent");
+    expect(edit).toContain("--remove-label triage");
+    expect(edit).toContain("--add-assignee carol");
+    const close = calls.find((c) => c.startsWith("issue close"));
+    expect(close).toContain("--reason completed");
+    expect(calls.some((c) => c.startsWith("issue view 5"))).toBe(true);
+  });
+
+  test("state-only edit reopens without gh issue edit", async () => {
+    const { work, logFile } = installGhStub();
+    setEnv("GH_STUB_ISSUE_VIEW_JSON", writeStubJson(work, "iview.json", ISSUE_VIEW_RAW));
+    await updateIssue(tempDir(), { repo: "octo/widgets", number: 5, state: "open" });
+    const calls = stubCalls(logFile);
+    expect(calls.some((c) => c.startsWith("issue edit"))).toBe(false);
+    expect(calls.some((c) => c.startsWith("issue reopen 5"))).toBe(true);
+  });
+
+  test("edit body travels via --body-file - stdin", async () => {
+    const { work, logFile } = installGhStub();
+    setEnv("GH_STUB_ISSUE_VIEW_JSON", writeStubJson(work, "iview.json", ISSUE_VIEW_RAW));
+    const stdinFile = path.join(work, "stdin.txt");
+    setEnv("GH_STUB_STDIN_FILE", stdinFile);
+    const bodyText = "new body\n";
+    await updateIssue(tempDir(), { repo: "octo/widgets", number: 5, bodyFile: "-" }, { bodyText });
+    const edit = stubCalls(logFile).find((c) => c.startsWith("issue edit"));
+    expect(edit).toContain("--body-file -");
+    expect(readFileSync(stdinFile, "utf8")).toBe(bodyText);
+  });
+
+  test("gh edit failure is a structured gh_error; no view refetch", async () => {
+    const { work, logFile } = installGhStub();
+    setEnv("GH_STUB_ISSUE_VIEW_JSON", writeStubJson(work, "iview.json", ISSUE_VIEW_RAW));
+    setEnv("GH_STUB_ISSUE_EDIT_FAIL", "1");
+    await expect(
+      updateIssue(tempDir(), { repo: "octo/widgets", number: 5, title: "x" }),
+    ).rejects.toMatchObject({ kind: "gh_error" });
+    expect(stubCalls(logFile).some((c) => c.startsWith("issue view"))).toBe(false);
+  });
+
+  test("invalid reason/state combos are rejected before any gh call", async () => {
+    const { logFile } = installGhStub();
+    await expect(
+      updateIssue(tempDir(), {
+        repo: "octo/widgets",
+        number: 5,
+        state: "closed",
+        reason: "bogus",
+      }),
+    ).rejects.toMatchObject({ kind: "gh_error" });
+    await expect(
+      updateIssue(tempDir(), {
+        repo: "octo/widgets",
+        number: 5,
+        state: "open",
+        reason: "completed",
+      }),
+    ).rejects.toMatchObject({ kind: "gh_error" });
+    expect(stubCalls(logFile).filter((c) => c.startsWith("issue"))).toEqual([]);
   });
 });

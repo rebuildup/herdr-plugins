@@ -26,6 +26,9 @@ import {
   TargetResolutionError,
 } from "../../../packages/herdr-client/src/index";
 import {
+  collectIssueCreate,
+  collectIssueList,
+  collectIssueView,
   collectPrChecks,
   collectPrComments,
   collectPrCreate,
@@ -40,9 +43,11 @@ import {
   type PrLineComment,
   type PrReviewEvent,
   resolveForgeRepo,
+  submitIssueComment,
   submitPrComment,
   submitPrReply,
   submitPrReview,
+  updateIssue,
   updatePrReviewers,
 } from "./gh";
 import {
@@ -68,10 +73,11 @@ import {
   resolveRepo,
   type StatusReport,
 } from "./git";
+import { INBOX_PLUGIN_ID, resolveInboxPluginRoot, runInboxCli } from "./inbox";
 
 const CONTRACT = "herdr-plugins.git/v1";
 const PLUGIN_ID = "rebuildup.git";
-const PLUGIN_VERSION = "0.4.0";
+const PLUGIN_VERSION = "0.6.0";
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_REMOTE_TIMEOUT_MS = 60_000;
 const DEFAULT_DIFF_MAX_BYTES = 256 * 1024;
@@ -80,6 +86,8 @@ interface PluginConfig {
   timeoutMs?: number | undefined;
   remoteTimeoutMs?: number | undefined;
   diffMaxBytes?: number | undefined;
+  /** Explicit rebuildup.inbox plugin root for `issue link|unlink|links`. */
+  inboxPluginRoot?: string | undefined;
 }
 
 interface CliOptions extends CallOptions {
@@ -310,6 +318,10 @@ async function loadConfig(): Promise<PluginConfig> {
       diffMaxBytes:
         typeof parsed.diffMaxBytes === "number" && parsed.diffMaxBytes > 0
           ? parsed.diffMaxBytes
+          : undefined,
+      inboxPluginRoot:
+        typeof parsed.inboxPluginRoot === "string" && parsed.inboxPluginRoot !== ""
+          ? parsed.inboxPluginRoot
           : undefined,
     };
   } catch {
@@ -1501,6 +1513,451 @@ async function cmdPr(options: CliOptions): Promise<void> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// `issue` — GitHub issue surface (Issue #174) plus pane↔issue links.
+//
+// Forge actions (`list|view|create|edit|comment|close`) share the `pr`
+// pane→repo resolution and `--repo` override. Mutations set
+// `options.mutation = true` before any target resolution so they fail
+// closed without an explicit/consistent target. Issues have no head sha,
+// so there is no `--expect-head` analog — the mutation gate plus explicit
+// invocation is the guard (documented in git-v1.md).
+//
+// `link|unlink|links` are pane-scoped tracker associations owned by
+// rebuildup.inbox (inbox-v1 link/unlink/links). They delegate to the
+// inbox plugin's public CLI (ADR-0013 sibling pattern) — the git plugin
+// keeps no link state of its own.
+// ---------------------------------------------------------------------------
+
+const ISSUE_VALUE_FLAGS = [
+  "--repo",
+  "--limit",
+  "--state",
+  "--label",
+  "--assignee",
+  "--author",
+  "--title",
+  "--body",
+  "--body-file",
+  "--add-label",
+  "--remove-label",
+  "--add-assignee",
+  "--remove-assignee",
+  "--reason",
+];
+
+const ISSUE_FLAG_SPECS: Record<string, Record<string, FlagKind>> = {
+  list: {
+    "--repo": "value",
+    "--limit": "value",
+    "--state": "value",
+    "--label": "value",
+    "--assignee": "value",
+    "--author": "value",
+  },
+  view: { "--repo": "value" },
+  create: {
+    "--repo": "value",
+    "--title": "value",
+    "--body": "value",
+    "--body-file": "value",
+    "--label": "value",
+    "--assignee": "value",
+  },
+  edit: {
+    "--repo": "value",
+    "--title": "value",
+    "--body": "value",
+    "--body-file": "value",
+    "--add-label": "value",
+    "--remove-label": "value",
+    "--add-assignee": "value",
+    "--remove-assignee": "value",
+    "--state": "value",
+  },
+  comment: { "--repo": "value", "--body": "value", "--body-file": "value" },
+  close: { "--repo": "value", "--reason": "value" },
+  link: { "--verify": "boolean" },
+  unlink: {},
+  links: {},
+};
+
+/** Actions that write forge state or plugin (inbox) state. */
+const ISSUE_MUTATION_ACTIONS = new Set(["create", "edit", "comment", "close", "link", "unlink"]);
+
+/** Same `<owner>/<repo>#<n>` grammar as inbox-v1 tracker refs. */
+const TRACKER_REF_PATTERN =
+  /^([A-Za-z0-9][A-Za-z0-9_.-]*(?:\/[A-Za-z0-9][A-Za-z0-9_.-]*)+)#([1-9][0-9]*)$/;
+
+function parseIssueTrackerRef(spec: string): { repo: string; number: number } {
+  const match = TRACKER_REF_PATTERN.exec(spec);
+  if (!match) {
+    fail(`invalid issue ref (expected <owner>/<repo>#<number>): ${spec}`, 2);
+  }
+  return { repo: match[1] as string, number: Number(match[2]) };
+}
+
+/** Comma-split + trim a repeatable value flag into items. */
+function flagItems(args: string[], flag: string): string[] {
+  return flagValues(args, flag)
+    .flatMap((value) => value.split(","))
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
+/** Reject option-like label/assignee values before they reach gh argv. */
+function assertForgeItems(items: string[], flag: string): void {
+  for (const item of items) {
+    if (item.startsWith("-")) {
+      fail(`invalid ${flag} value (option-like rejected): ${item}`, 2);
+    }
+  }
+}
+
+function positiveIssueNumber(action: string, rest: string[]): number {
+  const number = Number(rest[0]);
+  if (!Number.isInteger(number) || number < 1) {
+    fail(`issue ${action} requires a positive issue number`, 2);
+  }
+  if (rest.length > 1) fail(`issue ${action} accepts at most one issue number`, 2);
+  return number;
+}
+
+/**
+ * `issue link|unlink|links` — delegate to rebuildup.inbox's public CLI.
+ * The pane↔issue association lives in inbox plugin state only; this
+ * surface re-wraps the inbox JSON under the git contract and propagates
+ * its errors (target gating, pane lookup, staleness rules) unchanged.
+ */
+async function cmdIssueLink(
+  options: CliOptions,
+  config: PluginConfig,
+  action: "link" | "unlink" | "links",
+  paneId: string,
+  rest: string[],
+): Promise<void> {
+  const inboxArgs: string[] = [];
+  if (action === "links") {
+    inboxArgs.push("links", paneId);
+  } else {
+    const { repo, number } = parseIssueTrackerRef(rest[0] as string);
+    inboxArgs.push(action, paneId, "--issue", `${repo}#${number}`);
+    if (action === "link" && hasFlag(options.args, "--verify")) {
+      inboxArgs.push("--verify");
+    }
+  }
+
+  const resolution = await resolveInboxPluginRoot(config.inboxPluginRoot);
+  if (!resolution.ok) {
+    fail(`inbox plugin unavailable: ${resolution.error}`, 1, "inbox_unavailable");
+  }
+  const result = await runInboxCli(resolution.root, inboxArgs, {
+    session: options.session,
+    socketPath: options.socketPath,
+    timeoutMs: effectiveTimeoutMs(options, config),
+  });
+  if (result.status !== 0) {
+    const message = result.error?.message ?? result.stderr.trim() ?? "";
+    if (result.status === 2 || result.error?.code === "usage") {
+      fail(message || `inbox ${action} usage error`, 2);
+    }
+    const kind =
+      result.error?.code && result.error.code !== "error" ? result.error.code : "inbox_error";
+    fail(message || `inbox ${action} failed (exit ${result.status})`, 1, kind);
+  }
+
+  const data = result.json ?? {};
+  const payload: Record<string, unknown> = {
+    contract: CONTRACT,
+    command: "issue",
+    action,
+    pane_id: paneId,
+    delegated: INBOX_PLUGIN_ID,
+    ok: true,
+    generated_at: new Date().toISOString(),
+  };
+  if (data.link !== undefined) payload.link = data.link;
+  if (data.removed !== undefined) payload.removed = data.removed;
+  if (Array.isArray(data.links)) payload.links = data.links;
+  if (Array.isArray(data.warnings)) payload.warnings = data.warnings;
+  emit(payload);
+}
+
+/**
+ * `issue <action> <pane_id> [args]` — GitHub issue surface via `gh`,
+ * plus pane link delegation to rebuildup.inbox. All argument validation
+ * runs before any snapshot/gh/inbox access so usage errors exit 2
+ * regardless of environment.
+ */
+async function cmdIssue(options: CliOptions): Promise<void> {
+  const config = await loadConfig();
+  const timeoutMs = effectiveRemoteTimeoutMs(options, config);
+  const pos = positionals(options.args, ISSUE_VALUE_FLAGS);
+  const action = pos[0];
+  if (!action || !(action in ISSUE_FLAG_SPECS)) {
+    fail(
+      "issue requires an action: list | view | create | edit | comment | close | link | unlink | links",
+      2,
+    );
+  }
+  const spec = ISSUE_FLAG_SPECS[action] as Record<string, FlagKind>;
+  validateFlags(options.args, spec);
+  // Forge/inbox mutations need an explicit or consistent ambient target,
+  // never the implicit default socket — same rule as `pr` mutations.
+  if (ISSUE_MUTATION_ACTIONS.has(action)) {
+    options.mutation = true;
+  }
+  const identity = ambientIdentity();
+  const explicitPane = pos[1];
+  const paneId = explicitPane ?? identity.paneId;
+  const ambient = explicitPane === undefined ? identity : null;
+  if (!paneId) {
+    fail("pane id required (argument, HERDR_PANE_ID, or plugin context)", 2);
+  }
+  const rest = pos.slice(2);
+
+  // --- link surface: pure delegation, no repo/gh resolution needed ---
+  if (action === "link" || action === "unlink" || action === "links") {
+    if (action === "links") {
+      if (rest.length > 0) fail("issue links takes no positional arguments", 2);
+    } else {
+      if (rest.length !== 1) {
+        fail(`issue ${action} requires exactly one <owner>/<repo>#<number> argument`, 2);
+      }
+      parseIssueTrackerRef(rest[0] as string);
+    }
+    return cmdIssueLink(options, config, action, paneId, rest);
+  }
+
+  // --- per-action argument validation (usage errors, exit 2) ---
+  if (action === "list") {
+    if (rest.length > 0) fail("issue list takes no positional arguments", 2);
+    const stateRaw = flagValue(options.args, "--state") ?? "open";
+    if (!["open", "closed", "all"].includes(stateRaw)) {
+      fail(`invalid --state: ${stateRaw}`, 2);
+    }
+    const limitRaw = flagValue(options.args, "--limit");
+    if (limitRaw !== undefined) {
+      const limit = Number(limitRaw);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
+        fail(`invalid --limit: ${limitRaw}`, 2);
+      }
+    }
+    for (const flag of ["--label", "--assignee", "--author"] as const) {
+      assertForgeItems(flagItems(options.args, flag), flag);
+    }
+  }
+  if (action === "view") {
+    positiveIssueNumber("view", rest);
+  }
+  if (action === "create") {
+    const title = flagValue(options.args, "--title");
+    if (!title || title.trim().length === 0) fail("issue create requires --title", 2);
+    if (
+      flagValue(options.args, "--body") !== undefined &&
+      flagValue(options.args, "--body-file") !== undefined
+    ) {
+      fail("--body and --body-file are mutually exclusive", 2);
+    }
+    if (rest.length > 0) fail("issue create takes no positional arguments", 2);
+    for (const flag of ["--label", "--assignee"] as const) {
+      assertForgeItems(flagItems(options.args, flag), flag);
+    }
+  }
+  if (action === "edit") {
+    positiveIssueNumber("edit", rest);
+    const hasField =
+      flagValue(options.args, "--title") !== undefined ||
+      flagValue(options.args, "--body") !== undefined ||
+      flagValue(options.args, "--body-file") !== undefined ||
+      flagItems(options.args, "--add-label").length > 0 ||
+      flagItems(options.args, "--remove-label").length > 0 ||
+      flagItems(options.args, "--add-assignee").length > 0 ||
+      flagItems(options.args, "--remove-assignee").length > 0 ||
+      flagValue(options.args, "--state") !== undefined;
+    if (!hasField) {
+      fail(
+        "issue edit requires at least one of --title/--body/--body-file/--add-label/--remove-label/--add-assignee/--remove-assignee/--state",
+        2,
+      );
+    }
+    const stateRaw = flagValue(options.args, "--state");
+    if (stateRaw !== undefined && !["open", "closed"].includes(stateRaw)) {
+      fail(`invalid --state: ${stateRaw}`, 2);
+    }
+    if (
+      flagValue(options.args, "--body") !== undefined &&
+      flagValue(options.args, "--body-file") !== undefined
+    ) {
+      fail("--body and --body-file are mutually exclusive", 2);
+    }
+    for (const flag of [
+      "--add-label",
+      "--remove-label",
+      "--add-assignee",
+      "--remove-assignee",
+    ] as const) {
+      assertForgeItems(flagItems(options.args, flag), flag);
+    }
+  }
+  if (action === "comment") {
+    positiveIssueNumber("comment", rest);
+  }
+  if (action === "close") {
+    positiveIssueNumber("close", rest);
+    const reason = flagValue(options.args, "--reason");
+    if (reason !== undefined && !["completed", "not planned"].includes(reason)) {
+      fail(`invalid --reason: ${reason}`, 2);
+    }
+  }
+
+  const repoFlag = flagValue(options.args, "--repo");
+  if (repoFlag !== undefined) {
+    if (repoFlag.startsWith("-") || !/^[^\s/]+\/[^\s/]+$/.test(repoFlag)) {
+      fail(`invalid --repo value: ${JSON.stringify(repoFlag)}`, 2);
+    }
+  }
+
+  const snapshot = await sessionSnapshot(options);
+  const pane = await findPaneChecked(snapshot, { paneId, ambient });
+  let repoRoot: string;
+  try {
+    repoRoot = (
+      await resolveRepo(paneCwd(pane), { timeoutMs: effectiveTimeoutMs(options, config) })
+    ).root;
+  } catch (err) {
+    if (err instanceof GitError) fail(err.message, 1, err.kind);
+    throw err;
+  }
+
+  try {
+    await ensureGh(repoRoot, { timeoutMs });
+  } catch (err) {
+    if (err instanceof GhError) fail(err.message, 1, err.kind);
+    throw err;
+  }
+
+  const forgeBase = {
+    contract: CONTRACT,
+    command: "issue",
+    pane_id: paneId,
+    repo_root: repoRoot,
+    generated_at: new Date().toISOString(),
+  };
+
+  try {
+    const repo = await resolveForgeRepo(repoRoot, { repo: repoFlag }, { timeoutMs });
+    const ghOptions = { timeoutMs };
+
+    if (action === "list") {
+      const stateRaw = (flagValue(options.args, "--state") ?? "open") as "open" | "closed" | "all";
+      const limitRaw = flagValue(options.args, "--limit");
+      const limit = limitRaw === undefined ? undefined : Number(limitRaw);
+      const issues = await collectIssueList(
+        repoRoot,
+        {
+          repo,
+          limit,
+          state: stateRaw,
+          label: flagItems(options.args, "--label"),
+          assignee: flagItems(options.args, "--assignee"),
+          author: flagValue(options.args, "--author"),
+        },
+        ghOptions,
+      );
+      emit({ ...forgeBase, action: "list", repo, issues });
+      return;
+    }
+
+    if (action === "view") {
+      const number = Number(rest[0]);
+      const issue = await collectIssueView(repoRoot, { repo, number }, ghOptions);
+      emit({ ...forgeBase, action: "view", repo, issue });
+      return;
+    }
+
+    if (action === "create") {
+      const title = flagValue(options.args, "--title") as string;
+      const bodyInput = await resolvePrBody(options.args);
+      const created = await collectIssueCreate(
+        repoRoot,
+        {
+          repo,
+          title,
+          body: bodyInput.body,
+          bodyFile: bodyInput.bodyFile,
+          labels: flagItems(options.args, "--label"),
+          assignees: flagItems(options.args, "--assignee"),
+        },
+        { ...ghOptions, bodyText: bodyInput.bodyText },
+      );
+      emit({
+        ...forgeBase,
+        action: "create",
+        repo,
+        ok: true,
+        url: created.url,
+        number: created.number,
+      });
+      return;
+    }
+
+    if (action === "edit") {
+      const number = Number(rest[0]);
+      const bodyInput = await resolvePrBody(options.args);
+      const stateRaw = flagValue(options.args, "--state");
+      const data = await updateIssue(
+        repoRoot,
+        {
+          repo,
+          number,
+          title: flagValue(options.args, "--title"),
+          body: bodyInput.body,
+          bodyFile: bodyInput.bodyFile,
+          addLabels: flagItems(options.args, "--add-label"),
+          removeLabels: flagItems(options.args, "--remove-label"),
+          addAssignees: flagItems(options.args, "--add-assignee"),
+          removeAssignees: flagItems(options.args, "--remove-assignee"),
+          state: stateRaw === undefined ? undefined : (stateRaw as "open" | "closed"),
+        },
+        { ...ghOptions, bodyText: bodyInput.bodyText },
+      );
+      emit({ ...forgeBase, action: "edit", repo, ok: true, ...data });
+      return;
+    }
+
+    if (action === "comment") {
+      const number = Number(rest[0]);
+      const bodyInput = await resolvePrBody(options.args);
+      const body = prBodyText(bodyInput);
+      if (body === undefined || body.trim().length === 0) {
+        fail("issue comment requires --body or --body-file", 2);
+      }
+      const data = await submitIssueComment(repoRoot, { repo, number, body }, ghOptions);
+      emit({ ...forgeBase, action: "comment", repo, ok: true, ...data });
+      return;
+    }
+
+    // action === "close"
+    const number = Number(rest[0]);
+    const data = await updateIssue(
+      repoRoot,
+      {
+        repo,
+        number,
+        state: "closed",
+        reason: flagValue(options.args, "--reason"),
+      },
+      ghOptions,
+    );
+    emit({ ...forgeBase, action: "close", repo, ok: true, ...data });
+  } catch (err) {
+    if (err instanceof GhError) fail(err.message, 1, err.kind);
+    if (err instanceof GitError) fail(err.message, 1, err.kind);
+    throw err;
+  }
+}
+
 async function cmdProject(options: CliOptions): Promise<void> {
   // project writes pane metadata tokens — a mutation of herdr state.
   options.mutation = true;
@@ -1593,10 +2050,21 @@ async function cmdCapability(options: CliOptions): Promise<void> {
       "push",
       "remote",
       "pr",
+      "issue",
       "project",
     ],
     read_only: false,
-    mutation_commands: ["stage", "unstage", "commit", "branch", "upstream", "fetch", "push", "pr"],
+    mutation_commands: [
+      "stage",
+      "unstage",
+      "commit",
+      "branch",
+      "upstream",
+      "fetch",
+      "push",
+      "pr",
+      "issue",
+    ],
     requires: { git: true, bun: true },
     defaults: {
       timeoutMs: config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
@@ -1643,6 +2111,26 @@ Usage:
       --expect-head is the stale-head guard: pass head.sha from a prior
       pr read; the mutation is refused (kind "stale_head") if the PR head
       moved. Merge/auto-merge are intentionally not exposed.
+  git issue list|view|create|edit|comment|close <pane_id> [args]
+      [--repo owner/name]
+      issue list: [--limit N] [--state open|closed|all]
+          [--label L]... [--assignee U]... [--author U]
+      issue view <pane> <number>
+      issue create <pane> --title T [--body B | --body-file PATH|-]
+          [--label L]... [--assignee U]...
+      issue edit <pane> <number> [--title T] [--body B|--body-file PATH|-]
+          [--add-label L]... [--remove-label L]...
+          [--add-assignee U]... [--remove-assignee U]...
+          [--state open|closed]
+      issue comment <pane> <number> --body B|--body-file PATH|-
+      issue close <pane> <number> [--reason completed|"not planned"]
+      (no --expect-head: issues have no head sha; mutations are gated by
+      target resolution + explicit invocation only)
+  git issue link <pane_id> <owner>/<repo>#<n> [--verify]
+  git issue unlink <pane_id> <owner>/<repo>#<n>
+  git issue links <pane_id>
+      Pane↔issue links are stored by rebuildup.inbox (delegated via its
+      public CLI); requires the inbox plugin installed/resolvable.
   git project <pane_id> [--session NAME]
   git capability
 
@@ -1681,6 +2169,8 @@ async function main(): Promise<void> {
       return cmdRemote(options);
     case "pr":
       return cmdPr(options);
+    case "issue":
+      return cmdIssue(options);
     case "project":
       return cmdProject(options);
     case "capability":
