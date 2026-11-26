@@ -10,6 +10,7 @@ import {
   TOOL_TABLE,
   UPSTREAM_GAPS,
 } from "../plugins/mcp/src/model";
+import { testEnv } from "./helpers/test-env";
 
 const dirs: string[] = [];
 
@@ -77,19 +78,18 @@ describe("herdr-plugins.mcp/v1 contract skeleton (T1, #135)", () => {
   test("capability command emits the contract skeleton as JSON", async () => {
     const stateDir = tempDir();
     const configDir = tempDir();
-    const prevState = process.env.HERDR_PLUGIN_STATE_DIR;
-    const prevConfig = process.env.HERDR_PLUGIN_CONFIG_DIR;
-    const prevSocket = process.env.HERDR_SOCKET_PATH;
-    process.env.HERDR_PLUGIN_STATE_DIR = stateDir;
-    process.env.HERDR_PLUGIN_CONFIG_DIR = configDir;
     // Point at a nonexistent socket so the probe fails fast and honestly.
-    process.env.HERDR_SOCKET_PATH = path.join(tempDir(), "missing.sock");
-    try {
+    const missingSocket = path.join(tempDir(), "missing.sock");
+    {
       // Spawn the real CLI end-to-end; the missing socket makes the
       // session probe fail fast and report reachable:false honestly.
       const proc = Bun.spawn(["bun", "run", "plugins/mcp/src/cli.ts", "capability"], {
         cwd: process.cwd(),
-        env: { ...process.env },
+        env: testEnv({
+          HERDR_PLUGIN_STATE_DIR: stateDir,
+          HERDR_PLUGIN_CONFIG_DIR: configDir,
+          HERDR_SOCKET_PATH: missingSocket,
+        }),
         stdout: "pipe",
         stderr: "pipe",
       });
@@ -118,13 +118,6 @@ describe("herdr-plugins.mcp/v1 contract skeleton (T1, #135)", () => {
         doc.upstream_gaps.some((g: { tracking: string }) => g.tracking === "herdrdev/herdr#6199"),
       ).toBe(true);
       expect(doc.remote.status).toBe("excluded_v1");
-    } finally {
-      if (prevState === undefined) delete process.env.HERDR_PLUGIN_STATE_DIR;
-      else process.env.HERDR_PLUGIN_STATE_DIR = prevState;
-      if (prevConfig === undefined) delete process.env.HERDR_PLUGIN_CONFIG_DIR;
-      else process.env.HERDR_PLUGIN_CONFIG_DIR = prevConfig;
-      if (prevSocket === undefined) delete process.env.HERDR_SOCKET_PATH;
-      else process.env.HERDR_SOCKET_PATH = prevSocket;
     }
   });
 
@@ -135,10 +128,7 @@ describe("herdr-plugins.mcp/v1 contract skeleton (T1, #135)", () => {
     // initialize and expect a JSON-RPC result on stdout.
     const proc = Bun.spawn(["bun", "run", "plugins/mcp/src/cli.ts", "serve"], {
       cwd: process.cwd(),
-      env: {
-        ...process.env,
-        HERDR_SOCKET_PATH: path.join(tempDir(), "missing.sock"),
-      },
+      env: testEnv({ HERDR_SOCKET_PATH: path.join(tempDir(), "missing.sock") }),
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
@@ -165,7 +155,7 @@ describe("herdr-plugins.mcp/v1 contract skeleton (T1, #135)", () => {
   test("invalid --access-level is a usage error", async () => {
     const proc = Bun.spawn(
       ["bun", "run", "plugins/mcp/src/cli.ts", "capability", "--access-level", "yolo"],
-      { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" },
+      { cwd: process.cwd(), env: testEnv(), stdout: "pipe", stderr: "pipe" },
     );
     const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
     expect(exitCode).toBe(2);

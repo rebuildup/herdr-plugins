@@ -19,6 +19,7 @@ import {
 } from "../plugins/conversations/src/claude";
 import { scanTranscript } from "../plugins/conversations/src/indexer";
 import type { ConversationIdentity } from "../plugins/conversations/src/model";
+import { herdrSocketEndpoint, socketConsistentEnv, testEnv } from "./helpers/test-env";
 
 const dirs: string[] = [];
 const savedEnv: Record<string, string | undefined> = {};
@@ -62,20 +63,7 @@ interface CliResult {
 }
 
 function cliEnv(extra?: Record<string, string>): Record<string, string> {
-  const env: Record<string, string> = { HERDR_SOCKET_PATH: DEAD_SOCKET };
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value === undefined) continue;
-    if (
-      key.startsWith("HERDR_") &&
-      key !== "HERDR_PLUGIN_STATE_DIR" &&
-      key !== "HERDR_PLUGIN_CONFIG_DIR"
-    ) {
-      continue;
-    }
-    env[key] = value;
-  }
-  if (extra) Object.assign(env, extra);
-  return env;
+  return testEnv({ HERDR_SOCKET_PATH: DEAD_SOCKET, ...extra });
 }
 
 function parseCliOutput(stdout: string, stderr: string, status: number): CliResult {
@@ -92,17 +80,6 @@ function parseCliOutput(stdout: string, stderr: string, status: number): CliResu
     /* empty stderr */
   }
   return { status, stdout, stderr, json, error };
-}
-
-/** Keep ambient HERDR_SOCKET_PATH consistent with an explicit --socket flag
- *  (resolveTarget fails closed on contradiction, #83). */
-function socketConsistentEnv(
-  args: string[],
-  extraEnv?: Record<string, string>,
-): Record<string, string> | undefined {
-  const i = args.indexOf("--socket");
-  const socket = i >= 0 ? args[i + 1] : undefined;
-  return socket ? { HERDR_SOCKET_PATH: socket, ...extraEnv } : extraEnv;
 }
 
 function runCli(args: string[], extraEnv?: Record<string, string>): CliResult {
@@ -181,7 +158,7 @@ async function fakeHerdr(state: {
   });
   await new Promise<void>((resolveListen, rejectListen) => {
     server.once("error", rejectListen);
-    server.listen(socketPath, () => resolveListen());
+    server.listen(herdrSocketEndpoint(socketPath), () => resolveListen());
   });
   return {
     socketPath,

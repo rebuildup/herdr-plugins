@@ -12,6 +12,7 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { sessionKeyFor } from "../plugins/checkpoints/src/state";
+import { herdrSocketEndpoint, testEnv } from "./helpers/test-env";
 
 const dirs: string[] = [];
 const savedStateDir = process.env.HERDR_PLUGIN_STATE_DIR;
@@ -32,7 +33,7 @@ afterAll(() => {
 });
 
 function git(cwd: string, args: string[]): string {
-  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  const result = spawnSync("git", args, { cwd, encoding: "utf8", env: testEnv() });
   if (result.status !== 0) {
     throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
   }
@@ -57,20 +58,12 @@ const HOOK = path.join(PLUGIN, "src", "hook.ts");
 const DEAD_SOCKET = path.join(tempDir(), "no-such-herdr.sock");
 
 function baseEnv(extra?: Record<string, string>): Record<string, string> {
-  const env: Record<string, string> = { HERDR_SOCKET_PATH: DEAD_SOCKET };
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value === undefined) continue;
-    if (
-      key.startsWith("HERDR_") &&
-      key !== "HERDR_PLUGIN_STATE_DIR" &&
-      key !== "HERDR_PLUGIN_CONFIG_DIR"
-    ) {
-      continue;
-    }
-    env[key] = value;
-  }
-  if (extra) Object.assign(env, extra);
-  return env;
+  return testEnv({
+    HERDR_PLUGIN_STATE_DIR: process.env.HERDR_PLUGIN_STATE_DIR,
+    HERDR_PLUGIN_CONFIG_DIR: process.env.HERDR_PLUGIN_CONFIG_DIR,
+    HERDR_SOCKET_PATH: DEAD_SOCKET,
+    ...extra,
+  });
 }
 
 interface CliResult {
@@ -195,7 +188,7 @@ async function fakeHerdr(state: FakeState): Promise<{
   });
   await new Promise<void>((resolveListen, rejectListen) => {
     server.once("error", rejectListen);
-    server.listen(socketPath, () => resolveListen());
+    server.listen(herdrSocketEndpoint(socketPath), () => resolveListen());
   });
   return {
     socketPath,

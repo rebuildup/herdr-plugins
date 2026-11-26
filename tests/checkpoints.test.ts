@@ -13,6 +13,7 @@ import {
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { herdrSocketEndpoint, testEnv } from "./helpers/test-env";
 
 const dirs: string[] = [];
 const savedStateDir = process.env.HERDR_PLUGIN_STATE_DIR;
@@ -33,7 +34,7 @@ afterAll(() => {
 });
 
 function git(cwd: string, args: string[]): string {
-  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  const result = spawnSync("git", args, { cwd, encoding: "utf8", env: testEnv() });
   if (result.status !== 0) {
     throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
   }
@@ -68,22 +69,14 @@ interface CliResult {
 const DEAD_SOCKET = path.join(tempDir(), "no-such-herdr.sock");
 
 function cliEnv(extra?: Record<string, string>): Record<string, string> {
-  // Never leak the developer's live herdr session into CLI spawns: pane
-  // resolution must only happen when a test opts in explicitly.
-  const env: Record<string, string> = { HERDR_SOCKET_PATH: DEAD_SOCKET };
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value === undefined) continue;
-    if (
-      key.startsWith("HERDR_") &&
-      key !== "HERDR_PLUGIN_STATE_DIR" &&
-      key !== "HERDR_PLUGIN_CONFIG_DIR"
-    ) {
-      continue;
-    }
-    env[key] = value;
-  }
-  if (extra) Object.assign(env, extra);
-  return env;
+  // Plugin dirs are the explicit opt-in channel: tests set them on
+  // process.env per-case; everything else HERDR_* stays scrubbed (#199).
+  return testEnv({
+    HERDR_PLUGIN_STATE_DIR: process.env.HERDR_PLUGIN_STATE_DIR,
+    HERDR_PLUGIN_CONFIG_DIR: process.env.HERDR_PLUGIN_CONFIG_DIR,
+    HERDR_SOCKET_PATH: DEAD_SOCKET,
+    ...extra,
+  });
 }
 
 function parseCliOutput(stdout: string, stderr: string, status: number): CliResult {
@@ -167,7 +160,7 @@ async function fakeHerdrSocket(
   });
   await new Promise<void>((resolveListen, rejectListen) => {
     server.once("error", rejectListen);
-    server.listen(socketPath, () => resolveListen());
+    server.listen(herdrSocketEndpoint(socketPath), () => resolveListen());
   });
   return {
     socketPath,
@@ -363,7 +356,7 @@ describe("checkpoints cli", () => {
     expectErr(notRepo, "not_a_repo");
 
     const bare = path.join(tempDir(), "bare.git");
-    spawnSync("git", ["init", "--bare", "-q", bare]);
+    spawnSync("git", ["init", "--bare", "-q", bare], { env: testEnv() });
     const bareResult = runCli(["create", "--repo", bare]);
     expectErr(bareResult, "bare_repo");
   });
@@ -477,9 +470,15 @@ describe("checkpoints cli", () => {
     expect(readFileSync(path.join(repo, "ignored.log"), "utf8")).toBe("ignored\n");
     // Worktree+index now equal the checkpoint commit exactly.
     const commit = String(checkpointOf(s1).commit);
-    expect(spawnSync("git", ["diff", "--quiet", commit, "--", "."], { cwd: repo }).status).toBe(0);
     expect(
-      spawnSync("git", ["diff", "--cached", "--quiet", commit, "--", "."], { cwd: repo }).status,
+      spawnSync("git", ["diff", "--quiet", commit, "--", "."], { cwd: repo, env: testEnv() })
+        .status,
+    ).toBe(0);
+    expect(
+      spawnSync("git", ["diff", "--cached", "--quiet", commit, "--", "."], {
+        cwd: repo,
+        env: testEnv(),
+      }).status,
     ).toBe(0);
 
     // The mandatory pre-restore checkpoint captured S2 and is persisted.
@@ -516,9 +515,15 @@ describe("checkpoints cli", () => {
     // Worktree+index match the checkpoint tree (a.txt absent); vs HEAD
     // this correctly reads as a staged deletion — the checkpoint state.
     const commit = String(checkpointOf(created).commit);
-    expect(spawnSync("git", ["diff", "--quiet", commit, "--", "."], { cwd: repo }).status).toBe(0);
     expect(
-      spawnSync("git", ["diff", "--cached", "--quiet", commit, "--", "."], { cwd: repo }).status,
+      spawnSync("git", ["diff", "--quiet", commit, "--", "."], { cwd: repo, env: testEnv() })
+        .status,
+    ).toBe(0);
+    expect(
+      spawnSync("git", ["diff", "--cached", "--quiet", commit, "--", "."], {
+        cwd: repo,
+        env: testEnv(),
+      }).status,
     ).toBe(0);
   });
 

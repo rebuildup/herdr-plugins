@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { testEnv } from "./helpers/test-env";
 
 /**
  * Negative fixture for issue #170 contract re-check: rebuildup.secrets
@@ -86,13 +87,11 @@ describe("secrets provider stderr sanitization (#170 negative fixture)", () => {
       }),
     );
     const binDir = writeLeakyInfisical(dir);
-    const env: Record<string, string> = {};
-    for (const [key, value] of Object.entries(process.env)) {
-      if (value !== undefined) env[key] = value;
-    }
-    env.PATH = `${binDir}:${process.env.PATH ?? ""}`;
-    env.HERDR_PLUGIN_CONFIG_DIR = configDir;
-    env.HERDR_PLUGIN_STATE_DIR = path.join(dir, "state");
+    const env = testEnv({
+      PATH: `${binDir}:${process.env.PATH ?? ""}`,
+      HERDR_PLUGIN_CONFIG_DIR: configDir,
+      HERDR_PLUGIN_STATE_DIR: path.join(dir, "state"),
+    });
 
     const result = await runCli(["resolve", "--binding", "a"], env);
     expect(result.status).toBe(1);

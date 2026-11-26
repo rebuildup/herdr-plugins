@@ -5,6 +5,7 @@ import http from "node:http";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { herdrSocketEndpoint, testEnv } from "./helpers/test-env";
 
 const CLI = path.join(__dirname, "..", "plugins", "textgen", "src", "cli.ts");
 
@@ -43,16 +44,7 @@ interface CliResult {
 }
 
 function baseEnv(extra?: Record<string, string>): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value === undefined) continue;
-    if (key.startsWith("HERDR_PLUGIN_") || key === "HERDR_SOCKET_PATH" || key === "HERDR_SESSION") {
-      continue;
-    }
-    env[key] = value;
-  }
-  if (extra) Object.assign(env, extra);
-  return env;
+  return testEnv(extra);
 }
 
 function parseOut(stdout: string, stderr: string, status: number): CliResult {
@@ -187,7 +179,7 @@ async function fakeHerdr(opts?: {
   });
   await new Promise<void>((resolveListen, rejectListen) => {
     server.once("error", rejectListen);
-    server.listen(socketPath, () => resolveListen());
+    server.listen(herdrSocketEndpoint(socketPath), () => resolveListen());
   });
   return {
     socketPath,
