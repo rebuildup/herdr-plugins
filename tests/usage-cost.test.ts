@@ -19,6 +19,7 @@ import {
 import { collectQuota } from "../plugins/usage/src/quota";
 import { pluginRoot } from "../plugins/usage/src/source";
 import { gcPluginStateCache, PLUGIN_CACHE_RETENTION_SECONDS } from "../plugins/usage/src/state";
+import { herdrSocketEndpoint, testEnv } from "./helpers/test-env";
 
 const dirs: string[] = [];
 const savedEnv: Record<string, string | undefined> = {};
@@ -71,14 +72,7 @@ interface CliResult {
 }
 
 function baseEnv(extra?: Record<string, string>): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value === undefined) continue;
-    if (key.startsWith("HERDR_PLUGIN_") || key.startsWith("HERDR_USAGE_")) continue;
-    env[key] = value;
-  }
-  if (extra) Object.assign(env, extra);
-  return env;
+  return testEnv({ HERDR_SOCKET_PATH: path.join(tempDir(), "dead.sock"), ...extra });
 }
 
 function parseOut(stdout: string, stderr: string, status: number): CliResult {
@@ -358,7 +352,7 @@ async function fakeHerdr(): Promise<{ socketPath: string; close: () => Promise<v
   });
   await new Promise<void>((resolveListen, rejectListen) => {
     server.once("error", rejectListen);
-    server.listen(socketPath, () => resolveListen());
+    server.listen(herdrSocketEndpoint(socketPath), () => resolveListen());
   });
   return {
     socketPath,

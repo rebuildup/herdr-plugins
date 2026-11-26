@@ -50,6 +50,10 @@
       "name": "@herdr-plugins/inbox",
       "version": "0.1.0",
     },
+    "plugins/machines": {
+      "name": "@herdr-plugins/machines",
+      "version": "0.1.0",
+    },
     "plugins/mcp": {
       "name": "@herdr-plugins/mcp",
       "version": "0.1.0",
@@ -57,6 +61,10 @@
     "plugins/projects": {
       "name": "@herdr-plugins/projects",
       "version": "0.3.0",
+    },
+    "plugins/secrets": {
+      "name": "@herdr-plugins/secrets",
+      "version": "0.1.1",
     },
     "plugins/textgen": {
       "name": "@herdr-plugins/textgen",
@@ -106,9 +114,13 @@
 
     "@herdr-plugins/inbox": ["@herdr-plugins/inbox@workspace:plugins/inbox"],
 
+    "@herdr-plugins/machines": ["@herdr-plugins/machines@workspace:plugins/machines"],
+
     "@herdr-plugins/mcp": ["@herdr-plugins/mcp@workspace:plugins/mcp"],
 
     "@herdr-plugins/projects": ["@herdr-plugins/projects@workspace:plugins/projects"],
+
+    "@herdr-plugins/secrets": ["@herdr-plugins/secrets@workspace:plugins/secrets"],
 
     "@herdr-plugins/textgen": ["@herdr-plugins/textgen@workspace:plugins/textgen"],
 

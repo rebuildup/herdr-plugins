@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { ghChildEnv, sanitizedChildEnv } from "../packages/git-core/src/git-env";
 import { collectCommit, collectFiles, collectStatus, resolveRepo } from "../plugins/git/src/git";
+import { testEnv } from "./helpers/test-env";
 
 // ---------------------------------------------------------------------------
 // sanitizedChildEnv unit tests
@@ -168,7 +169,7 @@ function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string {
   const result = spawnSync("git", args, {
     cwd,
     encoding: "utf8",
-    env: env ?? process.env,
+    env: env ?? testEnv(),
   });
   if (result.status !== 0) {
     throw new Error(`git ${args.join(" ")}: ${result.stderr}`);

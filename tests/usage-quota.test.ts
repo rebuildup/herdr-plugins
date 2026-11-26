@@ -9,6 +9,7 @@ import {
   codexUsageToWindows,
   QUOTA_CACHE_TTL_SECONDS,
 } from "../plugins/usage/src/quota";
+import { testEnv } from "./helpers/test-env";
 
 const dirs: string[] = [];
 const savedEnv: Record<string, string | undefined> = {};
@@ -54,14 +55,7 @@ const CODEX_TOKEN = "codex-quota-test-access-token-51bd02";
 const CODEX_REFRESH = "codex-quota-test-refresh-token-DO-NOT-LEAK";
 
 function baseEnv(extra?: Record<string, string>): Record<string, string> {
-  const env: Record<string, string> = { HERDR_SOCKET_PATH: path.join(tempDir(), "dead.sock") };
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value === undefined) continue;
-    if (key.startsWith("HERDR_PLUGIN_") || key.startsWith("HERDR_USAGE_")) continue;
-    env[key] = value;
-  }
-  if (extra) Object.assign(env, extra);
-  return env;
+  return testEnv({ HERDR_SOCKET_PATH: path.join(tempDir(), "dead.sock"), ...extra });
 }
 
 interface CliResult {

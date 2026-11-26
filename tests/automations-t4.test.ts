@@ -25,6 +25,7 @@ import {
   recordPendingEvents,
 } from "../plugins/automations/src/registry";
 import { emptyRegistry, type SessionRegistry } from "../plugins/automations/src/state";
+import { herdrSocketEndpoint, testEnv } from "./helpers/test-env";
 
 const T0 = Date.parse("2026-01-01T00:00:00.000Z");
 const MIN = 60_000;
@@ -476,20 +477,7 @@ afterAll(() => {
 });
 
 function baseEnv(extra?: Record<string, string>): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value === undefined) continue;
-    if (
-      key.startsWith("HERDR_") &&
-      key !== "HERDR_PLUGIN_STATE_DIR" &&
-      key !== "HERDR_PLUGIN_CONFIG_DIR"
-    ) {
-      continue;
-    }
-    env[key] = value;
-  }
-  if (extra) Object.assign(env, extra);
-  return env;
+  return testEnv(extra);
 }
 
 function runHook(extraEnv: Record<string, string>) {
@@ -567,7 +555,7 @@ async function fakeHerdr(): Promise<FakeHerdr> {
   });
   await new Promise<void>((resolveListen, rejectListen) => {
     server.once("error", rejectListen);
-    server.listen(socketPath, () => resolveListen());
+    server.listen(herdrSocketEndpoint(socketPath), () => resolveListen());
   });
   return {
     socketPath,

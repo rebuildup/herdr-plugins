@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { parseUntilSpec } from "../plugins/inbox/src/cli";
+import { testEnv } from "./helpers/test-env";
 
 const NOW = new Date("2026-01-10T12:00:00Z");
 
@@ -28,15 +29,7 @@ describe("parseUntilSpec", () => {
 const INBOX_CLI = path.join(import.meta.dir, "..", "plugins", "inbox", "src", "cli.ts");
 
 function runCli(args: string[]): { status: number; code: string | undefined } {
-  const env = { ...process.env };
-  for (const key of [
-    "HERDR_PANE_ID",
-    "HERDR_PLUGIN_CONTEXT_JSON",
-    "HERDR_SOCKET_PATH",
-    "HERDR_SESSION",
-  ]) {
-    delete env[key];
-  }
+  const env = testEnv();
   const result = spawnSync(process.execPath, ["run", INBOX_CLI, ...args], {
     encoding: "utf8",
     env,

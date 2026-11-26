@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import http from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { testEnv } from "./helpers/test-env";
 
 const CLI = path.join(__dirname, "..", "plugins", "textgen", "src", "cli.ts");
 
@@ -42,16 +43,7 @@ interface CliResult {
 }
 
 function baseEnv(extra?: Record<string, string>): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value === undefined) continue;
-    if (key.startsWith("HERDR_PLUGIN_") || key === "HERDR_SOCKET_PATH" || key === "HERDR_SESSION") {
-      continue;
-    }
-    env[key] = value;
-  }
-  if (extra) Object.assign(env, extra);
-  return env;
+  return testEnv(extra);
 }
 
 function parseOut(stdout: string, stderr: string, status: number): CliResult {

@@ -10,6 +10,7 @@ import {
   T3_PROJECT_FILE_MAX_SCRIPTS,
   T3JsonError,
 } from "../plugins/projects/src/t3json";
+import { testEnv } from "./helpers/test-env";
 
 const dirs: string[] = [];
 const savedStateDir = process.env.HERDR_PLUGIN_STATE_DIR;
@@ -45,7 +46,7 @@ function writeT3(root: string, content: string | object): void {
 }
 
 function git(cwd: string, args: string[]): void {
-  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  const result = spawnSync("git", args, { cwd, encoding: "utf8", env: testEnv() });
   if (result.status !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
 }
 
@@ -265,7 +266,10 @@ interface CliResult {
 function runCli(args: string[]): CliResult {
   const result = spawnSync(process.execPath, [CLI, ...args], {
     encoding: "utf8",
-    env: { ...process.env },
+    env: testEnv({
+      HERDR_PLUGIN_STATE_DIR: process.env.HERDR_PLUGIN_STATE_DIR,
+      HERDR_PLUGIN_CONFIG_DIR: process.env.HERDR_PLUGIN_CONFIG_DIR,
+    }),
     timeout: 15_000,
   });
   let json: Record<string, unknown> | null = null;
