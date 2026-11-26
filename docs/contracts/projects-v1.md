@@ -667,7 +667,12 @@ no polling, no `events.subscribe` watch process (ADR-0002).
   `scripts stop`, `scripts results`, or `scripts logs` invocation
   evaluates pending marks — `list`, `capability`, and `help` never
   drain. `scripts tick` is the explicit entrypoint an external
-  scheduler/watch process can call.
+  scheduler/watch process can call. Because the drain can fire/stop
+  runs (herdr mutations), every surviving `worktree.created` mark
+  executes against the session socket RECORDED on the mark — an
+  explicit per-mark target, never the caller's ambient resolution —
+  and settle-side fires/stops additionally require a mutation-grade
+  invocation target (see "Execution-target gating" below).
 - **Repo resolution (no guessing):** each mark's `worktree_path` is
   resolved via `resolveRepo`; the repo group is identified by
   `git rev-parse --git-common-dir` (all linked worktrees of a repo
@@ -754,6 +759,22 @@ by inbox but ignored by projects).
 - **Idempotency:** a run record whose `trigger.transition_seq` equals
   the drained transition's `seq` means that transition already fired —
   reported `already_fired`, never re-fired.
+- **Execution-target gating (O2):** settle fires/stops are herdr
+  mutations, so they obey the same fail-closed target rule as
+  `scripts run|stop` (#83): the drain's read of the inbox transition
+  log may resolve the implicit default socket, but when no
+  mutation-grade target exists (no `--socket`/`--session` flag and no
+  consistent ambient `HERDR_SOCKET_PATH`/`HERDR_SESSION`), every
+  surviving settled transition is reported
+  `skipped[].reason:"target_required"` and the cursor does NOT advance
+  — a later properly-targeted invocation still drains them. This is
+  what keeps `scripts results|logs|tick` honest on read-ish surfaces:
+  they may only mutate against an explicitly resolved target, and only
+  for user-configured opt-in triggers (`runOnSettle`/`stopOnSettle`)
+  recorded in the transition log. `worktree.created` marks carry their
+  own recorded socket and need no caller-side gate. The MCP surface
+  stays consistent because it never exposes `scripts results|logs|tick`
+  (only `projects list`, which never drains).
 - **Drain report:** merged into the invoking command's payload as
   `triggers: {fired[], skipped[], stopped?, duplicates,
   pending_remaining, inbox_unavailable?, settle?, session_unreachable?}`
@@ -764,7 +785,8 @@ by inbox but ignored by projects).
   `settle_superseded`, `already_fired`, `cwd_unavailable`, `cwd_gone`,
   `repo_not_registered`, `ambiguous_project`, `no_run_on_settle_scripts`,
   `stop_script_resolution_failed`, `stop_failed`,
-  `session_unreachable`, `run_start_failed`, plus git-contract kinds.
+  `session_unreachable`, `run_start_failed`, `target_required`,
+  plus git-contract kinds.
 
 ## `scripts tick`
 

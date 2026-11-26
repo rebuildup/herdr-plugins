@@ -37,8 +37,10 @@ import {
   type CallOptions,
   HerdrRpcError,
   resolveSocketPath,
+  resolveTarget,
   sessionKeyFor,
   sessionSnapshot,
+  TargetResolutionError,
 } from "../../../packages/herdr-client/src/index";
 import {
   type InboxCliCallOptions,
@@ -738,15 +740,52 @@ export async function drainSettleTriggers(
     }
   }
 
+  // Execution-target gating (O2, #83 plumbing): settle fires/stops are
+  // herdr mutations, so they require a mutation-grade target — explicit
+  // --socket/--session or consistent ambient HERDR_* — the same rule as
+  // `scripts run|stop`. The transition-log READ above may legitimately
+  // resolve the implicit default socket, but when the drain would fall
+  // back to it, every surviving settled transition is reported
+  // `target_required` and the cursor does NOT advance, so a later
+  // properly-targeted invocation still drains them. (`worktree.created`
+  // marks need no gate: each mark records the emitting session's socket,
+  // which is itself the explicit execution target.)
+  const actionable = items.filter(
+    (t) =>
+      t.kind === "settled" &&
+      (supersedeSeq.get(t.pane_id) ?? 0) <= t.seq &&
+      !firedTransitionSeqs.has(t.seq),
+  );
+  let execSocketPath: string | undefined;
+  if (actionable.length > 0) {
+    try {
+      execSocketPath = resolveTarget({
+        session: options.session,
+        socketPath: options.socketPath,
+        mutation: true,
+      }).socketPath;
+    } catch (err) {
+      if (!(err instanceof TargetResolutionError)) throw err;
+      for (const t of actionable) {
+        settleSkip(report, t, "target_required", err.message);
+      }
+      report.cursor_after = cursorBefore;
+      return report;
+    }
+  }
+
   const deps: RunnerDeps = {
-    transport: herdrTransport(options),
+    // Mutations go to the gated execution socket resolved above (identical
+    // to `socketPath` whenever a mutation-grade target exists); when no
+    // settled transition can act, the transport target is irrelevant.
+    transport: herdrTransport({ ...options, socketPath: execSocketPath ?? socketPath }),
     waitTimeoutMs: config.waitTimeoutMs,
     logMaxBytes: config.logMaxBytes,
     stopGraceMs: config.stopGraceMs,
     // Settle fires/stops mutate the session resolved above (`socketPath`),
     // not necessarily the caller's ambient default — record that socket's
     // session discriminator so #66 ownership re-validation matches.
-    sessionKey: sessionKeyFor({ socketPath, mutation: true }),
+    sessionKey: sessionKeyFor({ socketPath: execSocketPath ?? socketPath, mutation: true }),
   };
 
   // stopOnSettle script resolution is cached per (worktree root,

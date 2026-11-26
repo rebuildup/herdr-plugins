@@ -294,6 +294,10 @@ opens panes or workspaces itself.
   ADR-0010 runner on the settled pane's worktree root;
   `stopOnSettle` stops only `running` runs on the SAME canonical
   worktree root whose re-resolved script carries the flag.
+  Drain-side fires/stops are herdr mutations: `worktree.created` marks
+  execute on their recorded session socket, and settle fires/stops
+  require a mutation-grade invocation target (#83 rule) — without one
+  they are reported `target_required` and the settle cursor holds.
 
 ## Non-goals
 

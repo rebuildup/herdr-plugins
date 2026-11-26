@@ -165,7 +165,13 @@ session snapshot; re-linking the same `kind+repo+number` re-stamps the
 identity fingerprint and is the explicit re-validation path. `--verify`
 additionally runs `gh <kind> view` as an opt-in existence check; any
 failure (offline, unauthenticated, not found) is reported in `warnings`
-and the link is still recorded.
+and the link is still recorded. The `gh` child runs under a sanitized
+environment (`ghChildEnv` from `packages/git-core`, shared with the git
+plugin): ambient `GH_DEBUG`/`GH_REPO`/`GH_FORCE_TTY` and repo-redirecting
+`GIT_*` variables are stripped so debug logs (which can carry auth
+headers) or env retargeting cannot reach the verify call, and gh's
+stderr is never copied into `warnings[]` verbatim — untrusted child
+output could otherwise smuggle credential markers into the result.
 
 Links follow the same identity discipline as organize marks **minus timed
 expiry**: they survive routine `state_change_seq` advances (status

@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -128,9 +128,23 @@ async function fakeHerdr(opts: {
   panes: SnapshotPane[];
   agents?: SnapshotAgent[];
   extraPanes?: SnapshotPane[];
+  /**
+   * Bind the socket at the XDG default location
+   * ($XDG_CONFIG_HOME/herdr/herdr.sock) so env-less CLI invocations
+   * resolve the implicit default session — required to exercise the
+   * settle-drain `target_required` gate (O2).
+   */
+  defaultSocket?: boolean;
 }): Promise<Fixture> {
   const socketDir = tempDir();
-  const socketPath = path.join(socketDir, "fake-herdr.sock");
+  const projStateDir = tempDir();
+  const projConfigDir = path.join(projStateDir, "config");
+  const xdgState = tempDir();
+  const xdgConfig = tempDir();
+  const socketPath = opts.defaultSocket
+    ? path.join(xdgConfig, "herdr", "herdr.sock")
+    : path.join(socketDir, "fake-herdr.sock");
+  if (opts.defaultSocket) mkdirSync(path.dirname(socketPath), { recursive: true });
   const panes = new Map<string, FakePane>();
   const createdCwds: (string | null)[] = [];
   const inputs: string[] = [];
@@ -325,10 +339,6 @@ async function fakeHerdr(opts: {
     server.listen(socketPath, () => resolveListen());
   });
 
-  const projStateDir = tempDir();
-  const projConfigDir = path.join(projStateDir, "config");
-  const xdgState = tempDir();
-  const xdgConfig = tempDir();
   const inboxStateDir = path.join(xdgState, "herdr", "plugins", "rebuildup.inbox");
   const inboxConfigDir = path.join(xdgConfig, "herdr", "plugins", "config", "rebuildup.inbox");
 
@@ -383,6 +393,21 @@ function inboxEnv(fx: Fixture): Record<string, string> {
     HERDR_SOCKET_PATH: fx.socketPath,
     HERDR_PLUGIN_STATE_DIR: fx.inboxStateDir,
     HERDR_PLUGIN_CONFIG_DIR: fx.inboxConfigDir,
+  });
+}
+
+/**
+ * projects env WITHOUT any HERDR_SOCKET_PATH/HERDR_SESSION — CLI
+ * invocations resolve the implicit default session socket (which, with
+ * XDG_CONFIG_HOME pinned, is the fixture's `defaultSocket` bind). Used
+ * to exercise the settle-drain `target_required` gate (O2).
+ */
+function projectsEnvNoTarget(fx: Fixture): Record<string, string> {
+  return stripHerdr({
+    XDG_STATE_HOME: fx.xdgState,
+    XDG_CONFIG_HOME: fx.xdgConfig,
+    HERDR_PLUGIN_STATE_DIR: fx.projStateDir,
+    HERDR_PLUGIN_CONFIG_DIR: fx.projConfigDir,
   });
 }
 
@@ -738,6 +763,73 @@ describe("settle triggers: runOnSettle / stopOnSettle (#182)", () => {
       expect(triggers.fired).toHaveLength(0);
       expect(triggers.skipped[0]?.reason).toBe("already_fired");
       expect(fx.createdCwds).toHaveLength(0);
+    } finally {
+      await fx.close();
+    }
+  }, 30_000);
+
+  test("settle drain without explicit/ambient target → target_required, cursor held (O2)", async () => {
+    const { repo, worktree } = repoWithWorktree([
+      { name: "on-settle", command: "echo settle-ran", runOnSettle: true },
+    ]);
+    // Fake herdr bound at the XDG default socket so env-less invocations
+    // resolve the implicit default session — the exact fallback the
+    // mutation gate must reject.
+    const fx = await fakeHerdr({
+      defaultSocket: true,
+      panes: [{ pane_id: "w1:p1", workspace_id: "w1", cwd: worktree }],
+      agents: [{ pane_id: "w1:p1", agent_status: "done", state_change_seq: 1, cwd: worktree }],
+    });
+    try {
+      const defaultSock = fx.socketPath;
+      // register is a mutation: give it an explicit ambient target.
+      const reg = await runProc(CLI, ["register", repo], {
+        ...projectsEnvNoTarget(fx),
+        HERDR_SOCKET_PATH: defaultSock,
+      });
+      expect(reg.status).toBe(0);
+
+      // Record the settle transition against the DEFAULT session: the
+      // inbox CLI gets the default socket path as an explicit env target,
+      // canonicalizing to the same session_key an env-less resolution
+      // yields for the drain's read side.
+      const settle = await runProc(INBOX_CLI, ["settle", "w1:p1"], {
+        ...projectsEnvNoTarget(fx),
+        HERDR_SOCKET_PATH: defaultSock,
+        HERDR_PLUGIN_STATE_DIR: fx.inboxStateDir,
+        HERDR_PLUGIN_CONFIG_DIR: fx.inboxConfigDir,
+      });
+      expect(settle.status).toBe(0);
+
+      // Env-less `scripts results` — a read-ish command that lazily
+      // drains: the transition-log READ resolves the implicit default
+      // socket fine, but the settle fire is a herdr mutation, so it is
+      // reported target_required, the cursor holds, and nothing executes.
+      const results = await runProc(CLI, ["scripts", "results"], projectsEnvNoTarget(fx));
+      expect(results.status).toBe(0);
+      const triggers = results.json?.triggers as {
+        fired: unknown[];
+        skipped: Array<{ reason: string; transition_seq?: number }>;
+        settle?: { cursor_before: number; cursor_after: number };
+      };
+      expect(triggers.fired).toHaveLength(0);
+      expect(triggers.skipped.map((s) => s.reason)).toEqual(["target_required"]);
+      expect(triggers.skipped[0]?.transition_seq).toBe(1);
+      expect(triggers.settle?.cursor_before).toBe(0);
+      expect(triggers.settle?.cursor_after).toBe(0);
+      expect(fx.createdCwds).toHaveLength(0);
+      expect(fx.inputs).toHaveLength(0);
+
+      // A later explicitly-targeted invocation still drains the held cursor.
+      const tick = await runProc(
+        CLI,
+        ["scripts", "tick", "--socket", defaultSock],
+        projectsEnvNoTarget(fx),
+      );
+      expect(tick.status).toBe(0);
+      const fired = tick.json?.triggers as { fired: Array<Record<string, unknown>> };
+      expect(fired.fired).toHaveLength(1);
+      expect(fx.createdCwds).toEqual([worktree]);
     } finally {
       await fx.close();
     }
