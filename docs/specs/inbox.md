@@ -131,7 +131,9 @@ event-derived facts, and carry no tracker metadata beyond the ref.
 
 Links are explicit-only: there is no webhook or forge-event ingestion
 (webhook delivery is an upstream gap, ADR-0026). `--verify` optionally runs
-`gh <kind> view` at link time; any failure is a `warnings` entry and the
+`gh <kind> view` at link time under a sanitized child env
+(`ghChildEnv`: `GH_DEBUG`/`GH_REPO`/`GIT_*` redirects stripped) with
+stderr never echoed into `warnings`; any failure is a `warnings` entry and the
 link is still recorded — verification never blocks an explicit user
 declaration. PR-update-driven attention return is implemented by the
 opt-in `watch-pr` command (see "PR update watcher" below, #178).

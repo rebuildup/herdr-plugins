@@ -16,6 +16,7 @@
 import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { ghChildEnv } from "../../../packages/git-core/src/git-env";
 import {
   type AmbientIdentity,
   ambientIdentity,
@@ -797,6 +798,14 @@ const GH_VERIFY_TIMEOUT_MS = 15_000;
  * Opt-in existence check via `gh`. Any failure (missing gh, auth, offline,
  * timeout, not found) is a warning — the user-declared link is still
  * recorded, per docs/specs/inbox.md (no event-driven auto-linking).
+ *
+ * Env hygiene (#216): the child gets `ghChildEnv` (git-core, shared with
+ * the git plugin) — ambient `GH_DEBUG`/`GH_REPO`/`GH_FORCE_TTY` and every
+ * repo-redirecting `GIT_*` are stripped so debug logs (which can carry
+ * auth headers) or env retargeting can never reach the verify call.
+ * gh's stderr is untrusted child output and is never copied into
+ * `warnings[]` verbatim — a fake/malicious `gh` on PATH could otherwise
+ * smuggle credential markers into the JSON result.
  */
 async function verifyTrackerRef(
   kind: LinkKind,
@@ -808,7 +817,9 @@ async function verifyTrackerRef(
     let proc: ReturnType<typeof spawn>;
     try {
       proc = spawn("gh", [kind, "view", String(number), "--repo", repo, "--json", "number"], {
-        stdio: ["ignore", "ignore", "pipe"],
+        env: ghChildEnv(),
+        stdio: ["ignore", "ignore", "ignore"],
+        windowsHide: true,
       });
     } catch (err) {
       resolve(`link verification unavailable (gh spawn failed): ${String(err)}; recorded anyway`);
@@ -829,10 +840,6 @@ async function verifyTrackerRef(
       }
       done(`link verification timed out for ${ref}; recorded without verification`);
     }, GH_VERIFY_TIMEOUT_MS);
-    let stderr = "";
-    proc.stderr?.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString("utf8");
-    });
     proc.on("error", (err) => {
       clearTimeout(timer);
       done(`link verification unavailable: ${String(err)}; recorded anyway`);
@@ -842,10 +849,7 @@ async function verifyTrackerRef(
       if (code === 0) {
         done(null);
       } else {
-        const detail = stderr.trim().slice(0, 200);
-        done(
-          `link verification failed for ${ref} (gh exit ${code}${detail ? `: ${detail}` : ""}); recorded anyway`,
-        );
+        done(`link verification failed for ${ref} (gh exit ${code}); recorded anyway`);
       }
     });
   });

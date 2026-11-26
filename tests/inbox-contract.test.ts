@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -484,5 +484,75 @@ describe("inbox contract v1 (filters and tracker links)", () => {
     const unique = [...new Set(herdr.methods)];
     // No pane.report_metadata (links have no tokens), no execution surfaces.
     expect(unique).toEqual(["session.snapshot"]);
+  });
+
+  test("link --verify sanitizes gh env and never echoes gh stderr (#216)", async () => {
+    // The fake `gh` is a POSIX sh script; skip where it cannot run.
+    if (process.platform === "win32") return;
+    const ghBin = mkdtempSync(path.join(tmpdir(), "inbox-fake-gh-"));
+    try {
+      const ghPath = path.join(ghBin, "gh");
+      writeFileSync(
+        ghPath,
+        [
+          "#!/bin/sh",
+          // Unset vars expand to empty under plain sh (no `set -u`), so
+          // `[ -n "$VAR" ]` doubles as an unset check — and keeps the
+          // script free of `${}` for the linter.
+          'if [ -n "$GH_DEBUG" ] || [ -n "$GH_REPO" ] || [ -n "$GH_FORCE_TTY" ] || [ -n "$GIT_DIR" ] || [ -n "$GIT_CONFIG_COUNT" ] || [ -n "$GIT_CONFIG_PARAMETERS" ]; then',
+          '  echo "env-leak-marker" >&2',
+          "  exit 1",
+          "fi",
+          'if [ "$FAKE_GH_FAIL" = "1" ]; then',
+          '  echo "credential-marker-9f8e7d6c" >&2',
+          "  exit 1",
+          "fi",
+          "exit 0",
+          "",
+        ].join("\n"),
+      );
+      chmodSync(ghPath, 0o755);
+
+      // Ambient poison vars that ghChildEnv must strip before spawn.
+      const verifyEnv: Record<string, string> = {
+        ...env,
+        PATH: `${ghBin}${path.delimiter}${env.PATH ?? ""}`,
+        GH_DEBUG: "api",
+        GH_REPO: "evil/repo",
+        GH_FORCE_TTY: "1",
+        GIT_DIR: "/tmp/poison-git-dir",
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_PARAMETERS: "'core.sshCommand=evil'",
+      };
+      const runVerify = (extra: Record<string, string>) =>
+        runCli(
+          ["link", "w1:p1", "--pr", "owner/repo#216", "--verify", "--socket", herdr.socketPath],
+          { ...verifyEnv, ...extra },
+        );
+
+      // Sanitized env: the fake gh sees none of the poison vars → exit 0
+      // → verification succeeds with no warning. If any var leaked, the
+      // stub exits 1 and a warning appears.
+      const ok = await runVerify({});
+      expect(ok.status).toBe(0);
+      expect(ok.json?.warnings).toEqual([]);
+      expect((ok.json?.links as unknown[]).length).toBeGreaterThan(0);
+
+      // Failing gh: its stderr carries a credential marker that must
+      // never reach warnings[] (or anywhere in the JSON payload).
+      const bad = await runVerify({ FAKE_GH_FAIL: "1" });
+      expect(bad.status).toBe(0);
+      const warnings = bad.json?.warnings as string[];
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain("link verification failed");
+      expect(JSON.stringify(bad.json)).not.toContain("credential-marker");
+      expect(JSON.stringify(bad.json)).not.toContain("env-leak-marker");
+      // The link is still recorded — verification never blocks.
+      expect((bad.json?.links as unknown[]).length).toBeGreaterThan(0);
+
+      await cli(["unlink", "w1:p1", "--pr", "owner/repo#216"]);
+    } finally {
+      rmSync(ghBin, { recursive: true, force: true });
+    }
   });
 });
