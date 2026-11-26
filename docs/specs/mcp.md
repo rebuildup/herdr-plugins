@@ -2,7 +2,7 @@
 
 Scope: local stdio MCP server exposing herdr sessions and sibling
 plugin contracts to outside agents. Contract:
-`herdr-plugins.mcp/v1` (**draft — read + mutation surfaces stable**;
+`herdr-plugins.mcp/v1` (**stable** — read + mutation + events surfaces;
 `docs/contracts/mcp-v1.md`). Boundary ADR: ADR-0025. Upstream
 inventory: `docs/research/mcp-upstream-inventory.md`. Decomposition of
 #30: T1 boundary/contract (#135), T2 stdio core + read tools (#138),
@@ -60,6 +60,26 @@ applied to reused pane ids. See contract "Session resolution".
 | `serve` | no | Stdio MCP server (T2, #138): newline-delimited JSON-RPC `initialize`/`ping`/`tools/list`/`tools/call`/`resources/*`; stdout protocol-only, stderr diagnostics; exits on stdin EOF. |
 | `help` | no | Usage text. |
 
+## Event surface (T4, #140)
+
+`events_subscribe`/`events_poll`/`events_wait`/`events_unsubscribe`
+expose herdr `events.subscribe` as in-process tool subscriptions —
+the contract's tool-polling alternative to MCP notifications (the
+stdio server is per-client; there is no push channel to anchor
+notifications to). Pane-parameterized upstream types
+(`pane.agent_status_changed`, `pane.output_matched`,
+`pane.scroll_changed` — upstream requires `pane_id`) are expanded
+across the resolved pane set and re-resolved on every reconnect.
+Filters (`pane_id`/`workspace_id`/`agent_status`/`agent`) apply
+client-side on event `data`; missing fields never match. Every socket
+drop yields a `gap` notice (`stream_closed`/`events_lost`/
+`socket_unreachable`/`subscribe_failed`/`target_gone`/
+`buffer_overflow`) followed by a `resync` notice carrying a fresh
+`session.snapshot` baseline on the next successful resubscribe —
+missed events are reported as missed, never reconstructed or faked.
+Subscriptions are read-level at every access tier and die with the
+client process.
+
 ## Honest-failure rules (inherited invariants)
 
 - Unsupported/disconnected/uninstalled/stale is never reported as
@@ -87,5 +107,8 @@ applied to reused pane ids. See contract "Session resolution".
   fake herdr socket + real `rebuildup.controls` / fake
   `rebuildup.handoff` CLIs; isolated-session live check of
   prompt→wait→read recorded for T4.
-- T4: filter/reconnect/resync tests + live verification record in
+- T4 (#140): filter/reconnect/resync/gap contract tests in
+  `tests/mcp-events.test.ts` (fake stateful herdr socket with real
+  `events.subscribe` streams, drops, and `events_lost` frames) +
+  isolated-session live verification recorded in
   `docs/research/mcp-v1-live-verification.md`.

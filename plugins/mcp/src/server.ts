@@ -231,6 +231,9 @@ export async function serveMcp(options: ServeOptions): Promise<void> {
   await new Promise<void>((resolveClose) => {
     rl.on("close", resolveClose);
   });
+  // Close event subscriptions so their sockets don't keep the process
+  // alive after the MCP client disconnects (T4, #140).
+  ctx.events.closeAll();
   await Promise.allSettled(pending);
   log("serve stop: stdin closed");
 }

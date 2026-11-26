@@ -1,7 +1,7 @@
 # rebuildup.mcp
 
-Outside-agent MCP surface for herdr (issue #138; parent #30
-`mcp-outside-agents`, release-0-7-0 T2 — read surface).
+Outside-agent MCP surface for herdr (parent #30
+`mcp-outside-agents`, release-0-7-0 — all surfaces stable).
 
 A **local stdio MCP server** that exposes herdr sessions and sibling
 plugin contracts to agents herdr did not start — terminal
@@ -12,11 +12,14 @@ ADR-0025; the canonized upstream inventory is
 
 ## Status
 
-T1 (#135) shipped the contract skeleton; **T2 (#138) implements the
-stdio server core and the read tool surface** (contract
-`herdr-plugins.mcp/v1`, read surface **stable**). Mutations land in
-T3 (#139), events in T4 (#140); planned tools are listed but fail
-honestly with `unsupported`/`capability_denied`.
+**Contract `herdr-plugins.mcp/v1` is stable.** T1 (#135) fixed the
+boundary (ADR-0025); T2 (#138) implemented the stdio server core and
+read tools; T3 (#139) the mutation tools + access-level enforcement;
+T4 (#140) the event surface (`events_subscribe`/`events_poll`/
+`events_wait`/`events_unsubscribe` — in-process subscriptions over
+herdr `events.subscribe` with pane/workspace/status filters,
+auto-resubscribe, and structured `gap`/`resync` notices; see
+`docs/contracts/mcp-v1.md` "Events").
 
 ## MCP client config
 
