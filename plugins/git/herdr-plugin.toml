@@ -1,12 +1,35 @@
 id = "rebuildup.git"
 name = "Git"
-version = "0.6.0"
+version = "0.7.0"
 min_herdr_version = "0.9.0"
 description = "Git status/diff for agent panes: branch, change counts, per-file changes, bounded patches, and pane metadata projection."
 platforms = ["linux", "macos", "windows"]
 
 # No build step: the plugin is dependency-free TypeScript executed by Bun
 # (runtime prerequisite, see plugins/git/README.md).
+
+# Interactive TUI surface (#239, contract docs/contracts/tui-v1.md,
+# ADR-0031/0032/0033): one tab-placed pane entrypoint plus an
+# `open-forge` action that pins the origin context and calls
+# `plugin.pane.open`. The UI consumes this plugin's own CLI for every
+# read/mutation, so the public contract stays the single source of
+# truth; mutations are confirm-gated against `capability`/
+# `mutation_commands` and re-validated before they run.
+
+[[panes]]
+id = "forge"
+title = "Git: forge"
+description = "GitHub PR/issue browser: open PRs, branch status, issue lists, detail views with comments/reviews/checks/logs, and confirm-gated review/comment/merge/issue mutations."
+platforms = ["linux", "macos", "windows"]
+placement = "tab"
+command = ["bun", "run", "src/tui-forge.ts", "main"]
+
+[[actions]]
+id = "open-forge"
+title = "Git: open forge UI"
+description = "Open the GitHub PR/issue forge TUI in a new tab."
+contexts = ["pane", "workspace"]
+command = ["bun", "run", "src/tui-forge.ts", "open"]
 
 [[actions]]
 id = "status"

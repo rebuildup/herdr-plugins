@@ -536,8 +536,8 @@
           "mutating": true,
           "class": "mutation",
           "cli": "implemented",
-          "tui_action": "none",
-          "interactive_tui": "planned:#230",
+          "tui_action": "declared:open-forge",
+          "interactive_tui": "implemented:#239",
           "gui": "consumer:herdr-t3 (#7)",
           "real_machine_evidence": [
             "docs/research/git-pr-read-verification.md",
@@ -546,15 +546,15 @@
             "docs/research/git-issue-verification.md"
           ],
           "upstream_gap": null,
-          "notes": "forge read+write (list/view/create/review/comment/merge) — merge has release-train guard"
+          "notes": "forge TUI pane 'forge': list/status/view + comments/reviews/checks/logs reads, confirm-gated create/review/comment/reply/reviewers/merge with fresh --expect-head revalidation; merge keeps release-train guard; repo-status TUI still planned:#230"
         },
         {
           "command": "issue",
           "mutating": true,
           "class": "mutation",
           "cli": "implemented",
-          "tui_action": "none",
-          "interactive_tui": "planned:#230",
+          "tui_action": "declared:open-forge",
+          "interactive_tui": "implemented:#239",
           "gui": "consumer:herdr-t3 (#7)",
           "real_machine_evidence": [
             "docs/research/git-pr-read-verification.md",
@@ -563,7 +563,7 @@
             "docs/research/git-issue-verification.md"
           ],
           "upstream_gap": null,
-          "notes": "forge issue read+write"
+          "notes": "forge TUI pane 'forge': list/view + confirm-gated create/edit/comment/close-reopen with updated_at drift revalidation (no head sha analog); pane link/unlink/links stay CLI-only"
         },
         {
           "command": "project",
