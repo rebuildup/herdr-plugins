@@ -8,6 +8,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { sanitizedChildEnv } from "./git-env";
 
 export type GitErrorKind = "git_missing" | "timeout" | "git_error" | "not_a_repo" | "bare_repo";
 
@@ -43,12 +44,15 @@ export function runGit(
   return new Promise((resolve, reject) => {
     const child = spawn("git", args, {
       cwd,
-      env: {
-        ...process.env,
+      // Sanitized env (git-env.ts): ambient GIT_DIR/GIT_INDEX_FILE/
+      // GIT_CONFIG_* etc. cannot retarget the pane's repository; the pins
+      // below are applied after stripping and are the only GIT_* values
+      // the child sees.
+      env: sanitizedChildEnv({
         GIT_TERMINAL_PROMPT: "0",
         GIT_OPTIONAL_LOCKS: "0",
         LC_ALL: "C",
-      },
+      }),
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
     });
@@ -781,12 +785,11 @@ export async function collectDiff(
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const child = spawn("git", args, {
       cwd: repoRoot,
-      env: {
-        ...process.env,
+      env: sanitizedChildEnv({
         GIT_TERMINAL_PROMPT: "0",
         GIT_OPTIONAL_LOCKS: "0",
         LC_ALL: "C",
-      },
+      }),
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
     });

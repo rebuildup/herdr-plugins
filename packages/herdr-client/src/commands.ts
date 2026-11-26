@@ -4,17 +4,27 @@
  */
 
 import type { AgentInfo, AgentListResult, SessionSnapshot } from "./snapshot";
-import { type RequestOptions, request, resolveSocketPath, subscribe } from "./socket";
+import { type RequestOptions, request, resolveTarget, subscribe } from "./socket";
 
 export interface CallOptions extends RequestOptions {
-  /** Named herdr session; overrides HERDR_SESSION. */
+  /** Named herdr session; explicit flag, beats ambient HERDR_SESSION/HERDR_SOCKET_PATH. */
   session?: string | undefined;
-  /** Explicit socket path; overrides session resolution. */
+  /** Explicit socket path; beats ambient HERDR_SOCKET_PATH/HERDR_SESSION. */
   socketPath?: string | undefined;
+  /**
+   * Mutating operation: target resolution fails closed with
+   * `target_required` when it would fall back to the implicit default
+   * session socket (no explicit flag and no ambient HERDR_* target).
+   */
+  mutation?: boolean | undefined;
 }
 
 function socketFor(options: CallOptions): string {
-  return options.socketPath ?? resolveSocketPath({ session: options.session });
+  return resolveTarget({
+    session: options.session,
+    socketPath: options.socketPath,
+    mutation: options.mutation,
+  }).socketPath;
 }
 
 export async function sessionSnapshot(options: CallOptions = {}): Promise<SessionSnapshot> {
