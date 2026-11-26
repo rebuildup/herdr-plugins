@@ -180,10 +180,10 @@
         "packages/source-control-cursor-origin/"
       ],
       "classification": "unimplemented",
-      "issues": [25],
+      "issues": [25, 175, 191, 192, 193],
       "depends_on": ["forge-github"],
       "acceptance": "上流対応 Forge ごとに利用価値を棚卸しし、段階導入。Issue 検索/作成/編集/コメント/close・PR レビュー/行コメント/CI 状態/マージを対象。",
-      "verification": "未着手。v0.2.0 は GitHub 基盤 (#39) のみ。後続 train で Forge 別に分解。"
+      "verification": "棚卸し実施済み (Issue #175 → docs/research/forge-non-github-survey.md、t3code @ 9cc4018c 照合)。判定: GitLab=implement、Forgejo/Gitea=implement (fj/tea CLI)、Azure DevOps=implement (低優先、comment/review 面が薄い)、Bitbucket=defer (CLI なし・REST のみで credential boundary ADR が前提)、GitCafe=not-worth-it (単一 vendor host・issue/line comment なし)、Cursor Origin=not-worth-it (vendor 固有 forge・最小 API)。implement 判定の 3 provider は follow-up issue を #25 コメント経由で起票。契約設計論点 (provider 中立命名・capability 広告・v1 additive 方針) は survey §Contract-design notes に記録。"
     },
     {
       "id": "projects-multi-repo",
