@@ -25,7 +25,7 @@ bun run src/cli.ts update <id> [--title T] [--pinned|--unpinned]
 bun run src/cli.ts archive|unarchive|pin|unpin <id>
 bun run src/cli.ts settings get|set|unset <id> [key] [value]
 bun run src/cli.ts scripts list <project|repo> [--repo PATH]
-bun run src/cli.ts scripts run <project> <name> [--repo PATH]
+bun run src/cli.ts scripts run <project> <name> [--repo PATH] [--shell auto|sh|cmd|powershell]
 bun run src/cli.ts scripts stop <run-id|project>
 bun run src/cli.ts scripts results [project]
 bun run src/cli.ts scripts logs <run-id>
@@ -39,7 +39,10 @@ actions). `scripts list` resolves project script definitions from
 in a dedicated herdr pane with a structured completion marker
 (exit 0/1/timeout/stopped/unknown — never fabricated), `scripts stop`
 interrupts the recorded pane, and `scripts results`/`logs` expose the
-run records. Multi-repo projects require `--repo` for `run`. Script
+run records. The pane's shell family (POSIX sh / cmd.exe / PowerShell)
+is auto-detected via `pane.process_info` with a host-OS fallback, or
+forced with `--shell`; each family gets its own exit-code marker
+(`#67`). Multi-repo projects require `--repo` for `run`. Script
 commands are trusted repo content executed with user privileges.
 Auto triggers (`runOnWorktreeCreate`/`runOnSettle`/`stopOnSettle`) are
 not implemented — upstream event gap, see docs/specs/projects.md.

@@ -24,11 +24,24 @@ describe("session namespacing", () => {
   });
 
   test("sessionKeyFor is stable per socket and differs across sessions", () => {
-    const a1 = sessionKeyFor({ socketPath: "/tmp/nonexistent-a/herdr.sock" });
-    const a2 = sessionKeyFor({ socketPath: "/tmp/nonexistent-a/herdr.sock" });
-    const b = sessionKeyFor({ socketPath: "/tmp/nonexistent-b/herdr.sock" });
-    expect(a1).toBe(a2);
-    expect(a1).not.toBe(b);
-    expect(a1).toContain("herdr.sock");
+    // sessionKeyFor resolves through resolveTarget, which fails closed on
+    // contradictions with ambient HERDR_* env — clear it for a hermetic test.
+    const savedSocket = process.env.HERDR_SOCKET_PATH;
+    const savedSession = process.env.HERDR_SESSION;
+    delete process.env.HERDR_SOCKET_PATH;
+    delete process.env.HERDR_SESSION;
+    try {
+      const a1 = sessionKeyFor({ socketPath: "/tmp/nonexistent-a/herdr.sock" });
+      const a2 = sessionKeyFor({ socketPath: "/tmp/nonexistent-a/herdr.sock" });
+      const b = sessionKeyFor({ socketPath: "/tmp/nonexistent-b/herdr.sock" });
+      expect(a1).toBe(a2);
+      expect(a1).not.toBe(b);
+      expect(a1).toContain("herdr.sock");
+    } finally {
+      if (savedSocket === undefined) delete process.env.HERDR_SOCKET_PATH;
+      else process.env.HERDR_SOCKET_PATH = savedSocket;
+      if (savedSession === undefined) delete process.env.HERDR_SESSION;
+      else process.env.HERDR_SESSION = savedSession;
+    }
   });
 });

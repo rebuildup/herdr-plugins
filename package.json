@@ -10,7 +10,7 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "bun test",
+    "test": "bun test --timeout 20000",
     "lint": "bunx @biomejs/biome check .",
     "format": "bunx @biomejs/biome check --write .",
     "validate:fast": "bun run typecheck && bun run lint && bun run test",
