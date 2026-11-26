@@ -16,8 +16,8 @@ implement against is [`docs/contracts/tui-v1.md`](../contracts/tui-v1.md).
 | field | meaning |
 | --- | --- |
 | `cli` | `implemented` — contract-covered CLI command exists |
-| `tui_action` | `declared:<id>` — a manifest `[[actions]]` entry exists today (inbox ×8, git ×6 incl. `open`, checkpoints ×1); `none` — no action yet |
-| `interactive_tui` | `implemented` — covered by a shipped TUI surface (Git UI pane, #238); `planned:#NNN` — scheduled in that implementation ticket (#230 Inbox, #231 Projects/Scripts/Checkpoints/Automations, #232 Conversations/Usage/Controls/Handoff/TextGen, #233 Artifacts/Secrets/Machines/MCP diagnostics, #239 Git forge); `n/a` — daemon-, agent-, or diagnostic-only surface with no interactive TUI planned |
+| `tui_action` | `declared:<id>` — a manifest `[[actions]]` entry exists today (inbox ×8, git ×6 incl. `open`, checkpoints ×1, projects ×1); `none` — no action yet |
+| `interactive_tui` | `planned:#NNN` — scheduled in that implementation ticket (#230 Inbox, #231 Scripts/Checkpoints/Automations, #232 Conversations/Usage/Controls/Handoff/TextGen, #233 Artifacts/Secrets/Machines/MCP diagnostics, #239 Git forge); `implemented:#NNN` — shipped in that ticket (#238 Git, #240 Projects); `n/a` — daemon-, agent-, or diagnostic-only surface with no interactive TUI planned |
 | `gui` | GUI is owned by herdr-t3 (#7). This repo records consumption intent only — **GUI-done never implies TUI-done** |
 | `real_machine_evidence` | `docs/research/` paths recording live verification; absence means no recorded real-machine run, not necessarily untested |
 | `upstream_gap` | non-null = blocked on herdr/T3Code upstream; never worked around by PTY guessing |
@@ -28,7 +28,7 @@ implement against is [`docs/contracts/tui-v1.md`](../contracts/tui-v1.md).
 | --- | --- | --- | --- | --- | --- |
 | rebuildup.inbox | inbox/v1 stable | #230 | 17 | 8 | inbox browser + organize verbs + links/transitions |
 | rebuildup.git (+forge) | git/v1 stable | #230 | 17 | 6 | status/files/diff/log/compare browser + stage/commit/branch/push **implemented (#238)**; PR/issue workflows planned #239 |
-| rebuildup.projects | projects/v1 stable | #231 | 13 | 0 | project registry + repos membership + settings + scripts |
+| rebuildup.projects | projects/v1 stable | #231 | 13 | 1 (`open`) | implemented #240 — registry browser + repos membership + settings + scripts/run/stop + worktree info |
 | rebuildup.checkpoints | checkpoints/v1 stable | #231 | 12 | 1 | list/show/diff/plan + guarded restore/delete/gc |
 | rebuildup.automations | automations/v1 stable | #231 | 14 | 0 | task CRUD + schedule + runs + driver diagnostics |
 | rebuildup.conversations | conversations/v1 stable | #232 | 8 | 0 | session/history/search/show browser + usage summary |

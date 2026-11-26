@@ -284,6 +284,15 @@ export class TuiApp {
     this.setStatus("");
   }
 
+  /**
+   * Schedule a repaint on the next frame. Views call this after async
+   * state changes (loads, task completions) that did not originate in
+   * a key event.
+   */
+  invalidate(): void {
+    this.requestRender();
+  }
+
   // --- internals ---------------------------------------------------------------------
 
   private collectKeymap(): KeyBinding[] {

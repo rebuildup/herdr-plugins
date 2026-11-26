@@ -71,3 +71,45 @@ lifecycle). Unreachable herdr degrades to `worktrees: null` +
 
 Full contract: `docs/contracts/projects-v1.md`. Spec: `docs/specs/projects.md`.
 Design: ADR-0009 (registry), ADR-0010 (script execution).
+
+## Interactive TUI (#240)
+
+The plugin ships a tab-placed pane entrypoint plus an `open` action
+(`herdr-plugins.tui/v1`; ADR-0031/0032/0033):
+
+```toml
+# herdr-plugin.toml (already declared)
+[[panes]] id = "main"  placement = "tab"  command = ["bun","run","src/tui.ts","main"]
+[[actions]] id = "open" contexts = ["pane","workspace"]  command = ["bun","run","src/tui.ts","open"]
+```
+
+- `open` pins the origin context (workspace/tab/focused pane/cwd) once
+  and calls `plugin.pane.open` with `placement = "tab"`, forwarding the
+  pins as `HERDR_TUI_*` env vars. `HERDR_PANE_ID` inside the UI is the
+  UI pane's own surface identity — never a mutation target.
+- The UI consumes this plugin's own CLI (`src/cli.ts`) for every read
+  and mutation, so the public contract stays the single source of
+  truth and CLI/MCP/GUI behavior cannot drift. Opening performs reads
+  only — no lazy trigger drain runs implicitly.
+- Surfaces: project list/search (`/` filter), register (path + optional
+  title) and discover-from-session flows, per-project detail with live
+  `repos list` (branch/dirty/worktrees incl. pane-addressed git
+  pointers), repo membership add/remove, settings get/set/unset over
+  the allow-listed keys, and scripts list/run/results/stop.
+- Every mutation is confirm-gated (exact target + consequence, Esc
+  cancels), checked against `capability`/`mutation_commands` (fail
+  closed when unavailable), and re-validates the project via `show`
+  immediately before writing — a vanished project aborts `stale`, a
+  changed `updated_at` asks before applying.
+- Non-TTY stdin degrades to a plain-text project list; the non-
+  interactive CLI is unchanged.
+
+Opt-in keybind (user-owned; plugins never write herdr config):
+
+```toml
+[[keys.command]]
+key = "prefix+P"
+type = "plugin_action"
+command = "rebuildup.projects.open"
+description = "open projects TUI"
+```
