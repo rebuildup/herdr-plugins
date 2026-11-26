@@ -40,8 +40,9 @@ An external client resolves the CLI as follows:
 {
   "contract": "herdr-plugins.handoff/v1",
   "plugin": "rebuildup.handoff",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "commands": ["create", "list", "status", "execute", "resume-info", "remote-probe", "delegate", "merge-back", "capability"],
+  "mutation_commands": ["create", "status", "execute", "delegate", "merge-back"],
   "actions": [],
   "events": [],
   "startup": [],
@@ -79,6 +80,13 @@ the `herdr --machine <label-or-id>` CLI bridge (SSH → remote
 `remote-api-bridge`) for remote; the plugin never owns a PTY and never
 invokes the Agent Router launcher. `execution: "not_implemented"` (T1)
 meant records were intent-only.
+
+`mutation_commands` (added in plugin v0.7.0, #224 — additive) lists
+the commands that persist handoff records or drive herdr mutations:
+`create`, `execute`, `delegate`, `merge-back`, and `status` (`status`
+is included because it lazily reconciles `delivered`→`done` and
+writes the record back to plugin state). `list`, `resume-info`,
+`remote-probe`, and `capability` are read-only.
 
 ## Target selection (Host / Session)
 
@@ -618,7 +626,7 @@ calls described above, and only after the gate passes.
 
 `contract` is `herdr-plugins.handoff/vN`. Additive optional fields may
 appear within v1; breaking changes bump the version. `capability` exposes
-`commands`/`execution`/`limits` for feature detection.
+`commands`/`mutation_commands`/`execution`/`limits` for feature detection.
 
 **v1 is stable** as of plugin v0.6.0 (release-0-6-0 train, issue #106):
 the record schema, status lifecycle, payload ref kinds (including

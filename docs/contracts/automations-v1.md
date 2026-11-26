@@ -29,8 +29,15 @@ Installed via `herdr plugin install rebuildup/herdr-plugins/plugins/automations`
 (pre-release: `--ref release-0-7-0` or a commit SHA; dev: `herdr plugin
 link <repo>/plugins/automations`). Run `<plugin_root>/src/cli.ts` with
 `bun run`; `capability` returns the discovery document
-(`contract`, `plugin`, `version`, `commands`, `state_file`, …) in the
-same shape as `herdr-plugins.inbox/v1`.
+(`contract`, `plugin`, `version`, `commands`, `mutation_commands`,
+`state_file`, …) in the same shape as `herdr-plugins.inbox/v1`.
+`mutation_commands` (added in plugin v0.8.0, #224 — additive) lists
+the commands that write plugin state or drive herdr/external
+mutations: `create`, `update`, `set-enabled`, `delete`, `run-now`,
+`reconcile`, `fire`, `tick`, `watch`, and `schedule
+install|uninstall|status` (each `schedule` subcommand records a
+driver record, so all three are listed). Read-only commands are
+`capability`, `list`, `get`, and `runs`.
 
 Global flags: `--session NAME`, `--socket PATH`, `--timeout MS`.
 Success = one JSON document on stdout; failure = one JSON error object

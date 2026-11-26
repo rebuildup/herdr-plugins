@@ -74,7 +74,7 @@ import {
 } from "./state";
 
 export { CONTRACT, PLUGIN_ID };
-export const PLUGIN_VERSION = "0.7.0";
+export const PLUGIN_VERSION = "0.8.0";
 
 export interface CapabilityDocument {
   contract: string;
@@ -82,6 +82,8 @@ export interface CapabilityDocument {
   version: string;
   contract_status: "stable";
   commands: string[];
+  /** Commands that write plugin state or drive herdr/external mutations (#224). */
+  mutation_commands: string[];
   planned_commands: string[];
   schedules: string[];
   reserved_schedules: string[];
@@ -113,6 +115,20 @@ export function capabilityDocument(): CapabilityDocument {
       "tick",
       "watch",
       "schedule",
+    ],
+    mutation_commands: [
+      "create",
+      "update",
+      "set-enabled",
+      "delete",
+      "run-now",
+      "reconcile",
+      "fire",
+      "tick",
+      "watch",
+      "schedule install",
+      "schedule uninstall",
+      "schedule status",
     ],
     planned_commands: [],
     schedules: ["interval", "fixed_time", "once", "event"],

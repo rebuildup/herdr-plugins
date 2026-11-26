@@ -61,7 +61,7 @@ in v1 (adding one requires a successor ADR).
   "contract": "herdr-plugins.secrets/v1",
   "command": "capability",
   "plugin": "rebuildup.secrets",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "provider": {
     "name": "infisical",
     "domain": "https://secrets.rebuildup.dev/api",
@@ -74,9 +74,16 @@ in v1 (adding one requires a successor ADR).
   "config_warnings": [],
   "credential_boundary": { "…": "docs/adr/0027-…" },
   "commands": ["capability", "resolve", "run", "inject", "config"],
+  "mutation_commands": ["run", "inject", "config"],
   "generated_at": "…"
 }
 ```
+
+`mutation_commands` (added in plugin v0.2.0, #224 — additive) lists
+commands with side effects: `run` spawns a child process with
+resolved env, `inject` creates herdr surfaces, and `config` writes
+the starter `config.json` under `--init` (a plain `config` call is a
+metadata read). `capability` and `resolve` are read-only.
 
 `--probe` resolves a guaranteed-absent sentinel secret
 (`__REBuildup_SECRETS_PROBE_000__`) to classify reachability/auth

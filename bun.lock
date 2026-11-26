@@ -24,7 +24,7 @@
     },
     "plugins/automations": {
       "name": "@herdr-plugins/automations",
-      "version": "0.7.0",
+      "version": "0.8.0",
     },
     "plugins/checkpoints": {
       "name": "@herdr-plugins/checkpoints",
@@ -44,11 +44,11 @@
     },
     "plugins/handoff": {
       "name": "@herdr-plugins/handoff",
-      "version": "0.6.0",
+      "version": "0.7.0",
     },
     "plugins/inbox": {
       "name": "@herdr-plugins/inbox",
-      "version": "0.5.0",
+      "version": "0.6.0",
     },
     "plugins/machines": {
       "name": "@herdr-plugins/machines",
@@ -64,11 +64,11 @@
     },
     "plugins/secrets": {
       "name": "@herdr-plugins/secrets",
-      "version": "0.1.1",
+      "version": "0.2.0",
     },
     "plugins/textgen": {
       "name": "@herdr-plugins/textgen",
-      "version": "0.6.0",
+      "version": "0.7.0",
     },
     "plugins/usage": {
       "name": "@herdr-plugins/usage",

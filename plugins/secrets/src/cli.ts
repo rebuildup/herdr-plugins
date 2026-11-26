@@ -363,6 +363,11 @@ async function cmdCapability(options: CliOptions): Promise<void> {
       never: "persisted / logged / argv / emitted",
     },
     commands: ["capability", "resolve", "run", "inject", "config"],
+    // Commands with side effects (#224): `run` spawns a child process
+    // with resolved env, `inject` creates herdr surfaces, `config
+    // --init` writes the starter config file (plain `config` is a
+    // metadata read). `capability`/`resolve` are read-only.
+    mutation_commands: ["run", "inject", "config"],
     generated_at: now(),
   });
 }

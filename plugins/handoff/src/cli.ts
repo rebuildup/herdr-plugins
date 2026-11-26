@@ -1030,7 +1030,7 @@ async function cmdCapability(options: CliOptions): Promise<void> {
   emit({
     contract: CONTRACT,
     plugin: PLUGIN_ID,
-    version: "0.6.0",
+    version: "0.7.0",
     commands: [
       "create",
       "list",
@@ -1042,6 +1042,10 @@ async function cmdCapability(options: CliOptions): Promise<void> {
       "merge-back",
       "capability",
     ],
+    // Commands that persist records or drive herdr mutations (#224).
+    // `status` is included: it lazily reconciles delivered→done and
+    // writes the record back to plugin state.
+    mutation_commands: ["create", "status", "execute", "delegate", "merge-back"],
     actions: [],
     events: [],
     startup: [],
