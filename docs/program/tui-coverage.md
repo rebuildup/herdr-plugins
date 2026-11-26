@@ -16,8 +16,8 @@ implement against is [`docs/contracts/tui-v1.md`](../contracts/tui-v1.md).
 | field | meaning |
 | --- | --- |
 | `cli` | `implemented` — contract-covered CLI command exists |
-| `tui_action` | `declared:<id>` — a manifest `[[actions]]` entry exists today (inbox ×8, git ×6 incl. `open`, checkpoints ×1, projects ×1); `none` — no action yet |
-| `interactive_tui` | `planned:#NNN` — scheduled in that implementation ticket (#230 Inbox, #231 Scripts/Checkpoints/Automations, #232 Conversations/Usage/Controls/Handoff/TextGen, #233 Artifacts/Secrets/Machines/MCP diagnostics, #239 Git forge); `implemented:#NNN` — shipped in that ticket (#238 Git, #240 Projects); `n/a` — daemon-, agent-, or diagnostic-only surface with no interactive TUI planned |
+| `tui_action` | `declared:<id>` — a manifest `[[actions]]` entry exists today (inbox ×8, git ×6 incl. `open`, checkpoints ×1, projects ×1, conversations ×1, usage ×1); `none` — no action yet |
+| `interactive_tui` | `planned:#NNN` — scheduled in that implementation ticket (#230 Inbox, #231 Scripts/Checkpoints/Automations, #232 Conversations/Usage/Controls/Handoff/TextGen, #233 Artifacts/Secrets/Machines/MCP diagnostics, #239 Git forge); `implemented:#NNN` — shipped in that ticket (#238 Git, #240 Projects, #244 Conversations/Usage); `n/a` — daemon-, agent-, or diagnostic-only surface with no interactive TUI planned |
 | `gui` | GUI is owned by herdr-t3 (#7). This repo records consumption intent only — **GUI-done never implies TUI-done** |
 | `real_machine_evidence` | `docs/research/` paths recording live verification; absence means no recorded real-machine run, not necessarily untested |
 | `upstream_gap` | non-null = blocked on herdr/T3Code upstream; never worked around by PTY guessing |
@@ -31,8 +31,8 @@ implement against is [`docs/contracts/tui-v1.md`](../contracts/tui-v1.md).
 | rebuildup.projects | projects/v1 stable | #231 | 13 | 1 (`open`) | implemented #240 — registry browser + repos membership + settings + scripts/run/stop + worktree info |
 | rebuildup.checkpoints | checkpoints/v1 stable | #231 | 12 | 1 | list/show/diff/plan + guarded restore/delete/gc |
 | rebuildup.automations | automations/v1 stable | #231 | 14 | 0 | task CRUD + schedule + runs + driver diagnostics |
-| rebuildup.conversations | conversations/v1 stable | #232 | 8 | 0 | session/history/search/show browser + usage summary |
-| rebuildup.usage | usage/v1 stable | #232 | 5 | 0 | usage/quota/divergence/cost reports with filters |
+| rebuildup.conversations | conversations/v1 stable | #232 | 8 | 1 (`open`) | **implemented #244**: sessions/history/search browser + event detail; `index` via confirm-gated `i` |
+| rebuildup.usage | usage/v1 stable | #232 | 5 | 1 (`open`) | **implemented #244**: usage/quota/cost/divergence reports with provider + period filters |
 | rebuildup.controls | controls/v1 stable | #232 | 8 | 0 | agent send/command/wait/interrupt/read/rename/start |
 | rebuildup.handoff | handoff/v1 stable | #232 | 9 | 0 | records/lineage + execute/delegate/merge-back |
 | rebuildup.textgen | textgen/v1 stable | #232 | 5 | 0 | task picker + result review + explicit adopt; config |
@@ -75,6 +75,19 @@ upstream/remotes, and not-a-repo render honest states. Forge
 `tests/git-tui.test.ts` (32 tests) plus a `script(1)` PTY smoke of
 `--cwd` launch → files → diff → exit; real-herdr pane-open verification
 uses the isolated-session harness only.
+
+## Implementation notes
+
+- **#244 (conversations + usage)**: both plugins ship a `[[panes]]`
+  `main` entrypoint (`placement = "tab"`, `bun run src/tui.ts main`)
+  plus an `open` action that calls `plugin.pane.open` via
+  `HERDR_BIN_PATH` and returns promptly. Data flows through each
+  plugin's own CLI JSON surface — never state files or PTY text.
+  conversations gates `index` behind `capability.mutation_commands` +
+  an in-TUI confirm; usage is fully read-only (`f` refresh is explicit,
+  never on open). Quota/hub details redact credential-shaped keys
+  (ADR-0014/0015). Unit coverage: `tests/conversations-tui.test.ts`,
+  `tests/usage-tui.test.ts`; PTY smoke verified empty-state render.
 
 ## Cross-cutting notes
 
