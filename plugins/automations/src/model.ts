@@ -56,11 +56,57 @@ export const RUN_TRIGGERS = ["schedule", "manual", "event", "webhook"] as const;
 export type RunTrigger = (typeof RUN_TRIGGERS)[number];
 
 /**
- * Schedule types accepted for storage. `webhook`/`event` are schema-
- * reserved for #146/#147: they may appear in stored tasks but
- * `create`/`update` MUST reject them with `unsupported_schedule`.
+ * Schedule types accepted for storage. `webhook` remains schema-
+ * reserved for #147: it may appear in stored tasks but
+ * `create`/`update` MUST reject it with `unsupported_schedule`.
+ * `event` is implemented by #146.
  */
-export const RESERVED_SCHEDULE_TYPES = ["webhook", "event"] as const;
+export const RESERVED_SCHEDULE_TYPES = ["webhook"] as const;
+
+/**
+ * herdr `[[events]]` hook event names an `event` schedule may subscribe
+ * to — the upstream `PLUGIN_HOOK_EVENT_KINDS` set (herdrdev/herdr
+ * src/api/schema/events.rs, pinned @ e8d7d97). Dotted form only; the
+ * wire envelope may serialize snake_case and is normalized by the hook.
+ * Coverage is version-dependent: an `on` name the running herdr does
+ * not dispatch simply never produces marks — never reported as fired.
+ */
+export const HOOK_EVENT_NAMES = [
+  "workspace.created",
+  "workspace.updated",
+  "workspace.closed",
+  "workspace.renamed",
+  "workspace.moved",
+  "workspace.reordered",
+  "workspace.focused",
+  "worktree.created",
+  "worktree.opened",
+  "worktree.removed",
+  "tab.created",
+  "tab.closed",
+  "tab.renamed",
+  "tab.moved",
+  "tab.focused",
+  "pane.created",
+  "pane.closed",
+  "pane.focused",
+  "pane.moved",
+  "pane.exited",
+  "pane.agent_detected",
+  "pane.agent_status_changed",
+] as const;
+
+/** herdr `AgentStatus` values usable in `event.filter.agent_status`. */
+export const AGENT_STATUSES = ["idle", "working", "blocked", "done", "unknown"] as const;
+
+/** Optional `event` schedule filter — every set field must match. */
+export interface EventScheduleFilter {
+  pane_id?: string | undefined;
+  tab_id?: string | undefined;
+  workspace_id?: string | undefined;
+  agent?: string | undefined;
+  agent_status?: string | undefined;
+}
 
 export type Schedule =
   | { type: "interval"; every_ms: number }
@@ -70,7 +116,18 @@ export type Schedule =
       weekdays?: number[] | undefined;
       time_zone?: string | undefined;
     }
-  | { type: "once"; run_at: string };
+  | { type: "once"; run_at: string }
+  | {
+      type: "event";
+      on: string;
+      filter?: EventScheduleFilter | undefined;
+      /** Collapse matching marks within this window into one fire. */
+      debounce_ms?: number | undefined;
+      /** Minimum ms between consecutive event fires (anchor-to-anchor). */
+      cooldown_ms?: number | undefined;
+      /** Lifetime cap on executed event fires. */
+      max_fires?: number | undefined;
+    };
 
 export type Destination =
   | { kind: "pane"; pane_id: string }
@@ -131,7 +188,12 @@ export interface RunRecord {
   finished_at: string | null;
   destination_snapshot: Record<string, unknown> | null;
   /** Observed values only — never fabricated (AGENTS §4). */
-  result: { summary?: string | undefined; agent_status?: string | undefined } | null;
+  result: {
+    summary?: string | undefined;
+    agent_status?: string | undefined;
+    /** Wall-clock of the latest hook-observed `agent_status` on the destination pane. */
+    agent_status_at?: string | undefined;
+  } | null;
   error: { code: string; message: string } | null;
 }
 
@@ -157,6 +219,21 @@ export interface DerivedMissedRun {
 }
 
 export type RunView = RunRecord | DerivedMissedRun;
+
+/**
+ * One herdr lifecycle event recorded by the `[[events]]` hook entrypoint
+ * (`src/hook.ts`), awaiting lazy drain by the next `tick` (#146). Events
+ * are ephemeral: they are NOT owed occurrences — marks beyond the
+ * pending cap are dropped (counted), and events herdr never delivered
+ * simply never exist. `received_at` is the hook's receipt wall clock;
+ * `data` is the raw EventData payload (snake_case `type` tag included).
+ */
+export interface PendingEventMark {
+  /** Canonical dotted hook name (e.g. `pane.agent_status_changed`). */
+  event: string;
+  received_at: string;
+  data: Record<string, unknown>;
+}
 
 /** Derived read-side fields on a task (never stored). */
 export interface TaskView extends TaskRecord {
@@ -236,8 +313,8 @@ function validTimeZone(name: string): boolean {
 
 /**
  * Schema-validate a schedule. `type` missing/unknown → `invalid_schedule`;
- * reserved types (`webhook`, `event`) → `unsupported_schedule` (contract
- * §Error model — reserved until #146/#147).
+ * reserved types (`webhook`) → `unsupported_schedule` (contract
+ * §Error model — reserved until #147).
  */
 export function parseSchedule(raw: unknown): Schedule {
   if (!isRecord(raw)) {
@@ -250,7 +327,7 @@ export function parseSchedule(raw: unknown): Schedule {
   if ((RESERVED_SCHEDULE_TYPES as readonly string[]).includes(type)) {
     throw new AutomationsError(
       "unsupported_schedule",
-      `schedule type '${type}' is reserved for a later ticket (#146/#147) and cannot be created or updated in v1`,
+      `schedule type '${type}' is reserved for a later ticket (#147) and cannot be created or updated in v1`,
     );
   }
   switch (type) {
@@ -318,10 +395,91 @@ export function parseSchedule(raw: unknown): Schedule {
       }
       return { type: "once", run_at: new Date(ms).toISOString() };
     }
+    case "event": {
+      const on = reqString(raw.on, "on");
+      if (!(HOOK_EVENT_NAMES as readonly string[]).includes(on)) {
+        throw new AutomationsError(
+          "invalid_schedule",
+          `event.on '${on}' is not a herdr plugin-hook event — ` +
+            `supported: ${HOOK_EVENT_NAMES.join(", ")}`,
+        );
+      }
+      const out: {
+        type: "event";
+        on: string;
+        filter?: EventScheduleFilter | undefined;
+        debounce_ms?: number | undefined;
+        cooldown_ms?: number | undefined;
+        max_fires?: number | undefined;
+      } = { type: "event", on };
+      if (raw.filter !== undefined) {
+        if (!isRecord(raw.filter)) {
+          throw new AutomationsError("invalid_schedule", "event.filter must be an object");
+        }
+        const filter: EventScheduleFilter = {};
+        for (const key of ["pane_id", "tab_id", "workspace_id", "agent"] as const) {
+          const value = raw.filter[key];
+          if (value === undefined) continue;
+          if (typeof value !== "string" || value.length === 0) {
+            throw new AutomationsError(
+              "invalid_schedule",
+              `event.filter.${key} must be a non-empty string`,
+            );
+          }
+          filter[key] = value;
+        }
+        const status = raw.filter.agent_status;
+        if (status !== undefined) {
+          if (
+            typeof status !== "string" ||
+            !(AGENT_STATUSES as readonly string[]).includes(status)
+          ) {
+            throw new AutomationsError(
+              "invalid_schedule",
+              `event.filter.agent_status must be one of ${AGENT_STATUSES.join("|")}`,
+            );
+          }
+          filter.agent_status = status;
+        }
+        out.filter = filter;
+      }
+      for (const key of ["debounce_ms", "cooldown_ms"] as const) {
+        const value = raw[key];
+        if (value === undefined) continue;
+        if (
+          typeof value !== "number" ||
+          !Number.isInteger(value) ||
+          value < 0 ||
+          value > 2_147_483_647
+        ) {
+          throw new AutomationsError(
+            "invalid_schedule",
+            `event.${key} must be an integer 0..2147483647`,
+          );
+        }
+        out[key] = value;
+      }
+      const maxFires = raw.max_fires;
+      if (maxFires !== undefined) {
+        if (
+          typeof maxFires !== "number" ||
+          !Number.isInteger(maxFires) ||
+          maxFires < 1 ||
+          maxFires > 1_000_000
+        ) {
+          throw new AutomationsError(
+            "invalid_schedule",
+            "event.max_fires must be an integer 1..1000000",
+          );
+        }
+        out.max_fires = maxFires;
+      }
+      return out;
+    }
     default:
       throw new AutomationsError(
         "invalid_schedule",
-        `unknown schedule type '${type}' — v1 accepts interval|fixed_time|once`,
+        `unknown schedule type '${type}' — v1 accepts interval|fixed_time|once|event`,
       );
   }
 }
@@ -718,6 +876,10 @@ function collectPastInstants(
       const instants = truncated ? found.slice(found.length - limit) : found;
       return { instants, total: found.length, truncated };
     }
+    case "event":
+      // Event schedules have no clock occurrences — fires come from
+      // pending hook marks drained by `tick` (#146), never `missed`.
+      return { instants: [], total: 0, truncated: false };
   }
 }
 
@@ -856,6 +1018,9 @@ export function nextOccurrenceAfter(task: TaskRecord, afterMs: number): number |
       }
       return null;
     }
+    case "event":
+      // No clock occurrence — event fires are mark-driven (#146).
+      return null;
   }
 }
 
@@ -891,6 +1056,10 @@ export function isOccurrenceInstant(task: TaskRecord, ms: number): boolean {
       }
       return zonedLocalToUtc(parts.year, parts.month, parts.day, hour, minute, zone) === ms;
     }
+    case "event":
+      // Event occurrences are hook marks, not clock instants — `fire`
+      // can never validate one; event runs come from `tick` drain only.
+      return false;
   }
 }
 
@@ -999,6 +1168,35 @@ export function resolveDriverState(
     detail:
       "no firing driver reporting — occurrences resolve as missed until `schedule install` or `watch` runs",
   };
+}
+
+/** Cap on undrained hook marks per session registry (#146). */
+export const MAX_PENDING_EVENTS = 500;
+
+/** Stored pending-event parsing (state load — strict; corrupt is an error). */
+export function parseStoredPendingEvent(raw: unknown): PendingEventMark {
+  if (!isRecord(raw)) {
+    throw new AutomationsError("state_corrupt", "stored pending event is not an object");
+  }
+  const event = asString(raw.event, "pending_event.event");
+  if (!(HOOK_EVENT_NAMES as readonly string[]).includes(event)) {
+    throw new AutomationsError(
+      "state_corrupt",
+      `stored pending event '${event}' is not a hook event`,
+    );
+  }
+  const receivedAt = asString(raw.received_at, "pending_event.received_at");
+  if (Number.isNaN(Date.parse(receivedAt))) {
+    throw new AutomationsError(
+      "state_corrupt",
+      "stored pending event.received_at is not a timestamp",
+    );
+  }
+  const data = raw.data;
+  if (!isRecord(data)) {
+    throw new AutomationsError("state_corrupt", "stored pending event.data is not an object");
+  }
+  return { event, received_at: receivedAt, data: data as Record<string, unknown> };
 }
 
 /** Stored-driver parsing (state load — strict; corrupt state is an error). */

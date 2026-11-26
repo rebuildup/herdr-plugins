@@ -3,14 +3,17 @@
  * (`herdr-plugins.automations/v1`, DRAFT per Issue #137/#144).
  *
  * T2 (#144): task registry core — schedule model (interval /
- * fixed_time / once; webhook/event schema-reserved →
+ * fixed_time / once / event; webhook schema-reserved →
  * `unsupported_schedule`), CRUD (`create`/`list`/`get`/`update`/
  * `set-enabled`/`delete`), manual runs (`run-now`/`runs`), lazy
  * missed-run derivation on reads, and `reconcile` materialization.
  * T3 (#145): time-based firing — `fire`/`tick`/`watch` drivers and
  * `schedule install|uninstall|status` OS adapters (ADR-0022), run
  * delivery via `agent.prompt`/`agent.start` (ADR-0023), and honest
- * driver reporting. Event schedules land in #146; webhook in #147.
+ * driver reporting. T4 (#146): `event` schedules fired by herdr
+ * `[[events]]` hooks (`src/hook.ts` records pending marks; `tick`
+ * drains them lazily — no daemon) plus hook-observed run status.
+ * Webhook lands in #147.
  *
  * Output contract (same shape as other plugins): one JSON document on
  * stdout for success, one JSON error object on stderr, exit 0 / 1 /
@@ -26,6 +29,7 @@ import { deliverRun, herdrTransport } from "./execute";
 import {
   AutomationsError,
   CONTRACT,
+  HOOK_EVENT_NAMES,
   type MisfirePolicy,
   nextOccurrenceAfter,
   PLUGIN_ID,
@@ -39,6 +43,7 @@ import {
   listRuns,
   listTaskViews,
   materializeMissed,
+  prepareEventTick,
   prepareFire,
   prepareTick,
   removeDriver,
@@ -67,7 +72,7 @@ import {
 } from "./state";
 
 export { CONTRACT, PLUGIN_ID };
-export const PLUGIN_VERSION = "0.3.0";
+export const PLUGIN_VERSION = "0.4.0";
 
 export interface CapabilityDocument {
   contract: string;
@@ -78,6 +83,10 @@ export interface CapabilityDocument {
   planned_commands: string[];
   schedules: string[];
   reserved_schedules: string[];
+  /** `[[events]]` hook entrypoint file (manifest-invoked, not a CLI command). */
+  hook_entrypoint: string | null;
+  /** herdr hook event names `event` schedules may subscribe to (#146). */
+  hook_events: string[];
   state_file: string | null;
 }
 
@@ -103,9 +112,11 @@ export function capabilityDocument(): CapabilityDocument {
       "watch",
       "schedule",
     ],
-    planned_commands: ["hook", "serve"],
-    schedules: ["interval", "fixed_time", "once"],
-    reserved_schedules: ["webhook", "event"],
+    planned_commands: ["serve"],
+    schedules: ["interval", "fixed_time", "once", "event"],
+    reserved_schedules: ["webhook"],
+    hook_entrypoint: "src/hook.ts",
+    hook_events: [...HOOK_EVENT_NAMES],
     state_file: "state.json",
   };
 }
@@ -476,21 +487,47 @@ interface TickSummary {
   tasks_scanned: number;
   fired: DeliveryReport[];
   missed_materialized: number;
+  /** Event-hook drain summary (#146); absent fields mean no marks/tasks. */
+  events: {
+    consumed: number;
+    fired: number;
+    suppressed: number;
+    deduplicated: number;
+    pending: number;
+    dropped: number;
+  };
 }
 
 /** One tick pass: prepare under the lock, deliver each pending run. */
 async function runTickOnce(options: CliOptions): Promise<TickSummary> {
   await preflightTransport(options);
   const nowMs = Date.now();
-  const prep = await updateState((state) => prepareTick(registryFor(state, options), nowMs));
+  const prep = await updateState((state) => {
+    const registry = registryFor(state, options);
+    return {
+      time: prepareTick(registry, nowMs),
+      events: prepareEventTick(registry, nowMs),
+    };
+  });
   const fired: DeliveryReport[] = [];
-  for (const run of prep.pending) {
+  for (const run of [...prep.time.pending, ...prep.events.pending]) {
     fired.push(await deliverAndFinalize(options, run.run_id));
   }
+  // Dropped-mark total is read post-mutation (marks consumed above).
+  const state = await loadState();
+  const registry = state.sessions[sessionKey(options)];
   return {
-    tasks_scanned: prep.tasksScanned,
+    tasks_scanned: prep.time.tasksScanned,
     fired,
-    missed_materialized: prep.missedMaterialized,
+    missed_materialized: prep.time.missedMaterialized,
+    events: {
+      consumed: prep.events.consumed,
+      fired: prep.events.fired,
+      suppressed: prep.events.suppressed,
+      deduplicated: prep.events.deduplicated,
+      pending: prep.events.remaining,
+      dropped: registry?.pending_events_dropped ?? 0,
+    },
   };
 }
 
@@ -787,7 +824,9 @@ function helpText(): string {
     "  watch [--interval SEC]\n" +
     "  schedule install|uninstall|status\n" +
     "global flags: --session NAME --socket PATH --timeout MS\n" +
-    "planned (#146/#147): hook/serve\n" +
+    "event triggers (#146): manifest [[events]] -> src/hook.ts records pending marks;\n" +
+    "  `tick` (OS scheduler/watch/manual) drains them into event runs.\n" +
+    "planned (#147): serve\n" +
     "see docs/contracts/automations-v1.md and docs/specs/automations.md\n"
   );
 }

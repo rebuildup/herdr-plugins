@@ -21,8 +21,10 @@ import { pluginDirs, resolveSocketPath } from "../../../packages/herdr-client/sr
 import {
   AutomationsError,
   type DriverRecord,
+  type PendingEventMark,
   PLUGIN_ID,
   parseStoredDriver,
+  parseStoredPendingEvent,
   parseStoredRun,
   parseStoredTask,
   type RunRecord,
@@ -46,6 +48,14 @@ export interface SessionRegistry {
    * field and load as empty.
    */
   drivers: Record<string, DriverRecord>;
+  /**
+   * Undrained herdr event marks recorded by `src/hook.ts` (#146),
+   * consumed lazily by the next `tick`. Optional on disk — registries
+   * written before #146 lack the fields and load as empty/zero.
+   */
+  pending_events: PendingEventMark[];
+  /** Count of marks dropped at the `MAX_PENDING_EVENTS` cap. */
+  pending_events_dropped: number;
 }
 
 export interface AutomationsState {
@@ -58,7 +68,7 @@ export function emptyState(): AutomationsState {
 }
 
 export function emptyRegistry(): SessionRegistry {
-  return { tasks: {}, runs: {}, drivers: {} };
+  return { tasks: {}, runs: {}, drivers: {}, pending_events: [], pending_events_dropped: 0 };
 }
 
 /** Per-session registry, created on demand for writes. */
@@ -122,6 +132,24 @@ export async function loadState(): Promise<AutomationsState> {
       const tasksRaw = typeof v.tasks === "object" && v.tasks !== null ? v.tasks : {};
       const runsRaw = typeof v.runs === "object" && v.runs !== null ? v.runs : {};
       const driversRaw = typeof v.drivers === "object" && v.drivers !== null ? v.drivers : {};
+      const pendingRaw =
+        typeof v.pending_events === "object" && v.pending_events !== null ? v.pending_events : [];
+      if (!Array.isArray(pendingRaw)) {
+        throw new AutomationsError(
+          "state_corrupt",
+          `session '${key}' registry pending_events is not an array`,
+        );
+      }
+      const dropped = v.pending_events_dropped;
+      if (
+        dropped !== undefined &&
+        (typeof dropped !== "number" || !Number.isInteger(dropped) || dropped < 0)
+      ) {
+        throw new AutomationsError(
+          "state_corrupt",
+          `session '${key}' registry pending_events_dropped invalid`,
+        );
+      }
       const tasks: Record<string, TaskRecord> = {};
       for (const [id, task] of Object.entries(tasksRaw)) {
         tasks[id] = parseStoredTask(task);
@@ -134,7 +162,14 @@ export async function loadState(): Promise<AutomationsState> {
       for (const [id, driver] of Object.entries(driversRaw)) {
         drivers[id] = parseStoredDriver(driver);
       }
-      sessions[key] = { tasks, runs, drivers };
+      const pendingEvents = pendingRaw.map((mark) => parseStoredPendingEvent(mark));
+      sessions[key] = {
+        tasks,
+        runs,
+        drivers,
+        pending_events: pendingEvents,
+        pending_events_dropped: dropped ?? 0,
+      };
     }
     return { version: STATE_SCHEMA_VERSION, sessions };
   } catch (err) {

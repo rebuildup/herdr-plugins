@@ -6,8 +6,8 @@ automations, adapted to herdr's no-daemon constraint.
 
 Parent: #32 (Automations) / #22. Decomposition: #137 (T1, this doc +
 ADR-0022/0023 + contract skeleton), #144 (T2 registry — implemented),
-#145 (T3 firing/delivery — implemented), #146 (T4 event triggers),
-#147 (T5 webhook).
+#145 (T3 firing/delivery — implemented), #146 (T4 event triggers —
+implemented), #147 (T5 webhook).
 
 ## Sources (upstream inventory — confirmed at t3code @ `9cc4018c`)
 
@@ -70,7 +70,7 @@ missed`, timestamps, `destination_snapshot`, observed-only `result`,
 | `fixed_time` `time_of_day` + `weekdays?` + `time_zone?` | in | zone defaults to host-local at evaluation, recorded on run |
 | `once` `run_at` ISO+offset | in | past `run_at` at create → `invalid_schedule` |
 | `webhook` | reserved | rejected `unsupported_schedule` until #147 |
-| `event` | reserved | rejected until #146 (`[[events]]` hook path) |
+| `event` | in (#146) | `on` + `filter` + `debounce_ms`/`cooldown_ms`/`max_fires`; fired by `[[events]]` hook marks drained on `tick`/`watch` |
 
 ### Firing architecture (ADR-0022) — implemented #145
 
@@ -134,6 +134,32 @@ derivation.
   (`scheduled` → `running` → terminal); manual runs always execute —
   they are the override for `misfire:"skip"` tasks.
 
+### Event triggers (#146) — implemented
+
+herdr `[[events]]` manifest hooks (the 22 hook-eligible dotted event
+names in `PLUGIN_HOOK_EVENT_KINDS`, pinned upstream @ `e8d7d97`)
+invoke `src/hook.ts` once per delivered event. The hook does no
+socket work and no delivery — same contract as
+`plugins/checkpoints/src/hook.ts` (ADR-0002): it appends a pending
+mark (`event`, `received_at`, raw `data`) to the session registry,
+capped at 500 with oldest-dropped counted in
+`pending_events_dropped`. `pane.agent_status_changed` additionally
+folds the observed `agent_status` into the latest delivered run on
+that pane (`result.agent_status`/`agent_status_at` — observed only).
+
+Marks drain lazily inside `tick`/`watch` (`prepareEventTick`):
+matching marks (`on` + exact-match `filter` on extracted
+`pane_id`/`tab_id`/`workspace_id`/`agent`/`agent_status` dimensions,
+inside the task's enabled window) group into debounce bursts
+anchored at the first mark; each burst fires one run with
+`trigger:"event"` and `scheduled_for` = burst anchor — the same
+`task_id + scheduled_for` idempotency key as clock occurrences.
+`cooldown_ms`/`max_fires` decline bursts into honest terminal
+`skipped` runs (`error.code` `cooldown`/`max_fires`). Event tasks
+owe no clock occurrences (never `missed`, `fire --scheduled-for`
+rejects them `invalid_occurrence`). Events herdr never delivers
+never exist — `tick` reports `events.fired:0`, nothing is invented.
+
 ### Driver reporting (#145)
 
 `driver.state` on task views derives from persisted driver records:
@@ -146,8 +172,9 @@ failed install → `install_failed`; dead pid/missing entry →
 **In**: interval/fixed_time/once schedules; task CRUD +
 pause/resume (`set-enabled`)/run-now/delete/runs; idempotent fire,
 misfire policy, missed-run lazy resolution; OS-scheduler + watch
-drivers; pane/launch destinations; CLI surface — all implemented
-through #145.
+drivers; pane/launch destinations; `event` schedules via manifest
+`[[events]]` hooks (#146); CLI surface — all implemented through
+#146.
 
 **T2 registry semantics (#144, implemented)**:
 
@@ -176,8 +203,7 @@ through #145.
 
 **Reserved (schema present, rejected until owning ticket)**:
 `webhook` (#147 — opt-in `serve` vs upstream gap, HMAC/filters/
-dedupe/coalesce decided there), `event` (#146 — `[[events]]` hook
-triggers with filter/debounce/cooldown).
+dedupe/coalesce decided there).
 
 **Out of v1**: multi-stage durable workflows and question/approval
 orchestration (T3 orchestrator is a separate system; herdr composes
@@ -212,7 +238,10 @@ the installed source tree.
 ## #60 / #30 boundaries (ADR-0023)
 
 - project-scripts triggers run **scripts** in dedicated panes
-  (ADR-0010); automations run **agent prompts/launches**. Shared
+  (ADR-0010); automations run **agent prompts/launches** — including
+  `event` schedules, which observe agent/lifecycle status
+  (`pane.agent_status_changed` → observed `agent_status` on runs)
+  but never parse PTY text or fabricate statuses. Shared
   trigger-source gap (structured worktree/settle events) is one
   upstream candidate Issue serving both.
 - MCP: CLI-only v1; `herdr-plugins.automations/v1` is the contract a

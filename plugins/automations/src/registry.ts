@@ -10,6 +10,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { markMatchesSchedule } from "./events";
 import {
   AutomationsError,
   assertOnceInFuture,
@@ -19,9 +20,11 @@ import {
   type DriverRecord,
   deriveMissed,
   isOccurrenceInstant,
+  MAX_PENDING_EVENTS,
   MISSED_GRACE_MS,
   type MisfirePolicy,
   nextOccurrenceAfter,
+  type PendingEventMark,
   parseDestination,
   parseSchedule,
   type RunRecord,
@@ -684,6 +687,228 @@ export function finalizeRun(registry: SessionRegistry, runId: string, final: Run
   const task = registry.tasks[run.task_id];
   if (task) task.updated_at = now;
   return run;
+}
+
+// ---------------------------------------------------------------------------
+// Event-hook marks and event-trigger drain (#146)
+// ---------------------------------------------------------------------------
+
+/**
+ * Append hook-received event marks to the registry, capped at
+ * `MAX_PENDING_EVENTS` — overflow drops the OLDEST marks and counts
+ * them in `pending_events_dropped` (reported honestly, never silent).
+ * Called by `src/hook.ts` inside `updateState`.
+ */
+export function recordPendingEvents(registry: SessionRegistry, marks: PendingEventMark[]): void {
+  for (const mark of marks) {
+    registry.pending_events.push(mark);
+    if (registry.pending_events.length > MAX_PENDING_EVENTS) {
+      registry.pending_events.shift();
+      registry.pending_events_dropped += 1;
+    }
+  }
+}
+
+/**
+ * Run-status observation (#146): a `pane.agent_status_changed` hook
+ * folds the observed status into the LATEST delivered run targeting
+ * that pane (`destination_snapshot.pane_id`). Only `running`/`success`
+ * runs are eligible — `scheduled` has not been delivered yet and
+ * terminal-failure runs have no live agent to observe. The recorded
+ * value is the pane's observed status, never a fabricated completion:
+ * `run.status` stays the delivery outcome and `result.agent_status`
+ * is explicitly a pane-level observation (documented in the contract).
+ */
+export function observeRunAgentStatus(
+  registry: SessionRegistry,
+  paneId: string,
+  agentStatus: string,
+  nowMs: number,
+): RunRecord | null {
+  let best: RunRecord | null = null;
+  let bestMs = Number.NEGATIVE_INFINITY;
+  for (const run of Object.values(registry.runs)) {
+    if (run.status !== "running" && run.status !== "success") continue;
+    const snapshot = run.destination_snapshot;
+    if (snapshot === null || snapshot.pane_id !== paneId) continue;
+    const ms = Date.parse(run.finished_at ?? run.created_at);
+    if (ms > bestMs) {
+      bestMs = ms;
+      best = run;
+    }
+  }
+  if (best === null) return null;
+  best.result = {
+    ...(best.result ?? {}),
+    agent_status: agentStatus,
+    agent_status_at: iso(nowMs),
+  };
+  return best;
+}
+
+export interface EventTickPrep {
+  /** `running` event runs the caller must deliver, then finalize. */
+  pending: RunRecord[];
+  /** Pending marks consumed (matched ≥1 enabled event task). */
+  consumed: number;
+  /** Bursts that produced a `running` run this drain. */
+  fired: number;
+  /** Bursts declined by cooldown/max_fires → `skipped` run records. */
+  suppressed: number;
+  /** Bursts whose idempotency key was already resolved. */
+  deduplicated: number;
+  /** Marks left pending (matched no enabled event task). */
+  remaining: number;
+}
+
+/**
+ * `tick` event drain (#146) — runs inside `updateState`, after
+ * `prepareTick`. For every enabled `event`-schedule task, pending hook
+ * marks matching `on` + `filter` inside the task's enabled window are
+ * grouped into bursts (`debounce_ms` collapses marks closer than the
+ * window into one fire anchored at the burst's FIRST mark), then each
+ * burst becomes one run keyed `task_id + scheduled_for` where
+ * `scheduled_for` is the burst anchor — the same idempotency
+ * discipline as clock occurrences.
+ *
+ * Suppression is recorded, never silent: `cooldown_ms` (min ms between
+ * fire anchors) and `max_fires` (cap on executed event runs) decline a
+ * burst into a terminal `skipped` run (`error.code` `cooldown` /
+ * `max_fires`). Marks matching no enabled event task stay pending —
+ * a later task or filter update may still claim them; the
+ * `MAX_PENDING_EVENTS` cap bounds the backlog honestly.
+ *
+ * Events are ephemeral, NOT owed occurrences: nothing here ever
+ * derives `missed`, and a mark consumed by a failed delivery is spent
+ * (no automatic retry — same rule as scheduled fires).
+ */
+export function prepareEventTick(registry: SessionRegistry, nowMs: number): EventTickPrep {
+  const prep: EventTickPrep = {
+    pending: [],
+    consumed: 0,
+    fired: 0,
+    suppressed: 0,
+    deduplicated: 0,
+    remaining: registry.pending_events.length,
+  };
+  const marks = registry.pending_events;
+  if (marks.length === 0) return prep;
+  const eventTasks = Object.values(registry.tasks).filter(
+    (task) => task.enabled && task.schedule.type === "event",
+  );
+  if (eventTasks.length === 0) return prep;
+
+  const inWindow = (task: TaskRecord, ms: number): boolean => {
+    if (ms < Date.parse(task.enabled_at)) return false;
+    if (task.disabled_at !== null && ms > Date.parse(task.disabled_at)) return false;
+    return true;
+  };
+
+  const consumed = new Set<number>();
+  for (const task of eventTasks) {
+    const schedule = task.schedule;
+    if (schedule.type !== "event") continue;
+    const filter = schedule.filter as Record<string, string | undefined> | undefined;
+    const matched: { index: number; ms: number }[] = [];
+    marks.forEach((mark, index) => {
+      const ms = Date.parse(mark.received_at);
+      if (!inWindow(task, ms)) return;
+      if (!markMatchesSchedule(mark, schedule.on, filter)) return;
+      matched.push({ index, ms });
+      consumed.add(index);
+    });
+    if (matched.length === 0) continue;
+    matched.sort((a, b) => a.ms - b.ms || a.index - b.index);
+
+    // Debounce: a mark joins the open burst while it arrives within
+    // `debounce_ms` of the previous matched mark; otherwise it anchors
+    // a new burst. Anchor = first mark's received_at (deterministic).
+    const debounceMs = schedule.debounce_ms ?? 0;
+    const anchors: number[] = [];
+    let previousMs = Number.NEGATIVE_INFINITY;
+    for (const mark of matched) {
+      if (anchors.length === 0 || mark.ms - previousMs > debounceMs) {
+        anchors.push(mark.ms);
+      }
+      previousMs = mark.ms;
+    }
+
+    // Cooldown baseline = anchors of EXECUTED event fires (blocking
+    // statuses); declined `skipped` records never extend it.
+    const executed = Object.values(registry.runs).filter(
+      (run) =>
+        run.task_id === task.task_id &&
+        run.trigger === "event" &&
+        run.scheduled_for !== null &&
+        BLOCKING_RUN_STATUSES.includes(run.status),
+    );
+    let lastAnchorMs = Number.NEGATIVE_INFINITY;
+    for (const run of executed) {
+      const ms = Date.parse(run.scheduled_for as string);
+      if (ms > lastAnchorMs) lastAnchorMs = ms;
+    }
+    let executedCount = executed.length;
+    const cooldownMs = schedule.cooldown_ms ?? 0;
+    const maxFires = schedule.max_fires;
+
+    for (const anchorMs of anchors) {
+      const anchorIso = iso(anchorMs);
+      // Any stored record for the key spends it — including skipped
+      // (a declined burst is never silently retried).
+      if (findRunsByOccurrence(registry, task.task_id, anchorIso).length > 0) {
+        prep.deduplicated += 1;
+        continue;
+      }
+      let decline: { code: string; message: string } | null = null;
+      if (cooldownMs > 0 && lastAnchorMs !== Number.NEGATIVE_INFINITY) {
+        if (anchorMs - lastAnchorMs < cooldownMs) {
+          decline = {
+            code: "cooldown",
+            message:
+              `event burst ${anchorIso} is ${anchorMs - lastAnchorMs}ms after the last fire; ` +
+              `cooldown_ms ${cooldownMs} declines it`,
+          };
+        }
+      }
+      if (decline === null && maxFires !== undefined && executedCount >= maxFires) {
+        decline = {
+          code: "max_fires",
+          message:
+            `event task '${task.task_id}' reached max_fires ${maxFires}; ` +
+            `burst ${anchorIso} declined`,
+        };
+      }
+      if (decline !== null) {
+        createRunRecord(registry, task, {
+          trigger: "event",
+          scheduledFor: anchorIso,
+          nowMs,
+          status: "skipped",
+          error: decline,
+        });
+        prep.suppressed += 1;
+        continue;
+      }
+      const run = createRunRecord(registry, task, {
+        trigger: "event",
+        scheduledFor: anchorIso,
+        nowMs,
+        status: "running",
+      });
+      prep.pending.push(run);
+      prep.fired += 1;
+      // Later bursts in THIS drain respect the just-created fire.
+      lastAnchorMs = anchorMs;
+      executedCount += 1;
+    }
+  }
+
+  if (consumed.size > 0) {
+    registry.pending_events = registry.pending_events.filter((_, index) => !consumed.has(index));
+  }
+  prep.consumed = consumed.size;
+  prep.remaining = registry.pending_events.length;
+  return prep;
 }
 
 // ---------------------------------------------------------------------------
