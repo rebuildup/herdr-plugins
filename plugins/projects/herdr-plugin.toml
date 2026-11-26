@@ -1,6 +1,6 @@
 id = "rebuildup.projects"
 name = "Projects"
-version = "0.1.0"
+version = "0.3.0"
 min_herdr_version = "0.9.0"
 description = "Project registry for herdr panes: multi-repo grouping, pin/archive, settings overrides, and project-defined scripts."
 platforms = ["linux", "macos", "windows"]

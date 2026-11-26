@@ -8,6 +8,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { sanitizedChildEnv } from "../../../packages/git-core/src/git-env";
 import {
   GitError,
   gitOk,
@@ -653,12 +654,11 @@ export async function collectDiff(
     const timeoutMs = options.timeoutMs ?? 10_000;
     const child = spawn("git", args, {
       cwd: repoRoot,
-      env: {
-        ...process.env,
+      env: sanitizedChildEnv({
         GIT_TERMINAL_PROMPT: "0",
         GIT_OPTIONAL_LOCKS: "0",
         LC_ALL: "C",
-      },
+      }),
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
     });

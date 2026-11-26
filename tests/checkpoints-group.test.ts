@@ -279,7 +279,9 @@ describe("checkpoints multi-repo save/restore-group", () => {
     ];
     const fake = await fakeHerdrSocket(panes);
     try {
-      const saved = await runCliAsync(["save", "--socket", fake.socketPath]);
+      const saved = await runCliAsync(["save", "--socket", fake.socketPath], {
+        HERDR_SOCKET_PATH: fake.socketPath,
+      });
       const payload = expectOk(saved);
       expect(payload.total).toBe(2);
       expect(payload.succeeded).toBe(2);

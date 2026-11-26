@@ -113,6 +113,26 @@ describe("normalizeRemoteUrl", () => {
     );
     expect(normalizeRemoteUrl("https://GITHUB.com/Octo/Widgets/")).toBe("github.com/Octo/Widgets");
   });
+
+  test("keeps non-default ports and preserves path case", () => {
+    // Two self-hosted instances on one host must not collapse into one
+    // identity; default ports normalize away via URL parsing.
+    expect(normalizeRemoteUrl("https://git.example.com:8443/Org/Repo.git")).toBe(
+      "git.example.com:8443/Org/Repo",
+    );
+    expect(normalizeRemoteUrl("https://git.example.com:443/Org/Repo")).toBe(
+      "git.example.com/Org/Repo",
+    );
+    // ssh:// URLs go through URL parsing — the scp-like branch must not
+    // misread `host:2222` as an scp path separator.
+    expect(normalizeRemoteUrl("ssh://git@git.example.com:2222/Org/Repo.git")).toBe(
+      "git.example.com:2222/Org/Repo",
+    );
+    // Path case is preserved verbatim (case-sensitive forges exist);
+    // only host casing is normalized.
+    expect(normalizeRemoteUrl("git@github.com:Octo/Widgets.git")).toBe("github.com/Octo/Widgets");
+    expect(normalizeRemoteUrl("https://github.com/octo/widgets")).toBe("github.com/octo/widgets");
+  });
 });
 
 describe("repoRemoteIdentity", () => {
@@ -500,5 +520,28 @@ describe("submodule detection", () => {
 
     const plain = await inspectRepo(realpathSync(initRepo()));
     expect(plain.has_submodules).toBe(false);
+  });
+
+  test("inspectRepo reports has_submodules null when the probe fails", async () => {
+    const repo = initRepo();
+    // Shim `git` so only `submodule` invocations fail; rev-parse/status
+    // still succeed, isolating the best-effort probe.
+    const shimDir = tempDir();
+    const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
+    writeFileSync(
+      path.join(shimDir, "git"),
+      `#!/bin/sh\nif [ "$1" = "submodule" ]; then exit 1; fi\nexec ${realGit} "$@"\n`,
+      { mode: 0o755 },
+    );
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${shimDir}${path.delimiter}${savedPath ?? ""}`;
+    try {
+      const info = await inspectRepo(realpathSync(repo));
+      expect(info.branch).toBe("main");
+      expect(info.dirty).toBe(false);
+      expect(info.has_submodules).toBeNull();
+    } finally {
+      process.env.PATH = savedPath;
+    }
   });
 });
