@@ -84,7 +84,7 @@ bun run src/cli.ts divergence [--pane PANE] [--session-id ID] [--provider ID] \
   "contract": "herdr-plugins.usage/v1",
   "command": "capability",
   "plugin": "rebuildup.usage",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "read_only": true,
   "mutation_commands": [],
   "commands": ["capability", "usage", "quota", "divergence", "cost"],
