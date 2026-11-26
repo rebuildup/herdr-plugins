@@ -11,7 +11,13 @@
 import { spawn } from "node:child_process";
 import { ghChildEnv } from "../../../packages/git-core/src/git-env";
 
-export type GhErrorKind = "gh_missing" | "timeout" | "gh_error" | "stale_head";
+export type GhErrorKind =
+  | "gh_missing"
+  | "timeout"
+  | "gh_error"
+  | "stale_head"
+  | "merge_blocked"
+  | "release_boundary";
 
 export class GhError extends Error {
   readonly kind: GhErrorKind;
@@ -402,10 +408,35 @@ async function ghApiJson(
 }
 
 /**
- * `gh api` POST with a JSON body piped through stdin (`--input -`). The
- * payload never appears in argv, matching the `--body-file -` rule for
- * `pr create` — review/comment text may be arbitrarily long or sensitive.
+ * `gh api` mutation with a JSON body piped through stdin (`--input -`).
+ * The payload never appears in argv, matching the `--body-file -` rule
+ * for `pr create` — review/comment text may be arbitrarily long or
+ * sensitive. DELETE sends no body and tolerates an empty response.
  */
+async function ghApiCall(
+  repoRoot: string,
+  repo: string,
+  endpoint: string,
+  method: "POST" | "PUT" | "DELETE",
+  payload: Record<string, unknown> | undefined,
+  options: { timeoutMs?: number } = {},
+): Promise<Record<string, unknown>> {
+  const args = ["api", `repos/${repo}/${endpoint}`, "--method", method];
+  if (payload !== undefined) args.push("--input", "-");
+  const out = await ghOk(repoRoot, args, {
+    ...options,
+    input: payload !== undefined ? JSON.stringify(payload) : undefined,
+  });
+  const trimmed = out.trim();
+  if (!trimmed) {
+    // DELETE legitimately returns an empty body; POST/PUT must produce
+    // JSON — an empty response is a transport anomaly, not `{}` data.
+    if (method === "DELETE") return {};
+    throw new GhError("gh_error", `gh api ${endpoint}: empty response body`);
+  }
+  return asRecord(JSON.parse(trimmed));
+}
+
 async function ghApiPost(
   repoRoot: string,
   repo: string,
@@ -413,12 +444,26 @@ async function ghApiPost(
   payload: Record<string, unknown>,
   options: { timeoutMs?: number } = {},
 ): Promise<Record<string, unknown>> {
-  const out = await ghOk(
-    repoRoot,
-    ["api", `repos/${repo}/${endpoint}`, "--method", "POST", "--input", "-"],
-    { ...options, input: JSON.stringify(payload) },
-  );
-  return asRecord(JSON.parse(out) as unknown);
+  return ghApiCall(repoRoot, repo, endpoint, "POST", payload, options);
+}
+
+async function ghApiPut(
+  repoRoot: string,
+  repo: string,
+  endpoint: string,
+  payload: Record<string, unknown>,
+  options: { timeoutMs?: number } = {},
+): Promise<Record<string, unknown>> {
+  return ghApiCall(repoRoot, repo, endpoint, "PUT", payload, options);
+}
+
+async function ghApiDelete(
+  repoRoot: string,
+  repo: string,
+  endpoint: string,
+  options: { timeoutMs?: number } = {},
+): Promise<Record<string, unknown>> {
+  return ghApiCall(repoRoot, repo, endpoint, "DELETE", undefined, options);
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -1410,4 +1455,272 @@ export async function updateIssue(
     options,
   );
   return { number: request.number, issue };
+}
+
+// ---------------------------------------------------------------------------
+// PR merge / auto-merge (Issue #173, ADR-0030).
+//
+// Same ADR-0008 discipline: argv-only `gh` spawn, `--input -` payloads,
+// `--expect-head` stale-head guard. Merge state is re-verified
+// immediately before the write via `gh pr view --json` (mergeStateStatus /
+// reviewDecision / isDraft / headRefOid) so the merge binds exactly the
+// head sha the caller last read; the REST `sha` parameter pins it
+// server-side as well.
+//
+// github-delivery boundary (hard guard): a PR whose head branch matches
+// the release-train pattern `release-<digits>(-<digits>)*` is refused
+// with GhError("release_boundary") for merge AND auto-merge — release
+// approval stays a maintainer decision and the plugin never automates
+// or proxies it. Ticket PRs targeting a release branch as *base* are
+// unaffected (the guard keys on the head ref only).
+// ---------------------------------------------------------------------------
+
+const PR_MERGE_VIEW_FIELDS = [
+  "number",
+  "state",
+  "isDraft",
+  "mergeable",
+  "mergeStateStatus",
+  "reviewDecision",
+  "headRefOid",
+  "headRefName",
+  "baseRefName",
+  "url",
+  "autoMergeRequest",
+].join(",");
+
+/** Release-train head branches (`release-0-9-0`, `release-1`, …). */
+const RELEASE_HEAD_PATTERN = /^release-\d+(-\d+)*$/i;
+
+/** `gh pr view --json` merge-state projection used by the merge guard. */
+async function fetchPrMergeState(
+  repoRoot: string,
+  repo: string,
+  number: number,
+  options: { timeoutMs?: number } = {},
+): Promise<Record<string, unknown>> {
+  const out = await ghOk(
+    repoRoot,
+    ["pr", "view", String(number), "--repo", repo, "--json", PR_MERGE_VIEW_FIELDS],
+    options,
+  );
+  return asRecord(JSON.parse(out) as unknown);
+}
+
+function upperOrNull(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value.toUpperCase() : null;
+}
+
+function mapAutoMergeRequest(raw: unknown): Record<string, unknown> | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const r = raw as Record<string, unknown>;
+  return {
+    merge_method: r.mergeMethod ?? null,
+    enabled_at: r.enabledAt ?? null,
+  };
+}
+
+export type PrMergeMethod = "merge" | "squash" | "rebase";
+
+export interface PrMergeRequest extends PrMutationRequest {
+  /** Merge method; required for `auto`, optional for immediate merge. */
+  method?: PrMergeMethod | undefined;
+  /** Arm GitHub auto-merge (fires when branch protection clears). */
+  auto?: boolean | undefined;
+  /** Disarm auto-merge (`DELETE …/auto-merge`). */
+  disableAuto?: boolean | undefined;
+}
+
+/**
+ * mergeStateStatus values that make an immediate merge impossible or
+ * unknowable. UNSTABLE (non-required checks failing) and CLEAN proceed —
+ * GitHub remains the authority on required gates; anything else is a
+ * structured refusal, never a silent proceed. Auto-merge is the
+ * sanctioned path for pending/blocked-on-checks states, so it refuses
+ * only states that cannot resolve themselves (DIRTY/DRAFT/UNKNOWN).
+ */
+const MERGE_STATE_REFUSED = new Set([
+  "BEHIND",
+  "BLOCKED",
+  "DIRTY",
+  "DRAFT",
+  "HAS_HOOKS",
+  "UNKNOWN",
+]);
+const AUTO_MERGE_STATE_REFUSED = new Set(["DIRTY", "DRAFT", "UNKNOWN"]);
+
+function mergeBlockedMessage(
+  number: number,
+  view: Record<string, unknown>,
+  reason: string,
+): string {
+  const parts = [
+    `pull request #${number} ${reason}`,
+    `mergeStateStatus=${upperOrNull(view.mergeStateStatus) ?? "null"}`,
+    `reviewDecision=${upperOrNull(view.reviewDecision) ?? "null"}`,
+    `mergeable=${upperOrNull(view.mergeable) ?? "null"}`,
+    `isDraft=${view.isDraft === true}`,
+  ];
+  if (typeof view.headRefName === "string") parts.push(`head=${view.headRefName}`);
+  if (typeof view.baseRefName === "string") parts.push(`base=${view.baseRefName}`);
+  return parts.join(" ");
+}
+
+/**
+ * Map gh's HTTP failure for a merge write to the honest taxonomy:
+ * 405/409/422 are GitHub refusing the merge itself (protection, conflicts,
+ * validation) → `merge_blocked`; everything else stays `gh_error`.
+ */
+async function mergeWrite<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (
+      err instanceof GhError &&
+      err.kind === "gh_error" &&
+      /HTTP (405|409|422)\b/.test(err.message)
+    ) {
+      throw new GhError("merge_blocked", err.message);
+    }
+    throw err;
+  }
+}
+
+/**
+ * `pr merge`: immediate merge (`PUT pulls/{n}/merge`), auto-merge enable
+ * (`POST pulls/{n}/auto-merge`), or auto-merge disable
+ * (`DELETE pulls/{n}/auto-merge`). The pre-write guard re-fetches the PR
+ * merge state and requires `headRefOid === expectHead` — the REST `sha`
+ * field then pins the same sha server-side. The result is re-fetched
+ * afterwards so `state`/`auto_merge_request` report what GitHub
+ * actually did (merged, queued-for-auto-merge, or still open).
+ */
+export async function mergePr(
+  repoRoot: string,
+  request: PrMergeRequest,
+  options: { timeoutMs?: number } = {},
+): Promise<Record<string, unknown>> {
+  if (request.auto && request.disableAuto) {
+    throw new GhError("gh_error", "--auto and --disable-auto are mutually exclusive");
+  }
+  if (request.auto && request.method === undefined) {
+    throw new GhError("gh_error", "auto-merge requires an explicit merge method");
+  }
+  if (request.disableAuto && request.method !== undefined) {
+    throw new GhError("gh_error", "merge method is meaningless with --disable-auto");
+  }
+
+  const view = await fetchPrMergeState(repoRoot, request.repo, request.number, options);
+  const headSha = typeof view.headRefOid === "string" ? view.headRefOid : null;
+  if (!headSha) {
+    throw new GhError("gh_error", "pull request head sha unavailable for merge");
+  }
+  if (headSha !== request.expectHead) {
+    throw new GhError(
+      "stale_head",
+      `pull request #${request.number} head moved: expected ${request.expectHead}, current ${headSha}`,
+    );
+  }
+  const headRef = typeof view.headRefName === "string" ? view.headRefName : "";
+  const prState = upperOrNull(view.state);
+  const mergeState = upperOrNull(view.mergeStateStatus);
+  const isDraft = view.isDraft === true;
+
+  // github-delivery boundary: never merge or arm auto-merge on a
+  // release-train head branch — that approval belongs to the maintainer.
+  if (RELEASE_HEAD_PATTERN.test(headRef)) {
+    throw new GhError(
+      "release_boundary",
+      `refusing to merge release-train head '${headRef}': release approval is a maintainer decision (github-delivery)`,
+    );
+  }
+  if (prState !== "OPEN") {
+    throw new GhError(
+      "merge_blocked",
+      mergeBlockedMessage(
+        request.number,
+        view,
+        `is ${prState?.toLowerCase() ?? "unknown"}, not open`,
+      ),
+    );
+  }
+
+  let result: string;
+  let mergeEcho: Record<string, unknown> | null = null;
+  const endpoint = `pulls/${request.number}`;
+
+  if (request.disableAuto) {
+    await mergeWrite(() => ghApiDelete(repoRoot, request.repo, `${endpoint}/auto-merge`, options));
+    result = "auto_merge_disabled";
+  } else if (request.auto) {
+    if (isDraft) {
+      throw new GhError("merge_blocked", mergeBlockedMessage(request.number, view, "is a draft"));
+    }
+    if (mergeState !== null && AUTO_MERGE_STATE_REFUSED.has(mergeState)) {
+      throw new GhError(
+        "merge_blocked",
+        mergeBlockedMessage(request.number, view, "cannot be queued for auto-merge"),
+      );
+    }
+    mergeEcho = await mergeWrite(() =>
+      ghApiPost(
+        repoRoot,
+        request.repo,
+        `${endpoint}/auto-merge`,
+        { merge_method: request.method },
+        options,
+      ),
+    );
+    result = "auto_merge_enabled";
+  } else {
+    if (isDraft) {
+      throw new GhError("merge_blocked", mergeBlockedMessage(request.number, view, "is a draft"));
+    }
+    if (mergeState === null || MERGE_STATE_REFUSED.has(mergeState)) {
+      throw new GhError(
+        "merge_blocked",
+        mergeBlockedMessage(request.number, view, "is not mergeable"),
+      );
+    }
+    const payload: Record<string, unknown> = { sha: headSha };
+    if (request.method !== undefined) payload.merge_method = request.method;
+    mergeEcho = await mergeWrite(() =>
+      ghApiPut(repoRoot, request.repo, `${endpoint}/merge`, payload, options),
+    );
+    // Honest result: GitHub may accept the call yet leave the PR open
+    // (e.g. merge queue deferral) — never claim merged on its behalf.
+    result = mergeEcho.merged === true ? "merged" : "pending";
+  }
+
+  // Post-write truth: re-fetch state + refs so callers see exactly what
+  // GitHub recorded (state, auto_merge_request, head/base).
+  const [after, refs] = await Promise.all([
+    fetchPrMergeState(repoRoot, request.repo, request.number, options),
+    fetchPrRefs(repoRoot, request.repo, request.number, options),
+  ]);
+  const out: Record<string, unknown> = {
+    number: request.number,
+    head: refs.head,
+    base: refs.base,
+    action: request.disableAuto
+      ? "auto_merge_disable"
+      : request.auto
+        ? "auto_merge_enable"
+        : "merge",
+    method: request.method ?? null,
+    result,
+    pre_merge_state: {
+      merge_state_status: mergeState,
+      review_decision: upperOrNull(view.reviewDecision),
+      mergeable: upperOrNull(view.mergeable),
+    },
+    state: upperOrNull(after.state),
+    is_draft: after.isDraft === true,
+    auto_merge_request: mapAutoMergeRequest(after.autoMergeRequest),
+    // Bounded echo of the REST write response ({merged, sha, message} for
+    // merge; the auto-merge request object for enable). Small by
+    // construction — no user content flows through these endpoints.
+    merge: mergeEcho,
+  };
+  return out;
 }

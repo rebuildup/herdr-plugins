@@ -10,11 +10,14 @@ operations (`fetch`, `push`, `remote` list), and the GitHub PR surface
 v0.3.0 extends the PR surface with read-only review/check/log access
 (`pr reviews|comments|checks|logs`). v0.4.0 adds forge review/comment
 mutations (`pr review|comment|reply|reviewers`) behind a mandatory
-`--expect-head` stale-head guard. v0.6.0 adds the GitHub issue surface
+`--expect-head` stale-head guard. v0.5.0 adds `pr merge`
+(immediate merge / auto-merge enable / disable) behind the same guard
+plus merge-state re-verification and a release-train head refusal
+(ADR-0030). v0.6.0 adds the GitHub issue surface
 (`issue list|view|create|edit|comment|close` via `gh`) and pane↔issue
 links (`issue link|unlink|links`) delegated to `rebuildup.inbox`.
-Merge/auto-merge and non-GitHub forges are later tickets. Checkpoint
-integration is Issue #4.
+Non-GitHub forges and merge-queue/stack specifics are
+later tickets. Checkpoint integration is Issue #4.
 
 ## Purpose
 
@@ -71,7 +74,7 @@ invoked only on user/agent request.
 | `fetch` | `git fetch [remote] [--prune]`; longer `remoteTimeoutMs` budget. |
 | `push` | `git push [--set-upstream] [--force-with-lease] [remote] [refspec]`; plain `--force` is never exposed. |
 | `remote` | Read-only remote list; URLs are reported with embedded credentials stripped. |
-| `pr` | GitHub PR surface via host `gh`: `list` / `status` / `create` / `view` / `reviews` / `comments` / `checks` / `logs` / `review` / `comment` / `reply` / `reviewers`. |
+| `pr` | GitHub PR surface via host `gh`: `list` / `status` / `create` / `view` / `reviews` / `comments` / `checks` / `logs` / `review` / `comment` / `reply` / `reviewers` / `merge`. |
 | `issue` | GitHub issue surface via host `gh`: `list` / `view` / `create` / `edit` / `comment` / `close`, plus pane↔issue `link` / `unlink` / `links` delegated to `rebuildup.inbox`. |
 | `project` | Compute `status` for a pane and project pane metadata tokens. |
 
@@ -264,20 +267,38 @@ client. Repo resolution is `gh repo view` inside the pane's repo root
   `gh pr edit --add-reviewer/--remove-reviewer`. All mutation payloads
   go through `gh api --input -` (stdin) or plain argv flags — bodies
   never appear in gh argv.
+- `pr merge` (v0.5.0, Issue #173, ADR-0030): three modes — immediate
+  merge (`PUT pulls/{n}/merge`, `sha` pinned to the verified head,
+  optional `--squash|--merge|--rebase`), auto-merge enable
+  (`POST pulls/{n}/auto-merge`, method flag required), and auto-merge
+  disable (`DELETE pulls/{n}/auto-merge`). On top of `--expect-head`,
+  the plugin re-fetches `mergeStateStatus`/`reviewDecision`/`isDraft`/
+  `headRefOid` via `gh pr view --json` immediately before the write.
+  Immediate merge proceeds only on `CLEAN`/`UNSTABLE`; other states,
+  drafts, and non-open PRs fail with `kind: "merge_blocked"` carrying
+  the observed values. Auto-merge refuses only `DIRTY`/`DRAFT`/
+  `UNKNOWN` (pending checks are its purpose) and reports the armed
+  `auto_merge_request`. gh HTTP 405/409/422 map to `merge_blocked`.
+  The result is re-fetched post-write: `result` is `merged` only when
+  GitHub's response says `merged: true` (`pending` otherwise), and
+  `state`/`auto_merge_request` reflect what GitHub recorded — merge
+  queue semantics are reported, never guessed.
 - **Stale-head guard (mandatory):** every forge mutation requires
   `--expect-head <full sha>`; the plugin re-fetches the PR head
   immediately before writing and refuses with `kind: "stale_head"` on
-  mismatch. Reviews additionally pin `commit_id` to that sha.
+  mismatch. Reviews pin `commit_id`; merges pin `sha` in the REST body.
 - **Release boundary:** mutations are explicit invocations only — no
   automation path submits reviews, posts comments, requests reviewers,
-  merges, or auto-merges. The plugin never approves its own release PR
-  or merges `release-* -> main`; that stays a maintainer decision
-  (github-delivery skill).
+  merges, or auto-merges. `pr merge` hard-refuses PRs whose **head**
+  branch matches `release-<digits>(-<digits>)*` with
+  `kind: "release_boundary"` (merge and auto-merge alike): `release-* ->
+  main` approval stays a maintainer decision (github-delivery skill).
+  Ticket PRs targeting a release branch as base are unaffected.
 - The plugin exposes PR state but never acts on merge/review gates;
-  merge/auto-merge, editing or deleting existing reviews/comments,
-  `pr checkout`/worktree creation (herdr/Worktrunk lifecycle
-  responsibility — reference only), and non-GitHub forges are out of
-  scope.
+  editing or deleting existing reviews/comments, merge-queue
+  manipulation, GitHub stack merges, `pr checkout`/worktree creation
+  (herdr/Worktrunk lifecycle responsibility — reference only), and
+  non-GitHub forges are out of scope.
 
 ## Forge: GitHub issues via `gh` (Issue #174)
 
@@ -367,14 +388,14 @@ Unknown keys are ignored; invalid values fall back to defaults.
 ## Non-goals
 
 - No daemon, no hooks that write plugin state, no polling.
-- No PR merge/auto-merge operations, no editing/deleting existing
-  reviews or comments, and no non-GitHub forge integrations (the
-  `gh`-CLI PR surface covers list/status/create/view plus read-only
-  reviews/comments/checks/logs and explicit review/comment/reviewer
-  mutations behind `--expect-head`; upstream `source-control.md`'s
-  wider surface — auto-merge, GitLab/Forgejo/Gitea/Bitbucket/Azure
-  DevOps/GitCafe/Cursor Origin — is tracked in the feature ledger for
-  later trains).
+- No merge-queue manipulation, GitHub stack merges, editing/deleting
+  existing reviews or comments, and no non-GitHub forge integrations
+  (the `gh`-CLI PR surface covers list/status/create/view plus
+  read-only reviews/comments/checks/logs and explicit
+  review/comment/reviewer/merge mutations behind `--expect-head`;
+  upstream `source-control.md`'s wider surface — GitLab/Forgejo/Gitea/
+  Bitbucket/Azure DevOps/GitCafe/Cursor Origin — is tracked in the
+  feature ledger for later trains).
 - No destructive git operations (see Local mutations).
 - No parsing of GitHub remotes beyond what `gh`/git provide, no provider
   integrations.

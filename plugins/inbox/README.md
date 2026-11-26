@@ -27,6 +27,13 @@ settle / snooze / pin / archive / manual-ordering / restore organize model.
 - `link`/`unlink`/`links` manage user-declared PR/Issue references
   (`<repo>#<n>`) per pane — explicit associations only, no forge-event
   auto-linking; stale links never attach to a new agent generation.
+- `watch-pr` is an opt-in PR-update watcher: it polls declared `pr` links
+  through the `rebuildup.git` plugin's public CLI (`pr view`/`comments`/
+  `checks`) and restores attention — clears settle/snooze/archive marks —
+  on qualifying transitions (merge/close, new failing check, merge
+  conflict, new non-self review/comment). No daemon, no webhook; freshness,
+  backoff, and stop conditions are part of the v1 contract
+  (`docs/contracts/inbox-v1.md` → `watch-pr`).
 - `restore` returns a pane to the inbox and clears all organize state
   (declared links are preserved).
 - `list` emits the versioned JSON contract (`herdr-plugins.inbox/v1`) for TUI,
@@ -58,6 +65,7 @@ bun run src/cli.ts links <pane_id>
 bun run src/cli.ts reconcile
 bun run src/cli.ts transitions [--after <seq>] [--limit <n>]
 bun run src/cli.ts watch [--interval SECONDS]
+bun run src/cli.ts watch-pr [pane_id] [--interval SECONDS] [--once] [--git-root PATH]
 bun run src/cli.ts capability
 ```
 
@@ -72,6 +80,12 @@ next command invocation — see `docs/specs/inbox.md` for the constraint.
 log (ADR-0029): every settle/snooze/restore/clear is recorded with a
 monotonic `seq`, and consumers drain it via `--after <seq>` —
 `rebuildup.projects` uses it for `runOnSettle`/`stopOnSettle` triggers.
+
+`watch-pr` is likewise opt-in: run it (or `watch-pr --once` per
+invocation) only while you want forge polling. It reads PR state solely
+via the installed `rebuildup.git` plugin's CLI — install that plugin (or
+point `--git-root`/`config.json gitPluginRoot` at it) for watching to
+work; without it every poll reports an explicit error with backoff.
 
 ## State
 

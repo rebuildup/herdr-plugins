@@ -13,7 +13,7 @@
 
 import { reportPaneMetadata, sessionSnapshot } from "../../../packages/herdr-client/src/index";
 import { resolveEntry } from "./model";
-import { sessionEntries, sessionKeyFor, updateState } from "./state";
+import { removeWatchLink, sessionEntries, sessionKeyFor, updateState } from "./state";
 import { appendClearedTransitions, appendTransition } from "./transitions";
 
 interface EventEnvelope {
@@ -65,6 +65,14 @@ async function main(): Promise<void> {
           entry.snoozed !== undefined ||
           entry.archived !== undefined);
       if (entries) delete entries[paneId];
+      // Drop every watch baseline for the closed pane: its declared links
+      // died with the entry, so no poll baseline may outlive them (#178).
+      const paneWatch = state.watch?.[sessionKey]?.[paneId];
+      if (paneWatch) {
+        for (const ref of Object.keys(paneWatch)) {
+          removeWatchLink(state, sessionKey, paneId, ref);
+        }
+      }
       if (hadHideKind) {
         appendTransition(state, sessionKey, {
           kind: "cleared",

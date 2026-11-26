@@ -39,7 +39,7 @@ bun run src/cli.ts pr list|status|create|view|reviews|comments|checks|logs
         [--base B] [--head B]
     pr reviews|comments|checks <pane> <number>
     pr logs <pane> <number> [--run ID | --job ID [--lines N]]
-bun run src/cli.ts pr review|comment|reply|reviewers <pane_id> [args]
+bun run src/cli.ts pr review|comment|reply|reviewers|merge <pane_id> [args]
     [--repo owner/name] --expect-head <full-sha>   (required)
     pr review <pane> <number> --approve|--request-changes|--comment
         [--body B | --body-file PATH|-]
@@ -48,6 +48,8 @@ bun run src/cli.ts pr review|comment|reply|reviewers <pane_id> [args]
     pr reply <pane> <number> <comment-id> --body B|--body-file PATH|-
     pr reviewers <pane> <number>
         [--add-reviewer LOGIN[,LOGIN]...] [--remove-reviewer LOGIN...]
+    pr merge <pane> <number> [--squash|--merge|--rebase]
+        [--auto | --disable-auto]
 bun run src/cli.ts issue list|view|create|edit|comment|close
     <pane_id> [args] [--repo owner/name]
     issue list: [--limit N] [--state open|closed|all]
@@ -85,10 +87,17 @@ plus read-only `reviews` (submitted reviews + review requests),
 submits APPROVE/REQUEST_CHANGES/COMMENT reviews — with optional line
 comments via `--comments-file` — `pr comment` posts conversation
 comments, `pr reply` answers review threads, and `pr reviewers`
-requests/dismisses reviewers (`gh pr edit`). Every forge mutation
-requires `--expect-head <full sha>` (the `head.sha` from a prior read);
-the plugin re-fetches the PR head and refuses with `stale_head` when
-it moved. Merge/auto-merge are intentionally not exposed.
+requests/dismisses reviewers (`gh pr edit`). `pr merge` performs an
+immediate merge (`--squash|--merge|--rebase`), arms GitHub auto-merge
+(`--auto`, method flag required), or disarms it (`--disable-auto`).
+Every forge mutation requires `--expect-head <full sha>` (the
+`head.sha`/`headRefOid` from a prior read); the plugin re-fetches the
+PR head and refuses with `stale_head` when it moved. `pr merge`
+additionally re-verifies `mergeStateStatus`/`reviewDecision`/`isDraft`
+immediately before writing — non-mergeable states fail with
+`merge_blocked`, and PRs whose head branch is a release train
+(`release-x-y-z`) are refused with `release_boundary` so release
+approval stays a maintainer decision (ADR-0030).
 `issue` exposes GitHub issues through the same `gh` path —
 `list`/`view`/`create`/`edit`/`comment`/`close` with the same repo
 resolution, bounded reads, and never-in-argv body discipline. Issues
@@ -102,7 +111,7 @@ staleness follows inbox-v1 rules verbatim.
 `git_ahead_behind` pane metadata tokens.
 
 Full contract: `docs/contracts/git-v1.md`. Spec: `docs/specs/git.md`.
-Design: ADR-0006/0007/0008.
+Design: ADR-0006/0007/0008/0030.
 
 ## Notes
 
@@ -113,9 +122,13 @@ Design: ADR-0006/0007/0008.
   mutations (`pr review|comment|reply|reviewers`) behind the mandatory
   `--expect-head` stale-head guard — explicit invocations only; the
   plugin never approves its own release PR or merges release branches.
-  Merge/auto-merge and non-GitHub forges are later tickets. No
-  destructive git operations are exposed (ADR-0007); force push
-  requires the explicit `--force-with-lease` flag.
+  v0.5.0 adds `pr merge`
+  (immediate merge / auto-merge enable / disable) with merge-state
+  re-verification and a hard refusal on release-train head branches —
+  release approval stays a maintainer decision. Merge-queue
+  manipulation, GitHub stack merges, and non-GitHub forges are later
+  tickets. No destructive git operations are exposed (ADR-0007);
+  force push requires the explicit `--force-with-lease` flag.
   v0.6.0 adds the GitHub issue surface (`issue list|view|create|edit|
   comment|close` via `gh`) and pane↔issue links (`issue link|unlink|
   links`) delegated to `rebuildup.inbox` — inbox owns the link store
