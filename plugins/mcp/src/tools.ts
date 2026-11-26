@@ -1,6 +1,7 @@
 /**
  * Tool registry + handlers for `rebuildup.mcp` (contract
- * `herdr-plugins.mcp/v1`, T2 #138 read surface).
+ * `herdr-plugins.mcp/v1`, T2 #138 read surface + T3 #139 mutation
+ * surface).
  *
  * Every implemented tool returns a structured payload that the server
  * wraps as `{contract, ok:true, tool, result}` in `structuredContent`
@@ -16,8 +17,10 @@
 
 import os from "node:os";
 import {
+  AGENT_STATUSES,
   type AgentInfo,
   type AgentReadResult,
+  type AgentStatus,
   agentGet,
   agentList,
   agentRead,
@@ -26,6 +29,7 @@ import {
   paneAgentEntries,
   type SessionSnapshot,
   sessionSnapshot,
+  workspaceCreate,
 } from "../../../packages/herdr-client/src/index";
 import {
   ACCESS_LEVELS,
@@ -43,7 +47,7 @@ import {
   UPSTREAM_GAPS,
 } from "./model";
 import {
-  PLANNED_PLUGIN_CONTRACTS,
+  MUTATION_PLUGIN_CONTRACTS,
   type PluginId,
   READ_PLUGIN_CONTRACTS,
   resolvePluginSource,
@@ -328,20 +332,56 @@ function optionalStringArray(args: Record<string, unknown>, key: string): string
 
 // --- Plugin CLI helpers --------------------------------------------------------
 
-/** Map a sibling-CLI failure kind/message onto the contract error codes. */
+/**
+ * Map a sibling-CLI failure kind/message onto the contract error codes.
+ * Specific kinds are checked before the generic `session`/`not_found`
+ * substrings so e.g. `resume_session_mismatch` never degrades to
+ * `session_unreachable`. Kinds with no dedicated contract code keep
+ * their original value in `details.plugin_kind` — the precise sibling
+ * kind (e.g. `requires_interactive_input`) is never lost.
+ */
 function mapPluginErrorKind(kind: string | undefined, message: string): McpErrorCode {
   const k = (kind ?? "").toLowerCase();
   const m = message.toLowerCase();
-  if (k.includes("not_found") || k.includes("no_pane_cwd") || m.includes("not found")) {
+  if (k.includes("stale")) return "stale_generation";
+  if (k.includes("requires_interactive_input") || k.includes("agent_blocked")) {
+    // herdr has no structured dialog/approval response API (ADR-0019,
+    // upstream herdrdev/herdr#6196): a blocked agent cannot accept
+    // agent.prompt — an upstream capability gap, surfaced honestly.
+    return "upstream_gap";
+  }
+  if (
+    k.includes("unsupported") ||
+    k.includes("provider_unknown") ||
+    k.includes("worktree_unsupported") ||
+    k.includes("busy")
+  ) {
+    return "unsupported";
+  }
+  if (
+    k.includes("unsafe_agent_argument") ||
+    k.includes("invalid") ||
+    k.includes("usage") ||
+    k.includes("required")
+  ) {
+    return "invalid_params";
+  }
+  if (k.includes("no_agent_session") || k.includes("mismatch")) {
+    return "invalid_params";
+  }
+  if (
+    k.includes("not_found") ||
+    k.includes("no_pane_cwd") ||
+    k.includes("missing") ||
+    m.includes("not found")
+  ) {
     return "not_found";
   }
-  if (k.includes("not_a_repo") || k.includes("bare_repo")) return "unsupported";
-  if (k.includes("git_missing")) return "unsupported";
+  if (k.includes("not_a_repo") || k.includes("bare_repo") || k.includes("git_missing")) {
+    return "unsupported";
+  }
   if (k.includes("session") || k.includes("socket") || k.includes("unreachable")) {
     return "session_unreachable";
-  }
-  if (k.includes("invalid") || k.includes("usage") || k.includes("required")) {
-    return "invalid_params";
   }
   return "internal";
 }
@@ -363,11 +403,12 @@ function childErrorEnvelope(stderr: string): {
 }
 
 /**
- * Run a sibling plugin read command and return its JSON document.
+ * Run a sibling plugin CLI command (read or mutation) and return its
+ * JSON document.
  * Resolution failure → `plugin_unavailable`; non-zero exit → mapped
  * contract error with the child's `error.kind` preserved in details.
  */
-async function pluginRead(
+async function pluginCommand(
   ctx: ToolContext,
   pluginId: PluginId,
   pluginContract: string,
@@ -431,6 +472,127 @@ async function paneIdentity(
   return identity;
 }
 
+// --- Mutation helpers (T3, #139) ----------------------------------------------
+
+/**
+ * `rebuildup.controls` provider permission modes (controls/v1 launch
+ * table, ADR-0018). Mirrored locally — the MCP plugin consumes
+ * controls only through its CLI contract and never imports plugin
+ * internals (ADR-0025 §3).
+ */
+export const CONTROLS_PERMISSION_MODES = [
+  "supervised",
+  "auto-accept-edits",
+  "auto",
+  "full-access",
+] as const;
+export type ControlsPermissionMode = (typeof CONTROLS_PERMISSION_MODES)[number];
+
+/** Ordered least→most permissive; used for the access-level cap. */
+const PERMISSION_MODE_RANK: Record<ControlsPermissionMode, number> = {
+  supervised: 0,
+  "auto-accept-edits": 1,
+  auto: 2,
+  "full-access": 3,
+};
+
+/** The highest provider permission mode each MCP access level may launch. */
+const ACCESS_PERMISSION_CAP: Record<AccessLevel, ControlsPermissionMode> = {
+  "read-only": "supervised", // unreachable: agent_start requires supervised+
+  supervised: "supervised",
+  full: "full-access",
+};
+
+/**
+ * Record of one side effect a mutation performed, echoed in the tool
+ * result so callers can see exactly which herdr API / sibling-plugin
+ * CLI call ran (contract "副作用の可視性" — herdr stays the authority,
+ * the summary never replaces it).
+ */
+export interface MutationEffect {
+  surface: "herdr" | string;
+  method: string;
+  detail?: Record<string, unknown>;
+}
+
+function pluginCliEffect(
+  pluginId: PluginId,
+  command: string,
+  detail?: Record<string, unknown>,
+): MutationEffect {
+  return {
+    surface: pluginId,
+    method: `cli ${command}`,
+    ...(detail !== undefined ? { detail } : {}),
+  };
+}
+
+/** `expect_*` MCP args → controls `--expect-*` CLI flags. */
+function expectCliArgs(args: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  const pane = optionalString(args, "expect_pane");
+  if (pane !== undefined) out.push("--expect-pane", pane);
+  const seq = optionalNumber(args, "expect_state_seq");
+  if (seq !== undefined) out.push("--expect-state-seq", String(seq));
+  const session = optionalString(args, "expect_agent_session");
+  if (session !== undefined) out.push("--expect-agent-session", session);
+  return out;
+}
+
+/** String-array arg validated against herdr's agent status enum. */
+function optionalStatusArray(
+  args: Record<string, unknown>,
+  key: string,
+): AgentStatus[] | undefined {
+  const value = args[key];
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.some((v) => typeof v !== "string")) {
+    invalidParams(`argument ${key} must be an array of strings`);
+  }
+  for (const status of value as string[]) {
+    if (!(AGENT_STATUSES as readonly string[]).includes(status)) {
+      invalidParams(
+        `argument ${key} must contain only ${AGENT_STATUSES.join("|")}, got: ${status}`,
+      );
+    }
+  }
+  return value as AgentStatus[];
+}
+
+/** Flatten `until`-style status arrays into repeated CLI flags. */
+function statusCliArgs(flag: string, statuses: AgentStatus[] | undefined): string[] {
+  const out: string[] = [];
+  for (const status of statuses ?? []) out.push(flag, status);
+  return out;
+}
+
+/**
+ * Identity echo for a just-launched agent: resolve the agent now
+ * occupying `paneId` from a fresh snapshot; fall back to pane-level
+ * identity when the agent record is not yet visible (never fabricated
+ * — missing agent fields are simply absent).
+ */
+async function launchedAgentIdentity(
+  ctx: ToolContext,
+  paneId: string,
+): Promise<Record<string, unknown>> {
+  const snapshot = await liveSnapshot(ctx);
+  const agent = snapshot.agents?.[paneId];
+  if (agent !== undefined) {
+    const fields = agentIdentityFields(agent);
+    // Snapshot agent entries are keyed by pane_id and may omit the
+    // field itself; backfill from the key, then from the pane record.
+    if (fields.pane_id === undefined) fields.pane_id = paneId;
+    if (fields.workspace_id === undefined || fields.tab_id === undefined) {
+      const pane = (snapshot.panes ?? []).find((p) => p.pane_id === paneId);
+      fields.workspace_id ??= pane?.workspace_id;
+      fields.tab_id ??= pane?.tab_id;
+    }
+    return identityBlock(ctx, snapshot, fields);
+  }
+  return paneIdentity(ctx, snapshot, paneId);
+}
+
 // --- Capability ----------------------------------------------------------------
 
 /** Per-plugin availability for `herdr_capability` / CLI `capability`. */
@@ -440,7 +602,7 @@ export async function pluginAvailability(
   const entries: Record<string, unknown>[] = [];
   for (const [pluginId, contract] of [
     ...Object.entries(READ_PLUGIN_CONTRACTS),
-    ...Object.entries(PLANNED_PLUGIN_CONTRACTS),
+    ...Object.entries(MUTATION_PLUGIN_CONTRACTS),
   ] as Array<[string, string]>) {
     const probed = await ctx.probePlugin(pluginId);
     if (probed.ok) {
@@ -644,10 +806,174 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     ),
     spec: TOOL_TABLE.find((t) => t.name === "usage_report") as ToolSpec,
   },
+  // --- Mutations (T3, #139) ---------------------------------------------------
+  {
+    name: "agent_prompt",
+    description:
+      "Submit prompt text to an agent (rebuildup.controls send → agent.prompt; blocked agents are refused upstream_gap/requires_interactive_input). Optional wait_until/timeout_ms observe post-submit status. expect_* args pin the agent generation; stale targets fail stale_generation before any input is sent.",
+    inputSchema: schema(
+      {
+        target: { type: "string", description: "herdr agent target (pane id or agent name)" },
+        text: {
+          type: "string",
+          description: "prompt text (must not start with '--')",
+        },
+        wait: { type: "boolean", description: "wait for a post-submit status (controls --wait)" },
+        wait_until: {
+          type: "array",
+          items: { type: "string", enum: [...AGENT_STATUSES] },
+          description: "statuses to wait for after submission",
+        },
+        timeout_ms: { type: "number", description: "wait timeout in ms" },
+        ...EXPECT_SCHEMA.properties,
+      },
+      ["target", "text"],
+    ),
+    spec: TOOL_TABLE.find((t) => t.name === "agent_prompt") as ToolSpec,
+  },
+  {
+    name: "agent_wait",
+    description:
+      "Block until an agent reaches one of until[] (default upstream idle/done/blocked) or timeout_ms elapses (rebuildup.controls wait → agent.wait). Read-level blocking observation; no mutation.",
+    inputSchema: schema(
+      {
+        target: { type: "string", description: "herdr agent target (pane id or agent name)" },
+        until: {
+          type: "array",
+          items: { type: "string", enum: [...AGENT_STATUSES] },
+          description: "statuses to wait for",
+        },
+        timeout_ms: { type: "number", description: "wait timeout in ms" },
+        ...EXPECT_SCHEMA.properties,
+      },
+      ["target"],
+    ),
+    spec: TOOL_TABLE.find((t) => t.name === "agent_wait") as ToolSpec,
+  },
+  {
+    name: "agent_interrupt",
+    description:
+      "PTY-level key injection into an agent's terminal (rebuildup.controls interrupt → agent.send_keys; default esc). NOT a structured interrupt API — effect depends on the provider's keybindings.",
+    inputSchema: schema(
+      {
+        target: { type: "string", description: "herdr agent target (pane id or agent name)" },
+        keys: {
+          type: "array",
+          items: { type: "string" },
+          description: 'key names to inject (e.g. ["esc"], ["ctrl+c"]); default ["esc"]',
+        },
+        ...EXPECT_SCHEMA.properties,
+      },
+      ["target"],
+    ),
+    spec: TOOL_TABLE.find((t) => t.name === "agent_interrupt") as ToolSpec,
+  },
+  {
+    name: "agent_start",
+    description:
+      "Launch an agent in an existing shell pane (rebuildup.controls start → agent.start with the per-provider launch table). permission_mode is capped by the negotiated access level: supervised allows only 'supervised'; full allows all modes. extra_args are denylist-screened provider passthrough (no --unsafe-args equivalent).",
+    inputSchema: schema(
+      {
+        pane_id: { type: "string", description: "existing pane at an interactive shell prompt" },
+        agent: { type: "string", description: "provider agent kind (e.g. claude, codex)" },
+        name: { type: "string", description: "agent name ([a-z][a-z0-9_-]{0,31})" },
+        model: { type: "string" },
+        reasoning: { type: "string" },
+        permission_mode: {
+          type: "string",
+          enum: [...CONTROLS_PERMISSION_MODES],
+          description: "provider permission mode; capped by access level",
+        },
+        resume: { type: "string", description: "raw provider session value to resume" },
+        resume_from: {
+          type: "string",
+          description: "agent target whose reported agent_session to resume",
+        },
+        extra_args: {
+          type: "array",
+          items: { type: "string" },
+          description: "provider CLI arg passthrough (--arg; denylist enforced, no unsafe opt-out)",
+        },
+        timeout_ms: { type: "number", description: "startup readiness timeout (3000,300000]" },
+        wait: { type: "boolean", description: "post-launch agent.wait observation" },
+        wait_until: {
+          type: "array",
+          items: { type: "string", enum: [...AGENT_STATUSES] },
+        },
+        wait_timeout_ms: { type: "number" },
+        ...EXPECT_SCHEMA.properties,
+      },
+      ["pane_id", "agent"],
+    ),
+    spec: TOOL_TABLE.find((t) => t.name === "agent_start") as ToolSpec,
+  },
+  {
+    name: "workspace_create",
+    description:
+      "Create a dedicated workspace+tab+root pane (herdr workspace.create). No env passthrough in v1 — pane environment is herdr's authority and tool arguments must never carry secrets.",
+    inputSchema: schema({
+      cwd: { type: "string", description: "working directory for the root pane" },
+      label: { type: "string", description: "workspace label" },
+      focus: {
+        type: "boolean",
+        description: "focus the new workspace (herdr default applies when omitted)",
+      },
+    }),
+    spec: TOOL_TABLE.find((t) => t.name === "workspace_create") as ToolSpec,
+  },
+  {
+    name: "handoff_invoke",
+    description:
+      "Invoke rebuildup.handoff execute/delegate/merge-back (ADR-0021 boundaries; same-session only, --remote is not exposed in v1). The handoff plugin owns record state and staleness gates; this tool only forwards the contract CLI call.",
+    inputSchema: schema(
+      {
+        operation: {
+          type: "string",
+          enum: ["execute", "delegate", "merge-back"],
+          description: "handoff operation",
+        },
+        id: {
+          type: "string",
+          description:
+            "handoff id (execute) / parent handoff id (delegate) / child handoff id (merge-back)",
+        },
+        // execute/delegate target selection
+        target_pane: { type: "string" },
+        target_workspace: { type: "string" },
+        new_workspace: { type: "boolean" },
+        worktree: {
+          type: "boolean",
+          description: "execute/delegate: herdr worktree.create target",
+        },
+        worktree_branch: { type: "string" },
+        worktree_base: { type: "string" },
+        // launch hints
+        provider: { type: "string", description: "opaque provider/route hint" },
+        model: { type: "string" },
+        strategy: { type: "string", enum: ["native_resume", "portable_context"] },
+        task: { type: "string", description: "delegate/merge-back task text" },
+        // payload flags (delegate/merge-back)
+        note: { type: "string" },
+        requirement: { type: "array", items: { type: "string" } },
+        conversation: { type: "array", items: { type: "string" } },
+        checkpoint: { type: "array", items: { type: "string" } },
+        external: { type: "array", items: { type: "string" } },
+        handoff: { type: "array", items: { type: "string" } },
+        link_note: { type: "string" },
+        // execution control
+        wait_ms: { type: "number" },
+        cleanup_on_failure: { type: "boolean" },
+        no_execute: { type: "boolean", description: "delegate/merge-back: record intent only" },
+        dry_run: { type: "boolean", description: "preview without mutating" },
+      },
+      ["operation", "id"],
+    ),
+    spec: TOOL_TABLE.find((t) => t.name === "handoff_invoke") as ToolSpec,
+  },
 ];
 
 // Planned tools still appear in tools/list (contract "unsupported"
-// semantics) but have no handler until T3/T4.
+// semantics) but have no handler until T4 (#140 events).
 const PLANNED_DEFINITIONS: ToolDefinition[] = TOOL_TABLE.filter(
   (spec) => !TOOL_DEFINITIONS.some((d) => d.name === spec.name),
 ).map((spec) => ({
@@ -798,7 +1124,7 @@ const HANDLERS: Record<string, ToolHandler> = {
     if (type !== undefined) cliArgs.push("--type", type);
     if (limit !== undefined) cliArgs.push("--limit", String(Math.floor(limit)));
     if (cursor !== undefined) cliArgs.push("--cursor", cursor);
-    return pluginRead(
+    return pluginCommand(
       ctx,
       "rebuildup.conversations",
       READ_PLUGIN_CONTRACTS["rebuildup.conversations"],
@@ -815,7 +1141,7 @@ const HANDLERS: Record<string, ToolHandler> = {
     if (pane !== undefined) cliArgs.push("--pane", pane);
     if (sessionId !== undefined) cliArgs.push("--session-id", sessionId);
     if (provider !== undefined) cliArgs.push("--provider", provider);
-    return pluginRead(
+    return pluginCommand(
       ctx,
       "rebuildup.conversations",
       READ_PLUGIN_CONTRACTS["rebuildup.conversations"],
@@ -827,7 +1153,7 @@ const HANDLERS: Record<string, ToolHandler> = {
     const paneId = requireString(args, "pane_id");
     const snapshot = await liveSnapshot(ctx);
     const identity = await paneIdentity(ctx, snapshot, paneId);
-    const out = await pluginRead(ctx, "rebuildup.git", READ_PLUGIN_CONTRACTS["rebuildup.git"], [
+    const out = await pluginCommand(ctx, "rebuildup.git", READ_PLUGIN_CONTRACTS["rebuildup.git"], [
       "status",
       paneId,
     ]);
@@ -841,7 +1167,7 @@ const HANDLERS: Record<string, ToolHandler> = {
     const identity = await paneIdentity(ctx, snapshot, paneId);
     const cliArgs = ["files", paneId];
     for (const p of paths ?? []) cliArgs.push("--path", p);
-    const out = await pluginRead(
+    const out = await pluginCommand(
       ctx,
       "rebuildup.git",
       READ_PLUGIN_CONTRACTS["rebuildup.git"],
@@ -873,7 +1199,7 @@ const HANDLERS: Record<string, ToolHandler> = {
     if (since !== undefined) cliArgs.push("--since", since);
     if (until !== undefined) cliArgs.push("--until", until);
     for (const p of paths ?? []) cliArgs.push("--path", p);
-    const out = await pluginRead(
+    const out = await pluginCommand(
       ctx,
       "rebuildup.git",
       READ_PLUGIN_CONTRACTS["rebuildup.git"],
@@ -885,7 +1211,7 @@ const HANDLERS: Record<string, ToolHandler> = {
   async projects_list(args, ctx) {
     const cliArgs = ["list"];
     if (optionalBoolean(args, "all") === true) cliArgs.push("--all");
-    return pluginRead(
+    return pluginCommand(
       ctx,
       "rebuildup.projects",
       READ_PLUGIN_CONTRACTS["rebuildup.projects"],
@@ -907,7 +1233,385 @@ const HANDLERS: Record<string, ToolHandler> = {
     if (provider !== undefined) cliArgs.push("--provider", provider);
     // Read-only surface: never pass --refresh (index mutation stays with
     // the conversations plugin's own commands).
-    return pluginRead(ctx, "rebuildup.usage", READ_PLUGIN_CONTRACTS["rebuildup.usage"], cliArgs);
+    return pluginCommand(ctx, "rebuildup.usage", READ_PLUGIN_CONTRACTS["rebuildup.usage"], cliArgs);
+  },
+
+  // --- Mutation handlers (T3, #139) -------------------------------------------
+  //
+  // Every mutation handler: (1) is gated by TOOL_TABLE access level in
+  // callTool before dispatch; (2) resolves the target live and applies
+  // expect_* stale-generation guards BEFORE any side effect; (3) echoes
+  // the contract identity block; (4) reports the executed herdr API /
+  // sibling CLI call in `effects`.
+
+  async agent_prompt(args, ctx) {
+    const target = requireString(args, "target");
+    const text = requireString(args, "text");
+    // controls parses `--*` argv as flags; prompt text must be a
+    // positional, so a leading-dash text would be silently re-parsed.
+    if (text.startsWith("--")) {
+      invalidParams("text must not start with '--' (controls CLI flag syntax)");
+    }
+    const wait = optionalBoolean(args, "wait");
+    const waitUntil = optionalStatusArray(args, "wait_until");
+    const timeoutMs = optionalNumber(args, "timeout_ms");
+    // Resolve + generation-guard first: stale/reused identities are
+    // refused before the controls CLI (and its agent.prompt) ever runs.
+    const { identity } = await resolveAgent(ctx, target, args);
+    const cliArgs = ["send", target, text];
+    if (wait === true) cliArgs.push("--wait");
+    cliArgs.push(...statusCliArgs("--wait-until", waitUntil));
+    if (timeoutMs !== undefined) cliArgs.push("--timeout-ms", String(timeoutMs));
+    cliArgs.push(...expectCliArgs(args));
+    const out = await pluginCommand(
+      ctx,
+      "rebuildup.controls",
+      MUTATION_PLUGIN_CONTRACTS["rebuildup.controls"],
+      cliArgs,
+    );
+    return {
+      ...out,
+      identity,
+      effects: [
+        pluginCliEffect("rebuildup.controls", "send", {
+          target,
+          waited: wait === true || waitUntil !== undefined || timeoutMs !== undefined,
+        }),
+      ],
+    };
+  },
+
+  async agent_wait(args, ctx) {
+    const target = requireString(args, "target");
+    const until = optionalStatusArray(args, "until");
+    const timeoutMs = optionalNumber(args, "timeout_ms");
+    const { identity } = await resolveAgent(ctx, target, args);
+    const cliArgs = ["wait", target];
+    cliArgs.push(...statusCliArgs("--until", until));
+    if (timeoutMs !== undefined) cliArgs.push("--timeout-ms", String(timeoutMs));
+    cliArgs.push(...expectCliArgs(args));
+    const out = await pluginCommand(
+      ctx,
+      "rebuildup.controls",
+      MUTATION_PLUGIN_CONTRACTS["rebuildup.controls"],
+      cliArgs,
+    );
+    return {
+      ...out,
+      identity,
+      effects: [pluginCliEffect("rebuildup.controls", "wait", { target })],
+    };
+  },
+
+  async agent_interrupt(args, ctx) {
+    const target = requireString(args, "target");
+    const keys = optionalStringArray(args, "keys");
+    const { identity } = await resolveAgent(ctx, target, args);
+    const cliArgs = ["interrupt", target];
+    for (const key of keys ?? []) cliArgs.push("--key", key);
+    cliArgs.push(...expectCliArgs(args));
+    const out = await pluginCommand(
+      ctx,
+      "rebuildup.controls",
+      MUTATION_PLUGIN_CONTRACTS["rebuildup.controls"],
+      cliArgs,
+    );
+    return {
+      ...out,
+      identity,
+      effects: [
+        pluginCliEffect("rebuildup.controls", "interrupt", {
+          target,
+          pty_level: true,
+          keys: keys ?? ["esc"],
+        }),
+      ],
+    };
+  },
+
+  async agent_start(args, ctx) {
+    const paneId = requireString(args, "pane_id");
+    const kind = requireString(args, "agent");
+    const name = optionalString(args, "name");
+    const model = optionalString(args, "model");
+    const reasoning = optionalString(args, "reasoning");
+    const permissionModeRaw = optionalString(args, "permission_mode");
+    const resume = optionalString(args, "resume");
+    const resumeFrom = optionalString(args, "resume_from");
+    const extraArgs = optionalStringArray(args, "extra_args");
+    const timeoutMs = optionalNumber(args, "timeout_ms");
+    const wait = optionalBoolean(args, "wait");
+    const waitUntil = optionalStatusArray(args, "wait_until");
+    const waitTimeoutMs = optionalNumber(args, "wait_timeout_ms");
+
+    if (resume !== undefined && resumeFrom !== undefined) {
+      invalidParams("agent_start accepts at most one of resume / resume_from");
+    }
+    let permissionMode: ControlsPermissionMode | undefined;
+    if (permissionModeRaw !== undefined) {
+      if (!(CONTROLS_PERMISSION_MODES as readonly string[]).includes(permissionModeRaw)) {
+        invalidParams(
+          `permission_mode must be one of ${CONTROLS_PERMISSION_MODES.join("|")}, got: ${permissionModeRaw}`,
+        );
+      }
+      permissionMode = permissionModeRaw as ControlsPermissionMode;
+    }
+
+    // Access-level permission cap (ADR-0025 §2, issue #139): an agent
+    // MCP starts must never run with more provider permission than the
+    // negotiated level. `supervised` pins the lowest mode (and refuses
+    // higher requests); `full` passes the caller's choice through.
+    // Evaluated before any socket call so over-cap requests fail
+    // capability_denied without touching the session.
+    const cap = ACCESS_PERMISSION_CAP[ctx.accessLevel];
+    let effectiveMode: ControlsPermissionMode | undefined;
+    if (permissionMode !== undefined) {
+      if (PERMISSION_MODE_RANK[permissionMode] > PERMISSION_MODE_RANK[cap]) {
+        throw new ToolError(
+          "capability_denied",
+          `permission_mode '${permissionMode}' exceeds the '${ctx.accessLevel}' access level (cap: '${cap}')`,
+          {
+            tool: "agent_start",
+            requested: permissionMode,
+            access_level: ctx.accessLevel,
+            cap,
+          },
+        );
+      }
+      effectiveMode = permissionMode;
+    } else if (ctx.accessLevel !== "full") {
+      // No explicit mode: still pin the cap so the provider default can
+      // never silently exceed the negotiated level.
+      effectiveMode = cap;
+    }
+
+    // The pane must exist in the live snapshot before anything is
+    // launched — a stale/reused pane id is refused, never started on.
+    const snapshot = await liveSnapshot(ctx);
+    const paneIdent = await paneIdentity(ctx, snapshot, paneId);
+
+    const cliArgs = ["start", paneId, "--agent", kind];
+    if (name !== undefined) cliArgs.push("--name", name);
+    if (model !== undefined) cliArgs.push("--model", model);
+    if (reasoning !== undefined) cliArgs.push("--reasoning", reasoning);
+    if (effectiveMode !== undefined) cliArgs.push("--permission-mode", effectiveMode);
+    if (resume !== undefined) cliArgs.push("--resume", resume);
+    if (resumeFrom !== undefined) cliArgs.push("--resume-from", resumeFrom);
+    for (const arg of extraArgs ?? []) cliArgs.push("--arg", arg);
+    if (timeoutMs !== undefined) cliArgs.push("--timeout-ms", String(timeoutMs));
+    if (wait === true) cliArgs.push("--wait");
+    cliArgs.push(...statusCliArgs("--wait-until", waitUntil));
+    if (waitTimeoutMs !== undefined) cliArgs.push("--wait-timeout-ms", String(waitTimeoutMs));
+    cliArgs.push(...expectCliArgs(args));
+
+    const out = await pluginCommand(
+      ctx,
+      "rebuildup.controls",
+      MUTATION_PLUGIN_CONTRACTS["rebuildup.controls"],
+      cliArgs,
+    );
+    const identity = await launchedAgentIdentity(ctx, paneId);
+    return {
+      ...out,
+      identity,
+      target_pane: paneIdent,
+      effects: [
+        pluginCliEffect("rebuildup.controls", "start", {
+          pane_id: paneId,
+          agent: kind,
+          permission_mode: effectiveMode ?? null,
+          permission_mode_capped: permissionMode !== effectiveMode,
+        }),
+      ],
+    };
+  },
+
+  async workspace_create(args, ctx) {
+    const cwd = optionalString(args, "cwd");
+    const label = optionalString(args, "label");
+    const focus = optionalBoolean(args, "focus");
+    const params: Parameters<typeof workspaceCreate>[0] = {};
+    if (cwd !== undefined) params.cwd = cwd;
+    if (label !== undefined) params.label = label;
+    if (focus !== undefined) params.focus = focus;
+    let created: Awaited<ReturnType<typeof workspaceCreate>>;
+    try {
+      created = await workspaceCreate(params, callOptions(ctx));
+    } catch (err) {
+      throw mapUpstreamError(err, "workspace.create");
+    }
+    const snapshot = await liveSnapshot(ctx);
+    const ws = created.workspace as Record<string, unknown>;
+    const tab = created.tab as Record<string, unknown>;
+    const rootPane = created.root_pane as Record<string, unknown>;
+    const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
+    const identity = identityBlock(ctx, snapshot, {
+      workspace_id: str(ws.workspace_id),
+      tab_id: str(tab.tab_id),
+      pane_id: str(rootPane.pane_id),
+    });
+    return {
+      created: {
+        workspace: created.workspace,
+        tab: created.tab,
+        root_pane: created.root_pane,
+      },
+      identity,
+      effects: [
+        {
+          surface: "herdr",
+          method: "workspace.create",
+          detail: {
+            cwd: cwd ?? null,
+            label: label ?? null,
+            focus: focus ?? null,
+          },
+        },
+      ],
+    };
+  },
+
+  async handoff_invoke(args, ctx) {
+    const operation = requireString(args, "operation");
+    if (!["execute", "delegate", "merge-back"].includes(operation)) {
+      invalidParams(`operation must be execute|delegate|merge-back, got: ${operation}`);
+    }
+    const id = requireString(args, "id");
+
+    // Per-operation flag allowlist → handoff CLI flags. Anything the
+    // caller supplies outside the operation's surface is rejected
+    // rather than silently dropped (honest params, no fabricated run).
+    const OP_SPECS: Record<
+      string,
+      {
+        value: Record<string, string>;
+        bool: Record<string, string>;
+        array: Record<string, string>;
+        number: Record<string, string>;
+      }
+    > = {
+      execute: {
+        value: {
+          target_pane: "--target-pane",
+          target_workspace: "--target-workspace",
+          worktree_branch: "--worktree-branch",
+          worktree_base: "--worktree-base",
+          provider: "--provider",
+          model: "--model",
+        },
+        bool: {
+          new_workspace: "--new-workspace",
+          worktree: "--worktree",
+          cleanup_on_failure: "--cleanup-on-failure",
+          dry_run: "--dry-run",
+        },
+        array: {},
+        number: { wait_ms: "--wait-ms" },
+      },
+      delegate: {
+        value: {
+          task: "--task",
+          strategy: "--strategy",
+          provider: "--provider",
+          model: "--model",
+          target_pane: "--target-pane",
+          target_workspace: "--target-workspace",
+          worktree_branch: "--worktree-branch",
+          worktree_base: "--worktree-base",
+          link_note: "--link-note",
+          note: "--note",
+        },
+        bool: {
+          new_workspace: "--new-workspace",
+          worktree: "--worktree",
+          cleanup_on_failure: "--cleanup-on-failure",
+          no_execute: "--no-execute",
+          dry_run: "--dry-run",
+        },
+        array: {
+          requirement: "--requirement",
+          conversation: "--conversation",
+          checkpoint: "--checkpoint",
+          external: "--external",
+          handoff: "--handoff",
+        },
+        number: { wait_ms: "--wait-ms" },
+      },
+      "merge-back": {
+        value: { task: "--task", link_note: "--link-note", note: "--note" },
+        bool: { no_execute: "--no-execute", dry_run: "--dry-run" },
+        array: {
+          requirement: "--requirement",
+          conversation: "--conversation",
+          checkpoint: "--checkpoint",
+          external: "--external",
+          handoff: "--handoff",
+        },
+        number: { wait_ms: "--wait-ms" },
+      },
+    };
+    const spec = OP_SPECS[operation] as (typeof OP_SPECS)[string];
+    const allowed = new Set([
+      ...Object.keys(spec.value),
+      ...Object.keys(spec.bool),
+      ...Object.keys(spec.array),
+      ...Object.keys(spec.number),
+    ]);
+    const provided = Object.keys(args).filter(
+      (k) => !["operation", "id"].includes(k) && args[k] !== undefined,
+    );
+    const rejected = provided.filter((k) => !allowed.has(k));
+    if (rejected.length > 0) {
+      invalidParams(
+        `arguments not valid for handoff ${operation}: ${rejected.join(", ")} ` +
+          `(valid: ${[...allowed].sort().join(", ")})`,
+        { operation, rejected },
+      );
+    }
+
+    // --worktree-branch/--worktree-base without --worktree is a usage
+    // error upstream; surface it here with the same honesty.
+    if (
+      spec.bool.worktree !== undefined &&
+      args.worktree !== true &&
+      (args.worktree_branch !== undefined || args.worktree_base !== undefined)
+    ) {
+      invalidParams("worktree_branch/worktree_base require worktree: true");
+    }
+
+    const cliArgs = [operation, id];
+    for (const [arg, flag] of Object.entries(spec.value)) {
+      const value = optionalString(args, arg);
+      if (value !== undefined) cliArgs.push(flag, value);
+    }
+    for (const [arg, flag] of Object.entries(spec.number)) {
+      const value = optionalNumber(args, arg);
+      if (value !== undefined) cliArgs.push(flag, String(value));
+    }
+    for (const [arg, flag] of Object.entries(spec.bool)) {
+      if (optionalBoolean(args, arg) === true) cliArgs.push(flag);
+    }
+    for (const [arg, flag] of Object.entries(spec.array)) {
+      for (const value of optionalStringArray(args, arg) ?? []) {
+        cliArgs.push(flag, value);
+      }
+    }
+
+    // Session-level identity echo: the record's own transfer identity
+    // travels inside the handoff result; the MCP block pins the herdr
+    // session this invocation targeted.
+    const snapshot = await liveSnapshot(ctx);
+    const out = await pluginCommand(
+      ctx,
+      "rebuildup.handoff",
+      MUTATION_PLUGIN_CONTRACTS["rebuildup.handoff"],
+      cliArgs,
+    );
+    return {
+      ...out,
+      identity: identityBlock(ctx, snapshot),
+      effects: [pluginCliEffect("rebuildup.handoff", operation, { id })],
+    };
   },
 };
 
