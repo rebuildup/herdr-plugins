@@ -111,15 +111,34 @@ interface MarkLike {
   until?: string;
 }
 
-function markExpiredOrAdvanced(mark: MarkLike, agent: AgentInfo | undefined, now: Date): boolean {
-  if (mark.until && Date.parse(mark.until) <= now.getTime()) return true;
-  if (!sameAgentSession(mark.agent_session, agentSessionRef(agent))) return true;
+/**
+ * Why a mark was auto-cleared, when it was. `expired` = snooze deadline
+ * passed; `session_mismatch` = the recorded agent-session fingerprint no
+ * longer matches; `generation` = `state_change_seq` advanced past the
+ * recorded generation. These are the resolution-time causes recorded on
+ * `cleared` transitions (#182); `pane_closed`/`pruned` come from their
+ * own call sites.
+ */
+export type ResolutionClearCause = "expired" | "generation" | "session_mismatch";
+
+export interface ClearedMarkInfo {
+  field: "settled" | "snoozed" | "archived" | "pinned";
+  cause: ResolutionClearCause;
+}
+
+function markClearCause(
+  mark: MarkLike,
+  agent: AgentInfo | undefined,
+  now: Date,
+): ResolutionClearCause | null {
+  if (mark.until && Date.parse(mark.until) <= now.getTime()) return "expired";
+  if (!sameAgentSession(mark.agent_session, agentSessionRef(agent))) return "session_mismatch";
   const seq = currentSeq(agent);
   // seq -1 means "no agent generation observed". A mark recorded at -1 is
   // advanced by any later real seq (e.g. an agent appearing on a pane that
   // was organized while still a plain shell).
-  if (seq >= 0 && (mark.seq < 0 || seq > mark.seq)) return true;
-  return false;
+  if (seq >= 0 && (mark.seq < 0 || seq > mark.seq)) return "generation";
+  return null;
 }
 
 /**
@@ -161,25 +180,35 @@ export function resolveEntry(
   entry: InboxEntry,
   agent: AgentInfo | undefined,
   now: Date,
-): { organize?: OrganizeView; cleared: boolean } {
+): { organize?: OrganizeView; cleared: boolean; clearedMarks: ClearedMarkInfo[] } {
   let cleared = false;
+  const clearedMarks: ClearedMarkInfo[] = [];
+  const clear = (field: ClearedMarkInfo["field"], mark: MarkLike | undefined): void => {
+    if (!mark) return;
+    const cause = markClearCause(mark, agent, now);
+    if (cause === null) return;
+    cleared = true;
+    clearedMarks.push({ field, cause });
+    switch (field) {
+      case "snoozed":
+        delete entry.snoozed;
+        break;
+      case "settled":
+        delete entry.settled;
+        break;
+      case "archived":
+        delete entry.archived;
+        break;
+      case "pinned":
+        delete entry.pinned;
+        break;
+    }
+  };
 
-  if (entry.snoozed && markExpiredOrAdvanced(entry.snoozed, agent, now)) {
-    delete entry.snoozed;
-    cleared = true;
-  }
-  if (entry.settled && markExpiredOrAdvanced(entry.settled, agent, now)) {
-    delete entry.settled;
-    cleared = true;
-  }
-  if (entry.archived && markExpiredOrAdvanced(entry.archived, agent, now)) {
-    delete entry.archived;
-    cleared = true;
-  }
-  if (entry.pinned && markExpiredOrAdvanced(entry.pinned, agent, now)) {
-    delete entry.pinned;
-    cleared = true;
-  }
+  clear("snoozed", entry.snoozed);
+  clear("settled", entry.settled);
+  clear("archived", entry.archived);
+  clear("pinned", entry.pinned);
   if (entry.links) {
     const kept = entry.links.filter((link) => !linkStale(link, agent));
     if (kept.length !== entry.links.length) {
@@ -194,21 +223,29 @@ export function resolveEntry(
       since: entry.snoozed.at,
       until: entry.snoozed.until,
     };
-    return { organize: view, cleared };
+    return { organize: view, cleared, clearedMarks };
   }
   if (entry.settled) {
     return {
       organize: { kind: "settled", since: entry.settled.at },
       cleared,
+      clearedMarks,
     };
   }
   if (entry.archived) {
     return {
       organize: { kind: "archived", since: entry.archived.at },
       cleared,
+      clearedMarks,
     };
   }
-  return { cleared };
+  return { cleared, clearedMarks };
+}
+
+export interface ResolvedClear {
+  pane_id: string;
+  field: ClearedMarkInfo["field"];
+  cause: ResolutionClearCause;
 }
 
 /** Resolve every entry in the state document. */
@@ -216,16 +253,20 @@ export function resolveState(
   entries: Record<string, InboxEntry>,
   agents: Record<string, AgentInfo>,
   now: Date,
-): { clearedPaneIds: string[] } {
+): { clearedPaneIds: string[]; clearedMarks: ResolvedClear[] } {
   const clearedPaneIds: string[] = [];
+  const clearedMarks: ResolvedClear[] = [];
   for (const [paneId, entry] of Object.entries(entries)) {
     const result = resolveEntry(entry, agents[paneId], now);
     if (result.cleared) clearedPaneIds.push(paneId);
+    for (const mark of result.clearedMarks) {
+      clearedMarks.push({ pane_id: paneId, field: mark.field, cause: mark.cause });
+    }
     if (!entryHasState(entry)) {
       delete entries[paneId];
     }
   }
-  return { clearedPaneIds };
+  return { clearedPaneIds, clearedMarks };
 }
 
 export function upsertEntry(

@@ -215,11 +215,19 @@ opens panes or workspaces itself.
 - `ScriptRun.trigger` records `{kind:"manual"|"worktree.created",
   worktree_path?, event_received_at?}` (additive; manual runs get
   `kind:"manual"`).
-- `runOnSettle`/`stopOnSettle` design is settled by ADR-0029 (#181):
-  inbox-v1 gains an additive per-session organize-transition log +
-  `transitions` read command; projects lazy-drains it via the
-  ADR-0013 public-CLI pattern and fires/stops through the unchanged
-  ADR-0010 runner. Implementation: #182.
+- `runOnSettle`/`stopOnSettle` shipped per ADR-0029 (#181 design, #182
+  implementation): inbox-v1 records a per-session organize-transition
+  log exposed read-only via `transitions --after <seq>`; projects
+  lazy-drains it via the ADR-0013 public-CLI pattern (sibling checkout /
+  `herdr plugin list` / `--inbox-root` or `inboxRoot` override, env-pinned
+  child) on the same `scripts tick|run|stop|results|logs` checkpoints.
+  Only `kind:"settled"` is consumed; a per-session `settle_cursors` seq
+  cursor advances after each batch, `transition_seq` run-record dedupe
+  absorbs replays, and settle→restore pairs collapse to
+  `settle_superseded`. `runOnSettle` fires through the unchanged
+  ADR-0010 runner on the settled pane's worktree root;
+  `stopOnSettle` stops only `running` runs on the SAME canonical
+  worktree root whose re-resolved script carries the flag.
 
 ## Non-goals
 
@@ -231,6 +239,6 @@ opens panes or workspaces itself.
   worktree/workspace creation (herdr/Worktrunk own lifecycle; script
   runs do create dedicated execution workspaces per ADR-0010).
 - `runOnSettle`/`stopOnSettle` ship via the inbox organize-transition
-  surface + lazy drain per ADR-0029 (#182); `runOnWorktreeCreate`
+  surface + lazy drain per ADR-0029 (#182, shipped); `runOnWorktreeCreate`
   shipped via the `worktree.created` hook + lazy drain (#180).
 - No per-session namespacing of the registry.

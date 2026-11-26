@@ -48,7 +48,7 @@
     },
     "plugins/inbox": {
       "name": "@herdr-plugins/inbox",
-      "version": "0.3.0",
+      "version": "0.4.0",
     },
     "plugins/machines": {
       "name": "@herdr-plugins/machines",
@@ -60,7 +60,7 @@
     },
     "plugins/projects": {
       "name": "@herdr-plugins/projects",
-      "version": "0.3.0",
+      "version": "0.4.0",
     },
     "plugins/secrets": {
       "name": "@herdr-plugins/secrets",
