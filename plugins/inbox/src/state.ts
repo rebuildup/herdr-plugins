@@ -27,16 +27,47 @@ export interface AgentSessionRef {
   value?: string;
 }
 
-export interface SettledMark {
+/**
+ * Generation-guarded organize mark: clears when the pane's agent session
+ * fingerprint changes or `state_change_seq` advances (auto-restore on a new
+ * agent generation — see docs/specs/inbox.md).
+ */
+export interface GenerationMark {
   at: string;
-  /** state_change_seq observed when the pane was settled. */
+  /** state_change_seq observed when the mark was applied. */
   seq: number;
   agent_session?: AgentSessionRef | null;
 }
 
-export interface SnoozedMark {
-  at: string;
+export interface SettledMark extends GenerationMark {}
+
+export interface SnoozedMark extends GenerationMark {
   until: string;
+}
+
+export interface ArchivedMark extends GenerationMark {}
+
+export interface PinnedMark extends GenerationMark {}
+
+export type LinkKind = "pr" | "issue";
+
+/**
+ * User-declared tracker reference ("this pane is working on repo#n").
+ * Unlike organize marks this is NOT a timed hide: it survives routine
+ * `state_change_seq` advances (status transitions) and is guarded only by
+ * the agent-session fingerprint plus a seq-regression check — see
+ * docs/specs/inbox.md → Explicit tracker links.
+ */
+export interface PaneLink {
+  kind: LinkKind;
+  /** Forge repo path as declared, e.g. "owner/name" (subgroups allowed). */
+  repo: string;
+  number: number;
+  /** Canonical display ref "<repo>#<number>". */
+  ref: string;
+  /** ISO timestamp the link was (re)declared. */
+  at: string;
+  /** state_change_seq observed at link time; regression means identity reuse. */
   seq: number;
   agent_session?: AgentSessionRef | null;
 }
@@ -46,6 +77,20 @@ export interface InboxEntry {
   workspace_id?: string | undefined;
   settled?: SettledMark | undefined;
   snoozed?: SnoozedMark | undefined;
+  archived?: ArchivedMark | undefined;
+  pinned?: PinnedMark | undefined;
+  /**
+   * Manual order rank (lower sorts first). A layout hint scoped to the pane
+   * id — not generation-guarded; cleared by `restore`, `pane.closed`, and
+   * retention pruning like every other organize field.
+   */
+  order?: number | undefined;
+  /**
+   * User-declared PR/Issue links. Not generation-guarded like organize
+   * marks (see PaneLink); resolved for staleness at read time and dropped
+   * with the entry on `pane.closed`/retention pruning.
+   */
+  links?: PaneLink[] | undefined;
   updated_at: string;
 }
 

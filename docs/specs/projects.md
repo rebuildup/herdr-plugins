@@ -79,8 +79,10 @@ CLI invocations — no manifest actions.
   (`model.ts`): `rev-parse --abbrev-ref HEAD`, `status --porcelain`,
   `submodule status` — one timeout-bounded call set per repo.
   `has_submodules` feeds the upstream `worktreeSubmodules` connection
-  point. Unreachable members keep stored fields with null live values
-  plus a `skipped` entry; nothing is fabricated.
+  point — parsed but not consumed: neither herdr `worktree create`
+  nor Worktrunk has a submodule-init path today (upstream gap,
+  ADR-0029). Unreachable members keep stored fields with null live
+  values plus a `skipped` entry; nothing is fabricated.
 - #26 acceptance: same-name repos (distinct roots → distinct
   identities), non-git roots (`not_a_repo`), and external folders are
   never absorbed into a project — covered by contract tests.
@@ -176,16 +178,22 @@ CLI invocations — no manifest actions.
 - `ScriptRun.trigger` records `{kind:"manual"|"worktree.created",
   worktree_path?, event_received_at?}` (additive; manual runs get
   `kind:"manual"`).
-- `runOnSettle`/`stopOnSettle` remain unimplemented — settle is
-  plugin-owned organize state, not a herdr event (#181 design / #182
-  implementation).
+- `runOnSettle`/`stopOnSettle` design is settled by ADR-0029 (#181):
+  inbox-v1 gains an additive per-session organize-transition log +
+  `transitions` read command; projects lazy-drains it via the
+  ADR-0013 public-CLI pattern and fires/stops through the unchanged
+  ADR-0010 runner. Implementation: #182.
 
 ## Non-goals
 
+- No project clone/init/publish operations — `git`/`gh` own transport
+  and credentials; the plugin records registry membership only
+  (ADR-0029, #185 closed unimplemented).
 - No worktree/workspace creation for projects themselves — herdr/
   Worktrunk own lifecycle (script runs do create dedicated execution
-  workspaces per ADR-0010).
-- No `runOnSettle`/`stopOnSettle` triggers — no faithful event source
-  yet (#181/#182). `runOnWorktreeCreate` ships via the `worktree.created`
-  hook + lazy drain (#180).
+  workspaces per ADR-0010). Repo↔worktree read association is #184
+  scope per ADR-0029.
+- `runOnSettle`/`stopOnSettle` ship via the inbox organize-transition
+  surface + lazy drain per ADR-0029 (#182); `runOnWorktreeCreate`
+  shipped via the `worktree.created` hook + lazy drain (#180).
 - No per-session namespacing of the registry.

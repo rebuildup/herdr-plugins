@@ -1,8 +1,8 @@
 id = "rebuildup.inbox"
 name = "Inbox"
-version = "0.1.0"
+version = "0.3.0"
 min_herdr_version = "0.9.0"
-description = "Work inbox for agent panes: settle, snooze, and restore with persistent user-side organize state."
+description = "Work inbox for agent panes: settle, snooze, pin, archive, manual ordering, search/filter, explicit PR/Issue links, and restore with persistent user-side organize state."
 platforms = ["linux", "macos", "windows"]
 
 # No build step: the plugin is dependency-free TypeScript executed by Bun
@@ -18,7 +18,7 @@ command = ["bun", "run", "src/cli.ts", "settle"]
 [[actions]]
 id = "restore"
 title = "Inbox: restore pane"
-description = "Return the focused agent pane to the inbox."
+description = "Return the focused agent pane to the inbox and clear all organize state."
 contexts = ["pane"]
 command = ["bun", "run", "src/cli.ts", "restore"]
 
@@ -28,6 +28,34 @@ title = "Inbox: snooze pane"
 description = "Hide the focused agent pane until the configured snooze duration elapses."
 contexts = ["pane"]
 command = ["bun", "run", "src/cli.ts", "snooze"]
+
+[[actions]]
+id = "pin"
+title = "Inbox: pin pane"
+description = "Pin the focused agent pane to the top of the inbox."
+contexts = ["pane"]
+command = ["bun", "run", "src/cli.ts", "pin"]
+
+[[actions]]
+id = "unpin"
+title = "Inbox: unpin pane"
+description = "Remove the pin from the focused agent pane."
+contexts = ["pane"]
+command = ["bun", "run", "src/cli.ts", "unpin"]
+
+[[actions]]
+id = "archive"
+title = "Inbox: archive pane"
+description = "Archive the focused agent pane out of the default inbox view. Never stops or closes the agent."
+contexts = ["pane"]
+command = ["bun", "run", "src/cli.ts", "archive"]
+
+[[actions]]
+id = "unarchive"
+title = "Inbox: unarchive pane"
+description = "Return the focused agent pane from the archive to the inbox."
+contexts = ["pane"]
+command = ["bun", "run", "src/cli.ts", "unarchive"]
 
 # Startup hook: one reconcile pass at server start materializes expired
 # snoozes and repairs metadata tokens after restarts. No resident process.

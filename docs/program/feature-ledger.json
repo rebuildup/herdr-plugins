@@ -53,10 +53,10 @@
       "title_ja": "Inbox 拡張: pin/reorder/archive/検索/PR 連動/作業グループ",
       "upstream_refs": ["docs/user/thread-sidebar.md", "docs/user/triage.md"],
       "classification": "plugin",
-      "issues": [33],
+      "issues": [33, 176, 177],
       "depends_on": ["inbox-organize", "#8", "#9"],
       "acceptance": "T3Code の整理・検索・PR 連動機能を herdr のモデルへ対応付け、実行状態とユーザー整理状態を分離し attention を隠さない。",
-      "verification": "未着手。#8 (attention 粒度) と #9 (agent view) の上流 gap が一部依存。"
+      "verification": "T1 (#176, release-0-9-0): pin/unpin/archive/unarchive/order を plugins/inbox v0.2.0 として実装。契約 herdr-plugins.inbox/v1 は additive 拡張のみ (organize.kind に archived 追加、item に pinned/order、counts に pinned/archived)。archive は hide-kind のみで pane/agent/PTY に一切触れないことを fake-socket 契約テストで固定。pin/archive は既存の世代ガード (agent_session fingerprint + state_change_seq) を継承、order は pane_id スコープの layout hint。T2 (#177): list 検索/フィルタ (--attention/--organize/--search/--workspace、read 側のみで state 非変更) と明示的 PR/Issue リンク (link/unlink/links、plugin state 保存、agent_session fingerprint + seq regression の stale 規律、--verify opt-in gh 確認・失敗は warning で記録のみ) を plugins/inbox v0.3.0 として実装。契約は additive のみ (item.links/counts.linked/filters echo、link/unlink/links command)。リンクは pane 単位の作業紐付けで git plugin (#174) の repo 単位 tracker 操作と state を共有しない責務分界を spec に記録。残差: PR 更新時の注意復帰 (#178)。作業グループ/side chat は ADR-0029 で workspace/tab + handoff-v1 lineage に対応付け済み。#8/#9 upstream gap は引き続き依存候補。"
     },
     {
       "id": "attention-granularity",
@@ -180,10 +180,10 @@
         "packages/source-control-cursor-origin/"
       ],
       "classification": "unimplemented",
-      "issues": [25],
+      "issues": [25, 175, 191, 192, 193],
       "depends_on": ["forge-github"],
       "acceptance": "上流対応 Forge ごとに利用価値を棚卸しし、段階導入。Issue 検索/作成/編集/コメント/close・PR レビュー/行コメント/CI 状態/マージを対象。",
-      "verification": "未着手。v0.2.0 は GitHub 基盤 (#39) のみ。後続 train で Forge 別に分解。"
+      "verification": "棚卸し実施済み (Issue #175 → docs/research/forge-non-github-survey.md、t3code @ 9cc4018c 照合)。判定: GitLab=implement、Forgejo/Gitea=implement (fj/tea CLI)、Azure DevOps=implement (低優先、comment/review 面が薄い)、Bitbucket=defer (CLI なし・REST のみで credential boundary ADR が前提)、GitCafe=not-worth-it (単一 vendor host・issue/line comment なし)、Cursor Origin=not-worth-it (vendor 固有 forge・最小 API)。implement 判定の 3 provider は follow-up issue を #25 コメント経由で起票。契約設計論点 (provider 中立命名・capability 広告・v1 additive 方針) は survey §Contract-design notes に記録。"
     },
     {
       "id": "projects-multi-repo",
@@ -194,10 +194,10 @@
         "apps/server/src/project/"
       ],
       "classification": "plugin",
-      "issues": [26, 48, 49, 50, 51, 70],
+      "issues": [26, 48, 49, 50, 51, 70, 183, 184, 185],
       "depends_on": ["git-readonly"],
       "acceptance": "project 登録/検索/ピン/アーカイブ、clone/init/publish、環境・defaults/override、複数 repo 発見・明示追加/除外・submodule、repo 別 worktree/差分との関連付け。herdr/Worktrunk lifecycle を再利用。",
-      "verification": "release-0-3-0 で #48 registry 骨格・#49 CRUD/pin/archive/settings override・#50 t3.json/scripts 解決・#51 repo membership (repos list/add/remove, repositoryIdentity=remote 正規化, branch/dirty/has_submodules) を実装済み。残差は #70 で追跡: clone/init/publish、repo 別 worktree/差分との関連付け (herdr/Worktrunk lifecycle 側の接続点として repos list の has_submodules を提供)。Issue 内 upstream 参照 docs/user/multi-repo-projects.md は pinned revision 9cc4018c に存在しない (project-settings.md が実体)。"
+      "verification": "release-0-3-0 で #48 registry 骨格・#49 CRUD/pin/archive/settings override・#50 t3.json/scripts 解決・#51 repo membership (repos list/add/remove, repositoryIdentity=remote 正規化, branch/dirty/has_submodules) を実装済み。#180 (release-0-9-0) で runOnWorktreeCreate trigger。#183 (release-0-9-0, ADR-0029) で #70 残差を判定: clone/init/publish は git/gh 委譲で plugin 実装不要 (#185 close)、repo↔worktree/差分関連付けは herdr worktree.list socket read surface + git-common-dir 同一性で plugin read-only 実装可 (#184)、has_submodules→worktreeSubmodules は herdr/Worktrunk 側に消費経路がなく upstream gap として記録。Issue 内 upstream 参照 docs/user/multi-repo-projects.md は pinned revision 9cc4018c に存在しない (project-settings.md が実体)。"
     },
     {
       "id": "project-scripts",
@@ -207,7 +207,7 @@
       "issues": [3, 26, 50, 52, 53, 180, 181, 182],
       "depends_on": ["projects-multi-repo"],
       "acceptance": "セットアップ (worktree 作成後含む)・定義済みコマンドの一覧・起動・停止・再実行・exit code/ログ・状態・開発サーバー実行先を扱う。PTY テキストから実行成功を捏造しない。#32 automation と責務分離。",
-      "verification": "#53 (release-0-3-0) で手動 run/stop/results/logs を実装。ADR-0010 の dedicated-pane 方式: workspace.create→pane.send_input→pane.wait_for_output センチネル (__HERDR_DONE_<run-id>__=$?) で exit code を構造化取得。result enum: running|success|failed|stopped|unknown (成功捏造なし)。runs.json は専用 lock+atomic rename、ログは bounded tail。fake-transport 契約テスト + herdr 0.9.5 隔離セッション実機検証済み (success/failed/unknown/stopped・stop 競合)。#180 (release-0-9-0) で runOnWorktreeCreate を実装: manifest [[events]] worktree.created hook → state.json pending_triggers mark → scripts tick/run|stop|results|logs の lazy drain (daemon なし)。repo 同定は git-common-dir→repos[] membership、script 解決は #50 layered resolution を event worktree root に適用、実行は ADR-0010 runner 流用。ScriptRun.trigger additive、capability triggers 広告、skip は triggers ブロックに誠実報告。runOnSettle/stopOnSettle は #181/#182 で継続。"
+      "verification": "#53 (release-0-3-0) で手動 run/stop/results/logs を実装。ADR-0010 の dedicated-pane 方式: workspace.create→pane.send_input→pane.wait_for_output センチネル (__HERDR_DONE_<run-id>__=$?) で exit code を構造化取得。result enum: running|success|failed|stopped|unknown (成功捏造なし)。runs.json は専用 lock+atomic rename、ログは bounded tail。fake-transport 契約テスト + herdr 0.9.5 隔離セッション実機検証済み (success/failed/unknown/stopped・stop 競合)。#180 (release-0-9-0) で runOnWorktreeCreate を実装: manifest [[events]] worktree.created hook → state.json pending_triggers mark → scripts tick/run|stop|results|logs の lazy drain (daemon なし)。repo 同定は git-common-dir→repos[] membership、script 解決は #50 layered resolution を event worktree root に適用、実行は ADR-0010 runner 流用。ScriptRun.trigger additive、capability triggers 広告、skip は triggers ブロックに誠実報告。#181 (release-0-9-0) 設計判定を ADR-0029 で確定: settle は inbox 所有のユーザー organize state であり herdr/agent_status event ではないため、inbox-v1 に additive な per-session organize-transition log + transitions read command を追加し、projects が ADR-0013 パターン (public CLI・env pin・state 非参照) で lazy drain する方式を採用。runOnSettle は worktree root で startRun、stopOnSettle は同一 worktree root の running run のみ既存 stop 経路で停止 (repo group 全体は止めない)。agent_status_changed による代替・state file 直読み・won't-do は棄却。実装は #182。"
     },
     {
       "id": "checkpoints",
