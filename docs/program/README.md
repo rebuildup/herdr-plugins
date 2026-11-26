@@ -103,7 +103,7 @@ Issue 番号ベースの直列・blocked-by 関係 (release-0-2-0):
 | 次期 train (暫定) | #27, #6, #29 | `provider-controls-composer`, `handoff-delegation`, `text-generation` | 未着手 |
 | 次期 train (暫定) | #33 | `inbox-extensions` (#8/#9 upstream gap 依存) | 未着手 |
 | 次期 train (暫定) | #30, #31, #32 | `mcp-outside-agents`, `artifacts-snapshots`, `automations` | 未着手 |
-| 次期 train (暫定) | #34 | `secrets-remote-devices` (棚卸し・責務割当) | 未着手 |
+| release-0-8-0 | #34, #160, #161 | `secrets-remote-devices` 棚卸し・責務割当 (#34) + 残差 `rebuildup.secrets` (#160) / `rebuildup.machines` (#161) | #34 棚卸し・ADR-0027/0028 確定 (本ブランチ)。#160/#161 は #34 マージ後に実装 |
 | 上流待ち | #8, #9 | `attention-granularity`, `agent-view-namespacing` | upstream Issue 候補 |
 | 責務外 | — | `client-polish-misc`, `execution-runtime` | out-of-scope |
 | 後続検討 | #25 残差 | `forge-non-github` | GitHub 基盤 (#39) 後に Forge 別分解 |

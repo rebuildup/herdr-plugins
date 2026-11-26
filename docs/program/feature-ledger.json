@@ -378,10 +378,10 @@
         "packages/tailscale/"
       ],
       "classification": "partial",
-      "issues": [34],
+      "issues": [34, 160, 161],
       "depends_on": [],
       "acceptance": "secrets・remote/devices・guest links・環境認証・アクセス管理・モバイル/共有・background service・更新/診断を棚卸しし、Infisical/Tailscale/既存 device routing/herdr 実機能で満たせる範囲を明示。残差に具体 Issue を割当。",
-      "verification": "棚卸し未着手。対象ホストに状態・資格情報を保持し、権限境界・認証・明示的共有/失効を保証。同等機能は再実装しない。"
+      "verification": "#34 棚卸し確定: 正本 docs/research/secrets-remote-devices-inventory.md (t3code 9cc4018c + herdr 0.9.5 protocol 22 live 照合)。責務分界 ADR-0027 (secrets 参照解決・env 注入境界: Infisical-only v1、宣言 binding + per-invocation opt-in、値は provider→memory→{child env, surface create env} の 2 sink のみ・非永続・非出力) と ADR-0028 (#161 は read-only inventory plugin として存続、machine lifecycle は herdr CLI、credential 非保持) を確定。残差 Issue: #160 (rebuildup.secrets: resolve/run/inject/capability、herdr-plugins.secrets/v1)、#161 (rebuildup.machines: list/probe/capability、herdr-plugins.machines/v1、remote plugin list は live 検証項目)。upstream-blocked/out-of-scope 記録: agent secret request card (herdrdev/herdr#6196 同根)、guest links inbound HTTP、T3 Connect hosted ingress、peer-link OAuth、devices streaming (herdr-t3)、managed policy/background service/updating (dotfiles/pc-setup/herdr core)。"
     },
     {
       "id": "client-polish-misc",
