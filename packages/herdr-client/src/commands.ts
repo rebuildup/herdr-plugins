@@ -35,6 +35,50 @@ export async function sessionSnapshot(options: CallOptions = {}): Promise<Sessio
   return snapshot;
 }
 
+export interface WorktreeListEntry {
+  path?: string;
+  branch?: string | null;
+  is_bare?: boolean;
+  is_detached?: boolean;
+  is_linked_worktree?: boolean;
+  is_prunable?: boolean;
+  label?: string | null;
+  open_workspace_id?: string | null;
+  [key: string]: unknown;
+}
+
+export interface WorktreeListResult {
+  source?: {
+    repo_key?: string;
+    repo_name?: string;
+    repo_root?: string;
+    source_checkout_path?: string;
+    source_workspace_id?: string;
+    [key: string]: unknown;
+  };
+  worktrees?: WorktreeListEntry[];
+  [key: string]: unknown;
+}
+
+/**
+ * `worktree.list` for a repository cwd (herdr protocol 22, verified
+ * 0.9.5). Read-only association surface: `trust_repository` is always
+ * false — an untrusted-repo failure surfaces to the caller, which must
+ * never retry with a trust grant (ADR-0029).
+ */
+export async function worktreeList(
+  cwd: string,
+  options: CallOptions = {},
+): Promise<WorktreeListResult> {
+  const result = (await request(
+    socketFor(options),
+    "worktree.list",
+    { cwd, trust_repository: false },
+    options,
+  )) as WorktreeListResult | undefined;
+  return result ?? {};
+}
+
 export async function agentList(options: CallOptions = {}): Promise<AgentListResult> {
   const result = (await request(socketFor(options), "agent.list", {}, options)) as
     | ({ agents?: AgentListResult["agents"] } & AgentListResult)

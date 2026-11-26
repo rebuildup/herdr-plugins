@@ -40,7 +40,7 @@
     },
     "plugins/git": {
       "name": "@herdr-plugins/git",
-      "version": "0.2.0",
+      "version": "0.3.0",
     },
     "plugins/handoff": {
       "name": "@herdr-plugins/handoff",
@@ -48,7 +48,7 @@
     },
     "plugins/inbox": {
       "name": "@herdr-plugins/inbox",
-      "version": "0.1.0",
+      "version": "0.2.0",
     },
     "plugins/machines": {
       "name": "@herdr-plugins/machines",
@@ -60,7 +60,7 @@
     },
     "plugins/projects": {
       "name": "@herdr-plugins/projects",
-      "version": "0.1.0",
+      "version": "0.3.0",
     },
     "plugins/secrets": {
       "name": "@herdr-plugins/secrets",
