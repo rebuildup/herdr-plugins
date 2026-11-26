@@ -74,6 +74,53 @@ export interface PaneLink {
   agent_session?: AgentSessionRef | null;
 }
 
+/**
+ * Point-in-time PR observation recorded by `watch-pr` (Issue #178).
+ * Built exclusively from `git pr view|comments|checks` payloads — never
+ * from PTY text or guessed state. Signature lists are pre-filtered to
+ * exclude the PR author's own activity (self proxy).
+ */
+export interface LinkWatchObservation {
+  /** Raw gh lifecycle state uppercased: OPEN | MERGED | CLOSED | … */
+  state: string;
+  isDraft: boolean;
+  mergeStateStatus: string | null;
+  mergeable: string | null;
+  updatedAt: string | null;
+  /** PR author login — the "self" proxy for review/comment filtering. */
+  author: string | null;
+  /** Sorted unique names of checks in a failing bucket. */
+  failingChecks: string[];
+  /** Sorted "author|state|submittedAt" review signatures (self excluded). */
+  reviewKeys: string[];
+  /** Sorted comment ids (self excluded). */
+  commentKeys: string[];
+}
+
+export type WatchTerminal = "merged" | "closed";
+
+/**
+ * Watcher bookkeeping for one declared PR link, keyed under
+ * `watch[sessionKey][paneId][ref]`. This is NOT organize state: it records
+ * poll freshness, failure backoff, and the last successful observation so
+ * attention-return diffs are computed against real prior data. A missing
+ * or failed poll never mutates `observation`, so stale data can never
+ * fabricate a transition.
+ */
+export interface LinkWatch {
+  observation?: LinkWatchObservation | undefined;
+  first_seen_at: string;
+  /** ISO time of the last *successful* poll (freshness contract). */
+  last_checked_at?: string | undefined;
+  /** Last poll error message; cleared on the next success. */
+  last_error?: string | undefined;
+  consecutive_failures: number;
+  /** Set once the PR reaches MERGED/CLOSED — the link stops being polled. */
+  terminal?: WatchTerminal | undefined;
+  /** Epoch ms before which this link is skipped (failure backoff). */
+  next_poll_at?: number | undefined;
+}
+
 export interface InboxEntry {
   pane_id: string;
   workspace_id?: string | undefined;
@@ -151,6 +198,11 @@ export interface InboxState {
   version: typeof STATE_SCHEMA_VERSION;
   sessions: Record<string, Record<string, InboxEntry>>;
   /**
+   * `watch-pr` baselines: sessionKey → pane_id → link ref → LinkWatch.
+   * Additive optional field (schema stays v2); absent in pre-#178 files.
+   */
+  watch?: Record<string, Record<string, Record<string, LinkWatch>>> | undefined;
+  /**
    * Organize-transition log per session key (additive, #182/ADR-0029).
    * Optional on disk — state files written before the surface lack it.
    */
@@ -168,6 +220,35 @@ export function sessionEntries(state: InboxState, sessionKey: string): Record<st
   const created: Record<string, InboxEntry> = {};
   state.sessions[sessionKey] = created;
   return created;
+}
+
+/** Watch baselines for one session, created on demand for writes. */
+export function sessionWatch(
+  state: InboxState,
+  sessionKey: string,
+): Record<string, Record<string, LinkWatch>> {
+  const watch = state.watch ?? {};
+  state.watch = watch;
+  const session = watch[sessionKey];
+  if (session) return session;
+  const created: Record<string, Record<string, LinkWatch>> = {};
+  watch[sessionKey] = created;
+  return created;
+}
+
+/** Drop one link's watch baseline (unlink / pane.closed paths). */
+export function removeWatchLink(
+  state: InboxState,
+  sessionKey: string,
+  paneId: string,
+  ref: string,
+): void {
+  const session = state.watch?.[sessionKey];
+  const pane = session?.[paneId];
+  if (!pane) return;
+  delete pane[ref];
+  if (Object.keys(pane).length === 0) delete session?.[paneId];
+  if (session && Object.keys(session).length === 0) delete state.watch?.[sessionKey];
 }
 
 export function stateFilePath(): string {
@@ -223,6 +304,10 @@ export async function loadState(): Promise<InboxState> {
     return {
       version: STATE_SCHEMA_VERSION,
       sessions: parsed.sessions,
+      watch:
+        typeof parsed.watch === "object" && parsed.watch !== null
+          ? (parsed.watch as InboxState["watch"])
+          : undefined,
       ...(Object.keys(transitions).length > 0 ? { transitions } : {}),
     };
   } catch (err) {

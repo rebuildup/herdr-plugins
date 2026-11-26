@@ -130,11 +130,11 @@ record. The two never share state: inbox links are declarations, not
 event-derived facts, and carry no tracker metadata beyond the ref.
 
 Links are explicit-only: there is no webhook or forge-event ingestion
-(webhook delivery is an upstream gap, ADR-0026), and PR-update-driven
-attention restore is a separate ticket (#178). `--verify` optionally runs
+(webhook delivery is an upstream gap, ADR-0026). `--verify` optionally runs
 `gh <kind> view` at link time; any failure is a `warnings` entry and the
 link is still recorded — verification never blocks an explicit user
-declaration.
+declaration. PR-update-driven attention return is implemented by the
+opt-in `watch-pr` command (see "PR update watcher" below, #178).
 
 Stale discipline mirrors organize marks **minus timed expiry**: a link is
 dropped at read/reconcile time when the pane's `agent_session` fingerprint
@@ -146,6 +146,86 @@ temporarily unreportable) and die with the entry on `pane.closed` or
 retention pruning. `restore` preserves links; `unlink` and `pane.closed`
 are the removal paths. A link whose guard went stale is never silently
 re-applied to a new identity — the user re-links explicitly.
+
+## PR update watcher (`watch-pr`, #178)
+
+`watch-pr` is an opt-in process that polls declared `pr` links and returns
+attention (clears hide-kind organize marks) when the forge reports a
+qualifying transition. It mirrors the T3 Code `watch_pull_request` model
+(2-minute polling detecting check failure / review / comment / conflict /
+merge-close) adapted to herdr's no-daemon constraint (ADR-0002) and the
+webhook upstream gap (ADR-0026): polling `gh` through the git plugin's
+public CLI is the legitimate event source — real observed data, with
+freshness contracted explicitly.
+
+- **No resident daemon, no webhook.** `watch-pr` is started explicitly
+  (`watch-pr [pane_id] [--interval SEC] [--once] [--git-root PATH]`);
+  nothing polls unless the user runs it. `--once` performs a single pass
+  — the "CLI invocation" poll path. When not running, PR updates are not
+  observed and no automatic attention return is promised.
+- **Poll path**: `rebuildup.git` public CLI only — `git pr view` (state,
+  mergeStateStatus, reviews), `git pr comments` (issue + line comments),
+  `git pr checks` (per-check buckets). Plugin root resolution follows the
+  ADR-0013 pattern (`--git-root` → `config.json gitPluginRoot` → sibling
+  `../git` → `herdr plugin list --json`); the child env is scrubbed of
+  this plugin's `HERDR_PLUGIN_*` and pinned to the git plugin's dirs.
+  gh is never spawned by inbox for watching and no tokens are handled.
+- **Scope**: `kind === "pr"` links only. `issue` links are not watched —
+  the git plugin has no public issue-read command (recorded limitation;
+  a `git issue view` surface is a follow-up candidate). Only links that
+  pass the normal staleness rules and whose pane is live are polled;
+  absent panes are reported in `watch-pr.tick.absent_panes` and their
+  links keep the watch alive (a temporarily missing pane may return).
+- **Observation model**: each successful poll produces a normalized
+  `LinkWatchObservation` (state, draft, mergeStateStatus, mergeable,
+  updatedAt, PR author, failing check names, review/comment signature
+  sets with the PR author's own activity excluded — the author is the
+  self proxy since viewer-login detection would cost an extra call per
+  tick). The full observation is stored under `state.watch[session]
+  [pane][ref]` together with `first_seen_at`, `last_checked_at`,
+  `last_error`, `consecutive_failures`, `terminal`, `next_poll_at`.
+- **Diff → triggers** (baseline = last *successful* observation):
+  - `merged`/`closed`: lifecycle transition; the link becomes `terminal`
+    and is never polled again (T3 "watch ends on merge/close").
+  - `check_failed`: a check name newly appears in a failing bucket
+    (`fail`/`cancel`).
+  - `merge_conflict`: `mergeStateStatus` transitions into `DIRTY`.
+    Other `mergeStateStatus` values are volatile and intentionally do not
+    wake (BLOCKED/UNSTABLE/BEHIND/CLEAN churn would flap).
+  - `review`/`comment`: new non-self review or comment signatures.
+  - First observation is a silent baseline — an already-merged/closed PR
+    records `terminal` without attention, so linking finished work cannot
+    fabricate a wake.
+- **Attention return**: a qualifying diff clears `settled`/`snoozed`/
+  `archived` under the state lock (pin/order/links preserved) and
+  re-projects metadata — restore-direction semantics. If the pane has no
+  hide-kind marks the event still fires with `cleared: []` (already
+  visible; a no-op, not an error). Attention statuses (`blocked`) are
+  untouched — they were never hidden.
+- **Dedupe**: the baseline is updated in the same commit as the organize
+  clear, so a persistent diff cannot re-trigger; terminal links stop
+  polling. A failed poll never mutates the observation, so forge
+  flakiness cannot fabricate transitions.
+- **Failure honesty & backoff**: any poll failure (git plugin missing,
+  pane cwd not a repo, gh missing/unauthenticated/rate-limited/timeout)
+  emits `watch-pr.error` with `consecutive_failures`, `next_poll_at`
+  (`interval × 2^failures`, cap 30 min), and the last good
+  `last_checked_at` — explicit state, never silent staleness. Deferred
+  links are skipped until `next_poll_at`.
+- **Stop conditions**: SIGINT/SIGTERM (`signal`), `--once` (`once`, or the
+  computed reason when nothing remains), `no_links` (no declared PR links
+  in scope), `all_terminal` (every declared PR link is terminal — or its
+  pane is gone). The watch exits rather than idling when there is nothing
+  left to observe.
+- **Lifecycle**: `unlink` and `pane.closed` drop the link's watch
+  baseline; `watch-pr` ticks also prune baselines for refs that are no
+  longer live declared links, so baselines cannot leak or resurrect for
+  recycled identities. `state.watch` is additive optional state (schema
+  stays v2) and is internal bookkeeping — not part of the read contract.
+- **automations (#32) boundary**: the watcher only flips organize state;
+  it never starts agents, delivers notifications, or runs user
+  automations. Bridging forge events into automations schedules is a
+  follow-up, not this ticket.
 
 ## List ordering
 
@@ -286,6 +366,10 @@ with no `--until` uses `defaultSnooze` from the plugin `config.json`.
 - Work groups / side-chat semantics: mapped onto herdr workspace/tab +
   `handoff-v1` lineage in ADR-0029; no `group` field is added to
   organize state, and side-chat presentation is herdr-t3 scope (#7).
-- Remaining #33 scope: PR-update attention return (#178) is tracked as a
-  separate ticket; search/filters and explicit PR/Issue links landed in
-  #177.
+- Issue-link watching: `watch-pr` covers `pr` links only; issue updates
+  have no git-plugin public read surface yet (follow-up candidate).
+- Non-DIRTY `mergeStateStatus` transitions, draft flips, and review
+  *content* changes do not wake — only the contracted trigger set does.
+- True "required check passed" / review-decision semantics: check
+  *failure* is detected via `gh pr checks` buckets; "all required checks
+  green" is not a distinct trigger in v0.5.0.

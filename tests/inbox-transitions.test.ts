@@ -252,10 +252,10 @@ describe("inbox transitions surface (#182)", () => {
     expect(used.sort()).toEqual(["pane.report_metadata", "session.snapshot"]);
   });
 
-  test("capability advertises transitions at v0.4.0", async () => {
+  test("capability advertises transitions (additive since v0.4.0)", async () => {
     const cap = await cli(["capability"]);
     expect(cap.status).toBe(0);
-    expect(cap.json?.version).toBe("0.4.0");
+    expect(cap.json?.version).toBe("0.5.0");
     expect(cap.json?.commands).toContain("transitions");
   });
 });

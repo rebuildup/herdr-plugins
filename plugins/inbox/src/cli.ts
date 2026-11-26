@@ -50,13 +50,17 @@ import {
   unpinPane,
   upsertEntry,
 } from "./model";
+import { resolvePluginRoot, runPluginCli } from "./pluginroot";
 import {
   type InboxEntry,
   type InboxTransition,
   type LinkKind,
+  type LinkWatch,
+  type LinkWatchObservation,
   loadState,
   type PaneLink,
   PLUGIN_ID,
+  removeWatchLink,
   sessionEntries,
   sessionKeyFor,
   stateFilePath,
@@ -69,6 +73,15 @@ import {
   MAX_TRANSITIONS_PER_SESSION,
   type TransitionContext,
 } from "./transitions";
+import {
+  buildObservation,
+  collectWatchTargets,
+  diffObservation,
+  pollBackoffMs,
+  pruneWatchSession,
+  type WatchDiff,
+  type WatchTarget,
+} from "./watchpr";
 
 const CONTRACT = "herdr-plugins.inbox/v1";
 const DEFAULT_SNOOZE_CONFIG = "config.json";
@@ -254,10 +267,20 @@ function resolvePaneSelection(args: string[], valueFlags: string[] = []): PaneSe
   return { paneId: identity.paneId as string, ambient: identity };
 }
 
-async function loadConfig(): Promise<{ defaultSnooze?: string }> {
+async function loadConfig(): Promise<{
+  defaultSnooze?: string | undefined;
+  gitPluginRoot?: string | undefined;
+}> {
   const file = path.join(pluginDirs(PLUGIN_ID).configDir, DEFAULT_SNOOZE_CONFIG);
   try {
-    return JSON.parse(await readFile(file, "utf8")) as { defaultSnooze?: string };
+    const parsed = JSON.parse(await readFile(file, "utf8")) as {
+      defaultSnooze?: string;
+      gitPluginRoot?: string;
+    };
+    return {
+      defaultSnooze: parsed.defaultSnooze,
+      gitPluginRoot: parsed.gitPluginRoot,
+    };
   } catch {
     return {};
   }
@@ -903,6 +926,8 @@ async function cmdUnlink(options: CliOptions): Promise<void> {
   const sessionKey = sessionKeyFor(options);
   const removed = await updateState((state) => {
     const entries = sessionEntries(state, sessionKey);
+    // An unlinked PR stops being watched: drop its poll baseline too.
+    removeWatchLink(state, sessionKey, paneId, `${repo}#${number}`);
     return unlinkPane(entries, paneId, kind, repo, number, now);
   });
   if (!removed) {
@@ -1020,6 +1045,498 @@ async function cmdWatch(options: CliOptions): Promise<void> {
   if (!stopping) process.exitCode = 1;
 }
 
+// ---------------------------------------------------------------------------
+// watch-pr: opt-in PR-update attention watcher (Issue #178)
+// ---------------------------------------------------------------------------
+
+const GIT_PLUGIN_ID = "rebuildup.git";
+const WATCH_PR_DEFAULT_INTERVAL_SEC = 120;
+/** Per git-plugin CLI call budget (covers ensureGh + the gh request). */
+const WATCH_PR_CALL_TIMEOUT_MS = 30_000;
+const WATCH_PR_FLAGS: Record<string, FlagKind> = {
+  "--interval": "value",
+  "--once": "boolean",
+  "--git-root": "value",
+};
+const WATCH_PR_VALUE_FLAGS = ["--interval", "--git-root"];
+
+interface PollOutcome {
+  target: WatchTarget;
+  ok: boolean;
+  observation?: LinkWatchObservation;
+  error?: string;
+  diff?: WatchDiff;
+  /** True when this poll established the baseline (no prior observation). */
+  baseline: boolean;
+  /** Committed watch record (set inside the state commit). */
+  record?: LinkWatch;
+}
+
+function cliErrorMessage(result: { status: number; stderr: string }): string {
+  const trimmed = result.stderr.trim();
+  try {
+    const parsed = JSON.parse(trimmed) as { error?: { message?: string } };
+    if (parsed.error?.message) return parsed.error.message;
+  } catch {
+    // not a JSON error document
+  }
+  return trimmed.slice(0, 200) || `exit ${result.status}`;
+}
+
+/**
+ * Poll one linked PR through the git plugin's public CLI — three reads per
+ * tick: `pr view` (lifecycle/merge state/reviews), `pr comments`
+ * (conversation + line comments), `pr checks` (per-check buckets). Any
+ * failure fails the whole poll honestly; partial observations are never
+ * diffed. gh itself is only ever reached inside the git plugin — this
+ * plugin never spawns gh or handles tokens for watching.
+ */
+async function pollPrLink(
+  gitRoot: string,
+  target: WatchTarget,
+  options: CliOptions,
+): Promise<PollOutcome> {
+  const { paneId, link } = target;
+  const call = {
+    session: options.session,
+    socketPath: options.socketPath,
+    timeoutMs: WATCH_PR_CALL_TIMEOUT_MS,
+  };
+  const run = async (action: string) =>
+    runPluginCli(
+      gitRoot,
+      GIT_PLUGIN_ID,
+      ["pr", action, paneId, String(link.number), "--repo", link.repo],
+      call,
+    );
+
+  try {
+    const view = await run("view");
+    if (view.status !== 0 || view.json === null) {
+      return {
+        target,
+        ok: false,
+        error: `git pr view failed for ${link.ref}: ${cliErrorMessage(view)}`,
+        baseline: target.baseline?.observation === undefined,
+      };
+    }
+    const comments = await run("comments");
+    if (comments.status !== 0 || comments.json === null) {
+      return {
+        target,
+        ok: false,
+        error: `git pr comments failed for ${link.ref}: ${cliErrorMessage(comments)}`,
+        baseline: target.baseline?.observation === undefined,
+      };
+    }
+    const checks = await run("checks");
+    if (checks.status !== 0 || checks.json === null) {
+      return {
+        target,
+        ok: false,
+        error: `git pr checks failed for ${link.ref}: ${cliErrorMessage(checks)}`,
+        baseline: target.baseline?.observation === undefined,
+      };
+    }
+    const built = buildObservation(view.json, comments.json, checks.json);
+    if ("error" in built) {
+      return { target, ok: false, error: `${link.ref}: ${built.error}`, baseline: false };
+    }
+    return {
+      target,
+      ok: true,
+      observation: built,
+      baseline: target.baseline?.observation === undefined,
+    };
+  } catch (err) {
+    return {
+      target,
+      ok: false,
+      error: `git plugin invocation failed for ${link.ref}: ${String(err)}`,
+      baseline: target.baseline?.observation === undefined,
+    };
+  }
+}
+
+interface AttentionRecord {
+  paneId: string;
+  ref: string;
+  triggers: WatchDiff["triggers"];
+  details: WatchDiff & { cleared: string[] };
+}
+
+/**
+ * One watch-pr pass: snapshot → resolve links → poll each live non-terminal
+ * PR link via the git plugin CLI → commit baselines/organize clears under
+ * the state lock → project metadata → emit JSONL events. Returns the stop
+ * reason when nothing watchable remains, else null.
+ */
+async function watchPrTick(
+  options: CliOptions,
+  ctx: {
+    sessionKey: string;
+    intervalMs: number;
+    paneFilter: string | undefined;
+    gitRoot: () => Promise<{ root: string | null; error: string | null; via: string | null }>;
+  },
+): Promise<string | null> {
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const snapshot = await sessionSnapshot(options);
+  const agents = snapshot.agents ?? {};
+  const panes = snapshot.panes ?? [];
+  const livePaneIds = new Set(panes.map((pane) => pane.pane_id));
+
+  const state0 = await loadState();
+  const entries0 = state0.sessions[ctx.sessionKey] ?? {};
+  resolveState(entries0, agents, now);
+  const scan = collectWatchTargets(
+    entries0,
+    state0.watch?.[ctx.sessionKey],
+    livePaneIds,
+    ctx.paneFilter,
+  );
+
+  const git = await ctx.gitRoot();
+  const outcomes: PollOutcome[] = [];
+  for (const target of scan.targets) {
+    if (target.baseline?.terminal !== undefined) continue;
+    if (
+      target.baseline?.next_poll_at !== undefined &&
+      target.baseline.next_poll_at > now.getTime()
+    ) {
+      continue; // failure backoff — deferred, not polled
+    }
+    if (git.root === null) {
+      outcomes.push({
+        target,
+        ok: false,
+        error: `git plugin unavailable: ${git.error ?? "unknown"}`,
+        baseline: target.baseline?.observation === undefined,
+      });
+      continue;
+    }
+    outcomes.push(await pollPrLink(git.root, target, options));
+  }
+
+  // Single commit: baselines, failure backoff, terminal marks, organize
+  // clears for attention return, and baseline pruning — one lock, one write.
+  const attention = new Map<string, AttentionRecord[]>();
+  const committed = await updateState((state) => {
+    const entries = sessionEntries(state, ctx.sessionKey);
+    resolveState(entries, agents, now);
+    pruneWatchSession(state, ctx.sessionKey, entries, agents, panes, now);
+    // Only materialize the watch map when this pass has poll outcomes or a
+    // pre-existing session map — an idle tick writes nothing new.
+    const watch = state.watch?.[ctx.sessionKey] ?? (outcomes.length > 0 ? {} : undefined);
+    if (watch === undefined) return outcomes;
+    state.watch = { ...state.watch, [ctx.sessionKey]: watch };
+
+    for (const outcome of outcomes) {
+      const { paneId, ref } = outcome.target;
+      const paneWatch = watch[paneId] ?? {};
+      watch[paneId] = paneWatch;
+      const record = paneWatch[ref] ?? { first_seen_at: nowIso, consecutive_failures: 0 };
+      paneWatch[ref] = record;
+      if (!outcome.ok) {
+        record.consecutive_failures += 1;
+        record.last_error = outcome.error ?? "unknown poll error";
+        record.next_poll_at =
+          now.getTime() + pollBackoffMs(ctx.intervalMs, record.consecutive_failures);
+        outcome.record = record;
+        continue;
+      }
+      const prev = record.observation;
+      const diff = diffObservation(prev, outcome.observation as LinkWatchObservation);
+      outcome.baseline = prev === undefined;
+      record.observation = outcome.observation;
+      outcome.record = record;
+      record.last_checked_at = nowIso;
+      delete record.last_error;
+      record.consecutive_failures = 0;
+      delete record.next_poll_at;
+      if (diff.terminal !== undefined) record.terminal = diff.terminal;
+
+      if (diff.triggers.length > 0) {
+        // Attention return = clear hide-kind organize marks only. Pin,
+        // order, and declared links survive; agent execution state is
+        // never touched (attention is never hidden — this only un-hides).
+        const entry = entries[paneId];
+        const cleared: string[] = [];
+        if (entry?.settled) {
+          delete entry.settled;
+          cleared.push("settled");
+        }
+        if (entry?.snoozed) {
+          delete entry.snoozed;
+          cleared.push("snoozed");
+        }
+        if (entry?.archived) {
+          delete entry.archived;
+          cleared.push("archived");
+        }
+        if (cleared.length > 0 && entry) entry.updated_at = nowIso;
+        const list = attention.get(paneId) ?? [];
+        list.push({
+          paneId,
+          ref,
+          triggers: diff.triggers,
+          details: { ...diff, cleared },
+        });
+        attention.set(paneId, list);
+      }
+      outcome.diff = diff;
+    }
+    return outcomes;
+  });
+
+  // Metadata projection + event emission happen after the commit so a
+  // projection failure can never roll back or fabricate state.
+  const fresh = await loadState();
+  for (const [paneId, records] of attention) {
+    const entry = fresh.sessions[ctx.sessionKey]?.[paneId];
+    const paneWarnings = await projectMetadata(paneId, entry, options);
+    emitLine({
+      contract: CONTRACT,
+      type: "watch-pr.attention",
+      at: nowIso,
+      pane_id: paneId,
+      triggers: [...new Set(records.flatMap((r) => r.triggers))],
+      links: records.map((r) => ({
+        ref: r.ref,
+        triggers: r.triggers,
+        new_failing_checks: r.details.newFailingChecks,
+        new_review_count: r.details.newReviewCount,
+        new_comment_count: r.details.newCommentCount,
+      })),
+      cleared: [...new Set(records.flatMap((r) => r.details.cleared))],
+      warnings: paneWarnings,
+    });
+  }
+
+  let polled = 0;
+  let failed = 0;
+  let triggered = 0;
+  for (const outcome of committed) {
+    if (outcome.ok) {
+      polled += 1;
+      if ((outcome.diff?.triggers.length ?? 0) > 0) triggered += 1;
+      const obs = outcome.observation;
+      emitLine({
+        contract: CONTRACT,
+        type: "watch-pr.poll",
+        at: nowIso,
+        pane_id: outcome.target.paneId,
+        ref: outcome.target.ref,
+        ok: true,
+        baseline: outcome.baseline,
+        triggers: outcome.diff?.triggers ?? [],
+        new_failing_checks: outcome.diff?.newFailingChecks ?? [],
+        new_review_count: outcome.diff?.newReviewCount ?? 0,
+        new_comment_count: outcome.diff?.newCommentCount ?? 0,
+        terminal: outcome.diff?.terminal ?? null,
+        observation: obs
+          ? {
+              state: obs.state,
+              is_draft: obs.isDraft,
+              merge_state_status: obs.mergeStateStatus,
+              mergeable: obs.mergeable,
+              updated_at: obs.updatedAt,
+              failing_checks: obs.failingChecks,
+              review_count: obs.reviewKeys.length,
+              comment_count: obs.commentKeys.length,
+            }
+          : null,
+        last_checked_at: nowIso,
+      });
+    } else {
+      failed += 1;
+      // Freshness honesty: report the committed backoff state and the age
+      // of the last good observation — a failed poll is data, not silence.
+      emitLine({
+        contract: CONTRACT,
+        type: "watch-pr.error",
+        at: nowIso,
+        pane_id: outcome.target.paneId,
+        ref: outcome.target.ref,
+        ok: false,
+        error: outcome.error ?? "unknown",
+        consecutive_failures: outcome.record?.consecutive_failures ?? 1,
+        next_poll_at: outcome.record?.next_poll_at ?? null,
+        last_checked_at: outcome.record?.last_checked_at ?? null,
+      });
+    }
+  }
+
+  // Deferred/terminal counts come from the committed records so they
+  // reflect this tick's writes, not the pre-tick snapshot.
+  let deferred = 0;
+  let terminal = 0;
+  const freshWatch = fresh.watch?.[ctx.sessionKey] ?? {};
+  for (const target of scan.targets) {
+    const record = freshWatch[target.paneId]?.[target.ref];
+    if (record?.terminal !== undefined) {
+      terminal += 1;
+    } else if (record?.next_poll_at !== undefined && record.next_poll_at > now.getTime()) {
+      deferred += 1;
+    }
+  }
+
+  emitLine({
+    contract: CONTRACT,
+    type: "watch-pr.tick",
+    at: nowIso,
+    interval_ms: ctx.intervalMs,
+    pane_filter: ctx.paneFilter ?? null,
+    git_root: git.root,
+    git_root_via: git.via,
+    targets: scan.targets.length,
+    absent_panes: scan.absentPaneIds,
+    polled,
+    deferred,
+    failed,
+    triggered,
+    terminal,
+  });
+
+  // Stop conditions (opt-in process, no resident daemon): nothing declared,
+  // or every declared PR link reached a terminal state. Absent-pane links
+  // still count as pending — a temporarily missing pane may return.
+  // Terminal status is read from the committed records so a PR that just
+  // merged/closed this tick stops the watch immediately.
+  const pendingLinks =
+    scan.absentPaneIds.length +
+    scan.targets.filter((t) => freshWatch[t.paneId]?.[t.ref]?.terminal === undefined).length;
+  if (scan.totalPrLinks === 0) return "no_links";
+  if (pendingLinks === 0) return "all_terminal";
+  return null;
+}
+
+/**
+ * `watch-pr [pane_id] [--interval SEC] [--once] [--git-root PATH]` —
+ * opt-in JSONL watcher that polls declared PR links through the git
+ * plugin's public CLI and restores attention (clears hide-kind organize
+ * marks) on qualifying transitions. No resident daemon, no webhook
+ * (ADR-0026); when not running, PR updates are simply not observed.
+ */
+async function cmdWatchPr(options: CliOptions): Promise<void> {
+  // watch-pr clears hide-kind organize marks and rewrites pane metadata
+  // tokens: a mutation of herdr-visible state, so the target must be
+  // explicit or a consistent ambient context — never the implicit
+  // default socket.
+  options.mutation = true;
+  validateFlags(options.args, WATCH_PR_FLAGS);
+  assertMaxPositionals(options.args, WATCH_PR_VALUE_FLAGS, 1, "watch-pr [pane_id]");
+  const intervalSec = Number(flagValue(options.args, "--interval") ?? "120");
+  const intervalMs =
+    (Number.isFinite(intervalSec) && intervalSec > 0
+      ? intervalSec
+      : WATCH_PR_DEFAULT_INTERVAL_SEC) * 1000;
+  const once = options.args.includes("--once");
+  const paneFilter = positionals(options.args, WATCH_PR_VALUE_FLAGS)[0];
+  const gitRootFlag = flagValue(options.args, "--git-root");
+
+  const sessionKey = sessionKeyFor(options);
+  const config = await loadConfig();
+  let resolved: { root: string | null; error: string | null; via: string | null } | undefined;
+  const gitRoot = async () => {
+    if (resolved !== undefined) return resolved;
+    const result = await resolvePluginRoot(GIT_PLUGIN_ID, gitRootFlag ?? config.gitPluginRoot);
+    resolved = result.ok
+      ? { root: result.root, error: null, via: result.via }
+      : { root: null, error: result.error, via: null };
+    return resolved;
+  };
+
+  // Resolve up front so `watch-pr.started` reports the real discovery path.
+  const git = await gitRoot();
+  emitLine({
+    contract: CONTRACT,
+    type: "watch-pr.started",
+    at: new Date().toISOString(),
+    interval_ms: intervalMs,
+    pane_filter: paneFilter ?? null,
+    once,
+    git_root: git.root,
+    git_root_via: git.via,
+    git_error: git.error,
+  });
+
+  let stopping = false;
+  const stop = () => {
+    stopping = true;
+  };
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
+
+  const sleep = (ms: number) =>
+    new Promise<void>((resolveSleep) => {
+      const timer = setTimeout(() => {
+        process.off("SIGINT", wake);
+        process.off("SIGTERM", wake);
+        resolveSleep();
+      }, ms);
+      const wake = () => {
+        clearTimeout(timer);
+        process.off("SIGINT", wake);
+        process.off("SIGTERM", wake);
+        resolveSleep();
+      };
+      process.on("SIGINT", wake);
+      process.on("SIGTERM", wake);
+    });
+
+  let stopReason: string | null = null;
+  try {
+    for (;;) {
+      try {
+        const reason = await watchPrTick(options, {
+          sessionKey,
+          intervalMs,
+          paneFilter,
+          gitRoot,
+        });
+        // --once still reports the real stop evaluation when nothing is
+        // watchable; "once" means a single pass completed with work pending.
+        if (once) {
+          stopReason = reason ?? "once";
+          break;
+        }
+        if (reason !== null) {
+          stopReason = reason;
+          break;
+        }
+      } catch (err) {
+        emitLine({
+          contract: CONTRACT,
+          type: "watch-pr.error",
+          at: new Date().toISOString(),
+          error: `tick failed: ${String(err)}`,
+        });
+      }
+      if (stopping) {
+        stopReason = "signal";
+        break;
+      }
+      await sleep(intervalMs);
+      if (stopping) {
+        stopReason = "signal";
+        break;
+      }
+    }
+  } finally {
+    process.off("SIGINT", stop);
+    process.off("SIGTERM", stop);
+  }
+
+  emitLine({
+    contract: CONTRACT,
+    type: "watch-pr.stopped",
+    reason: stopReason ?? "signal",
+    at: new Date().toISOString(),
+  });
+}
+
 /**
  * `transitions` — read-only page over the per-session organize-transition
  * log (#182, ADR-0029). Consumers (rebuildup.projects settle triggers)
@@ -1084,7 +1601,7 @@ async function cmdCapability(options: CliOptions): Promise<void> {
   emit({
     contract: CONTRACT,
     plugin: PLUGIN_ID,
-    version: "0.4.0",
+    version: "0.5.0",
     commands: [
       "list",
       "settle",
@@ -1101,6 +1618,7 @@ async function cmdCapability(options: CliOptions): Promise<void> {
       "reconcile",
       "transitions",
       "watch",
+      "watch-pr",
       "capability",
     ],
     actions: ["settle", "restore", "snooze", "pin", "unpin", "archive", "unarchive"],
@@ -1130,6 +1648,7 @@ Usage:
   inbox reconcile [--session NAME]
   inbox transitions [--after <seq>] [--limit <n>] [--session NAME]
   inbox watch [--interval SECONDS] [--session NAME]
+  inbox watch-pr [pane_id] [--interval SECONDS] [--once] [--git-root PATH] [--session NAME]
   inbox capability [--session NAME]
 
 Pane id may be omitted inside a plugin action/hook context (HERDR_PANE_ID
@@ -1165,6 +1684,8 @@ async function main(): Promise<void> {
       return cmdWake(options);
     case "watch":
       return cmdWatch(options);
+    case "watch-pr":
+      return cmdWatchPr(options);
     case "capability":
       return cmdCapability(options);
     case "help":
