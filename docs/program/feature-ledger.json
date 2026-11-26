@@ -22,6 +22,12 @@
     "out-of-scope": "本エコシステムの責務外 (herdr コア所有・上流サービス・クライアント polish)",
     "not-feasible": "技術的・ポリシー上実現不能。理由と解決条件を記録"
   },
+  "tui_coverage": {
+    "ledger": "docs/program/tui-coverage.json",
+    "summary": "docs/program/tui-coverage.md",
+    "contract": "docs/contracts/tui-v1.md",
+    "note": "#228 program: per-command CLI/TUI-action/interactive-TUI/GUI/real-machine/upstream-gap statuses for all 14 plugins. GUI completion never implies TUI completion. Design: ADR-0031/0032/0033 (#229)."
+  },
   "features": [
     {
       "id": "program-tracking",
@@ -431,6 +437,20 @@
       "verification": "AGENTS.md 不変条件および #22 方針で確定。",
       "reason": "herdr core が実行・プロバイダランタイム・オーケストレーションを所有。plugin が再実装すると正本が分裂する。",
       "resolution": "上流不足は ADR 注記と upstream Issue 候補として記録し、silent workaround しない。"
+    },
+    {
+      "id": "tui-first-class",
+      "title_ja": "TUI 正式利用面: 全 plugin の対話型 terminal UI・launcher・安全契約",
+      "upstream_refs": [
+        "https://herdr.dev/tui/docs/plugins/",
+        "https://herdr.dev/tui/docs/socket-api/",
+        "https://herdr.dev/tui/docs/configuration/"
+      ],
+      "classification": "plugin",
+      "issues": [228, 229, 230, 231, 232, 233, 234],
+      "depends_on": ["program-tracking", "#221", "#222", "#7"],
+      "acceptance": "herdr TUI を正式な plugin 利用面とし、GUI 非依存環境 (WSL2/SSH/headless) で人間向け機能を操作可能にする。公式 plugin pane entrypoint + action を第一経路とし、popup 非対応 version の fallback、対象 identity 固定、任意 launcher、名前空間 action、CLI fallback、安全契約を docs/contracts/tui-v1.md に固定。機能台帳は docs/program/tui-coverage.json でコマンド単位に管理。",
+      "verification": "設計基盤 #229: ADR-0031 (herdr 0.9.5 実測 capability + TUI architecture)、ADR-0032 (packages/tui 共有 library 選定)、ADR-0033 (launcher + safety contract)。実装は #230-#233、受入 #234。"
     }
   ]
 }

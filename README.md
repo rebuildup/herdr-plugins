@@ -27,6 +27,11 @@ clients through one versioned contract.
 | [mcp](plugins/mcp/) | `rebuildup.mcp` | Outside-agent MCP surface (`herdr-plugins.mcp/v1`, draft): local stdio MCP server exposing herdr sessions + plugin contracts with read-only/supervised/full access levels; remote HTTP/OAuth is upstream gap herdrdev/herdr#6199 (#30 T1). |
 | [machines](plugins/machines/) | `rebuildup.machines` | Remote machines inventory (`herdr-plugins.machines/v1`, draft): read-only `list`/`probe`/`capability` over herdr saved machines — reachability, remote version/protocol, plugin surface via the `SavedSshApiBridge` path. Lifecycle stays with `herdr machine`; no credentials (ADR-0028, #161). |
 | [secrets](plugins/secrets/) | `rebuildup.secrets` | Secret reference resolution and env injection (`herdr-plugins.secrets/v1`): Infisical-only declared bindings resolved per invocation into child-process env (`run`) or surface-create `env` params (`inject`) — values never persisted, logged, or emitted (ADR-0027). |
+| [git](plugins/git/) | `rebuildup.git` | Git status/diff/history for agent panes plus the forge surface (PR/issue read, mutation, merge) under versioned contracts. |
+| [projects](plugins/projects/) | `rebuildup.projects` | Project registry: multi-repo grouping, pin/archive, settings overrides, project-defined scripts, and settle/worktree triggers (`herdr-plugins.projects/v1`). |
+| [checkpoints](plugins/checkpoints/) | `rebuildup.checkpoints` | Worktree checkpoints as hidden git refs: capture, list, diff, plan, safe restore, groups, retention GC. |
+| [automations](plugins/automations/) | `rebuildup.automations` | Scheduled and triggered agent runs fired by OS schedulers or an opt-in watch process, plus event schedules via herdr lifecycle hooks (`herdr-plugins.automations/v1`). |
+| [artifacts](plugins/artifacts/) | `rebuildup.artifacts` | Artifact registry: registers, validates, indexes, and delivers references to generated files under `herdr-plugins.artifacts/v1`. |
 
 ## Development
 
