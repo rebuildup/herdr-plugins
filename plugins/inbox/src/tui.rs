@@ -20,9 +20,11 @@
 //! - Stale generation: before every mutation the item is re-read through
 //!   `list` and compared on agent_session + state_change_seq; mismatch ⇒
 //!   abort with a stale_* message and a refreshed list.
-//! - All mutations are confirm-gated and executed through the existing
-//!   CLI commands (self-respawn of this binary) — the TUI never writes
-//!   plugin state directly.
+//! - All mutations are confirm-gated and executed through the same
+//!   domain command cores the CLI dispatches to, called in-process —
+//!   the TUI never writes plugin state directly and never respawns
+//!   itself. Cross-plugin calls (watch-pr → git) keep their process
+//!   boundary per ADR-0013 and are not reachable from the TUI.
 
 use std::io::{self, IsTerminal, Write};
 use std::process::{Command, Stdio};
@@ -45,7 +47,6 @@ use crate::tui_model::{
 
 const PLUGIN_ID: &str = "rebuildup.inbox";
 const ENTRYPOINT_ID: &str = "main";
-const CLI_TIMEOUT_MS: u64 = 30_000;
 
 // --- pinned launch context ---------------------------------------------------------
 
@@ -92,86 +93,59 @@ fn capture_context() -> PinnedContext {
     }
 }
 
-// --- CLI invocation -----------------------------------------------------------------
+// --- domain invocation (in-process) ----------------------------------------------------
 
 struct CliResult {
     status: i32,
     stdout: String,
     stderr: String,
-    timed_out: bool,
 }
 
-/// Run one inbox CLI command by re-invoking this binary. The child env
-/// inherits the plugin/herdr targeting vars but NEVER the UI pane's own
-/// HERDR_PANE_ID or the origin context JSON — pane-scoped commands always
-/// receive an explicit positional pane id, so ambient identity must not
-/// leak through.
-fn run_cli(args: &[&str], timeout_ms: u64) -> CliResult {
-    let exe = std::env::current_exe().unwrap_or_else(|_| "inbox".into());
-    let mut child = match Command::new(exe)
-        .args(args)
-        .env_remove("HERDR_PANE_ID")
-        .env_remove("HERDR_PLUGIN_CONTEXT_JSON")
-        .env_remove("HERDR_TUI_CONTEXT_JSON")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdin(Stdio::null())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(err) => {
-            return CliResult {
-                status: -1,
-                stdout: String::new(),
-                stderr: format!("spawn failed: {}", err),
-                timed_out: false,
-            }
-        }
+/// Run one inbox domain command in-process — the same `cmd_*` cores the
+/// CLI dispatches to. No self-respawn: mutations share this process's
+/// state lock and pinned session/socket targeting, and pane-scoped
+/// commands always carry an explicit positional pane id so ambient
+/// HERDR_PANE_ID / context JSON can never become a mutation target.
+/// Process-level commands (`watch`, `watch-pr`, `_wake`) are never
+/// invoked from the TUI; socket calls carry their own timeouts.
+fn run_domain(args: &[String]) -> CliResult {
+    use crate::cli::{OrganizeCommand, RunError};
+    let mut options = crate::cli::parse_args(args);
+    // Args are internally generated and well-formed; `parse_args` only
+    // exits the process on malformed global flags, which cannot occur
+    // for TUI-built argv.
+    let result: Result<Value, RunError> = match options.command.as_str() {
+        "list" => crate::cli::cmd_list(&options),
+        "settle" => crate::cli::cmd_organize(&mut options, OrganizeCommand::Settle),
+        "snooze" => crate::cli::cmd_organize(&mut options, OrganizeCommand::Snooze),
+        "restore" => crate::cli::cmd_organize(&mut options, OrganizeCommand::Restore),
+        "pin" => crate::cli::cmd_organize(&mut options, OrganizeCommand::Pin),
+        "unpin" => crate::cli::cmd_organize(&mut options, OrganizeCommand::Unpin),
+        "archive" => crate::cli::cmd_organize(&mut options, OrganizeCommand::Archive),
+        "unarchive" => crate::cli::cmd_organize(&mut options, OrganizeCommand::Unarchive),
+        "order" => crate::cli::cmd_order(&mut options),
+        "link" => crate::cli::cmd_link(&mut options),
+        "unlink" => crate::cli::cmd_unlink(&mut options),
+        "reconcile" => crate::cli::cmd_reconcile(&mut options),
+        "transitions" => crate::cli::cmd_transitions(&options),
+        other => Err(RunError::usage(format!(
+            "command not available to the TUI: {}",
+            other
+        ))),
     };
-    // Simple timeout: poll try_wait; kill on expiry.
-    let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => {
-                if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let mut stdout = String::new();
-                    let mut stderr = String::new();
-                    if let Some(mut o) = child.stdout.take() {
-                        use std::io::Read;
-                        let _ = o.read_to_string(&mut stdout);
-                    }
-                    if let Some(mut e) = child.stderr.take() {
-                        use std::io::Read;
-                        let _ = e.read_to_string(&mut stderr);
-                    }
-                    return CliResult { status: -1, stdout, stderr, timed_out: true };
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(err) => {
-                return CliResult {
-                    status: -1,
-                    stdout: String::new(),
-                    stderr: format!("wait failed: {}", err),
-                    timed_out: false,
-                }
-            }
-        }
+    match result {
+        Ok(payload) => CliResult {
+            status: 0,
+            // Same pretty-printed document the CLI `emit` writes.
+            stdout: serde_json::to_string_pretty(&payload).unwrap_or_default(),
+            stderr: String::new(),
+        },
+        Err(e) => CliResult {
+            status: e.code(),
+            stdout: String::new(),
+            stderr: e.stderr_doc(),
+        },
     }
-    let mut stdout = String::new();
-    let mut stderr = String::new();
-    use std::io::Read;
-    if let Some(mut o) = child.stdout.take() {
-        let _ = o.read_to_string(&mut stdout);
-    }
-    if let Some(mut e) = child.stderr.take() {
-        let _ = e.read_to_string(&mut stderr);
-    }
-    let status = child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
-    CliResult { status, stdout, stderr, timed_out: false }
 }
 
 enum ListOutcome {
@@ -180,10 +154,7 @@ enum ListOutcome {
 }
 
 fn run_list() -> ListOutcome {
-    let result = run_cli(&["list"], CLI_TIMEOUT_MS);
-    if result.timed_out {
-        return ListOutcome::Err("list timed out".to_string());
-    }
+    let result = run_domain(&["list".to_string()]);
     if result.status != 0 {
         return ListOutcome::Err(cli_error_message(
             result.status,
@@ -493,17 +464,8 @@ impl App {
 
     fn run_confirmed(&mut self, mutation: PendingMutation) {
         self.status = format!("running: {}…", mutation.args.first().map(|s| s.as_str()).unwrap_or("?"));
-        let arg_refs: Vec<&str> = mutation.args.iter().map(|s| s.as_str()).collect();
-        let result = run_cli(&arg_refs, CLI_TIMEOUT_MS);
+        let result = run_domain(&mutation.args);
         self.screen = Screen::Main;
-        if result.timed_out {
-            self.status = format!(
-                "timeout: {} exceeded {}ms",
-                mutation.args.join(" "),
-                CLI_TIMEOUT_MS
-            );
-            return;
-        }
         if result.status != 0 {
             self.status = format!(
                 "error: {}",
@@ -674,15 +636,11 @@ impl App {
 
     fn show_transitions(&mut self) {
         self.status = "reading transitions…".to_string();
-        let result = run_cli(&["transitions", "--limit", "50"], CLI_TIMEOUT_MS);
-        if result.timed_out || result.status != 0 {
+        let result = run_domain(&["transitions".to_string(), "--limit".to_string(), "50".to_string()]);
+        if result.status != 0 {
             self.status = format!(
                 "transitions failed: {}",
-                if result.timed_out {
-                    "timeout".to_string()
-                } else {
-                    cli_error_message(result.status, &result.stdout, &result.stderr)
-                }
+                cli_error_message(result.status, &result.stdout, &result.stderr)
             );
             return;
         }

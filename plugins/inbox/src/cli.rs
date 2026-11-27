@@ -208,23 +208,71 @@ fn fail_command(err: &CommandError) -> ! {
     }
 }
 
-fn fail_state(err: &str) -> ! {
-    fail(err, 1)
-}
-
-/// Error surface for long-running commands: target-resolution failures
-/// keep their structured code/exit mapping; everything else is a plain
-/// handled error (exit 1).
+/// Error surface for command cores: usable both from the process-level
+/// CLI dispatch (mapped to stderr doc + exit code) and in-process from
+/// the TUI (returned as a value — never exits the host process).
 #[derive(Debug)]
 pub enum RunError {
+    /// Target-resolution failure with its structured code/exit mapping.
     Target(TargetResolutionError),
+    /// Usage error (exit 2 at the CLI boundary).
+    Usage(String),
+    /// Handled runtime error (exit 1 at the CLI boundary).
     Other(String),
 }
 
 impl RunError {
+    pub fn usage(message: impl Into<String>) -> Self {
+        RunError::Usage(message.into())
+    }
+
+    pub fn other(message: impl Into<String>) -> Self {
+        RunError::Other(message.into())
+    }
+
+    /// Exit code the CLI boundary would use for this error.
+    pub fn code(&self) -> i32 {
+        match self {
+            RunError::Target(t) => {
+                if t.usage {
+                    2
+                } else {
+                    1
+                }
+            }
+            RunError::Usage(_) => 2,
+            RunError::Other(_) => 1,
+        }
+    }
+
+    /// The same JSON error document `exit()` writes to stderr — lets
+    /// in-process callers (the TUI) surface identical diagnostics.
+    pub fn stderr_doc(&self) -> String {
+        let error = match self {
+            RunError::Target(t) => json!({
+                "contract": CONTRACT,
+                "ok": false,
+                "error": { "code": t.code.as_str(), "message": t.message },
+            }),
+            RunError::Usage(m) => json!({
+                "contract": CONTRACT,
+                "ok": false,
+                "error": { "code": "usage", "message": m },
+            }),
+            RunError::Other(m) => json!({
+                "contract": CONTRACT,
+                "ok": false,
+                "error": { "code": "error", "message": m },
+            }),
+        };
+        serde_json::to_string(&error).unwrap_or_default()
+    }
+
+    /// CLI boundary: emit the error document and exit with the mapped code.
     pub fn exit(self) -> ! {
         match self {
             RunError::Target(t) => fail_target(&t),
+            RunError::Usage(m) => fail(&m, 2),
             RunError::Other(m) => fail(&m, 1),
         }
     }
@@ -255,7 +303,7 @@ impl std::fmt::Display for RunError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RunError::Target(t) => write!(f, "{}", t),
-            RunError::Other(m) => write!(f, "{}", m),
+            RunError::Usage(m) | RunError::Other(m) => write!(f, "{}", m),
         }
     }
 }
@@ -291,7 +339,7 @@ enum FlagKind {
 /// must be a whitelisted flag. Unknown options, `--flag=value` on boolean
 /// flags, and value flags with a missing/option-like value are usage
 /// errors (exit 2). A lone `-` is a positional, not an option.
-fn validate_flags(args: &[String], spec: &HashMap<String, FlagKind>) {
+fn validate_flags(args: &[String], spec: &HashMap<String, FlagKind>) -> Result<(), RunError> {
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
@@ -308,11 +356,11 @@ fn validate_flags(args: &[String], spec: &HashMap<String, FlagKind>) {
             None => arg.as_str(),
         };
         let Some(kind) = spec.get(name) else {
-            fail(&format!("unknown option: {}", arg), 2);
+            return Err(RunError::usage(format!("unknown option: {}", arg)));
         };
         if *kind == FlagKind::Boolean {
             if eq.is_some() {
-                fail(&format!("option {} does not take a value", name), 2);
+                return Err(RunError::usage(format!("option {} does not take a value", name)));
             }
             i += 1;
             continue;
@@ -331,10 +379,11 @@ fn validate_flags(args: &[String], spec: &HashMap<String, FlagKind>) {
             }
         };
         if bad {
-            fail(&format!("option {} requires a value", name), 2);
+            return Err(RunError::usage(format!("option {} requires a value", name)));
         }
         i += 2;
     }
+    Ok(())
 }
 
 fn flags_spec(pairs: &[(&str, FlagKind)]) -> HashMap<String, FlagKind> {
@@ -376,18 +425,21 @@ fn positionals(args: &[String], value_flags: &[&str]) -> Vec<String> {
 }
 
 /// More positionals than the command accepts is a usage error.
-fn assert_max_positionals(args: &[String], value_flags: &[&str], max: usize, usage: &str) {
+fn assert_max_positionals(
+    args: &[String],
+    value_flags: &[&str],
+    max: usize,
+    usage: &str,
+) -> Result<(), RunError> {
     let pos = positionals(args, value_flags);
     if pos.len() > max {
-        fail(
-            &format!(
-                "{}: unexpected argument {}",
-                usage,
-                serde_json::to_string(&pos[max]).unwrap_or_default()
-            ),
-            2,
-        );
+        return Err(RunError::usage(format!(
+            "{}: unexpected argument {}",
+            usage,
+            serde_json::to_string(&pos[max]).unwrap_or_default()
+        )));
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -403,23 +455,25 @@ struct PaneSelection {
 /// Resolve the target pane. An explicit positional wins; otherwise the
 /// ambient identity bundle is used and kept for the post-snapshot
 /// consistency check.
-fn resolve_pane_selection(args: &[String], value_flags: &[&str]) -> PaneSelection {
+fn resolve_pane_selection(args: &[String], value_flags: &[&str]) -> Result<PaneSelection, RunError> {
     let positional = positionals(args, value_flags).into_iter().next();
     if let Some(p) = positional {
         if !p.is_empty() {
-            return PaneSelection {
+            return Ok(PaneSelection {
                 pane_id: p,
                 ambient: None,
-            };
+            });
         }
     }
-    let identity = ambient_identity().unwrap_or_else(|e| fail_target(&e));
+    let identity = ambient_identity().map_err(RunError::Target)?;
     match &identity.pane_id {
-        Some(pane_id) => PaneSelection {
+        Some(pane_id) => Ok(PaneSelection {
             pane_id: pane_id.clone(),
             ambient: Some(identity),
-        },
-        None => fail("pane id required (argument, HERDR_PANE_ID, or plugin context)", 2),
+        }),
+        None => Err(RunError::usage(
+            "pane id required (argument, HERDR_PANE_ID, or plugin context)",
+        )),
     }
 }
 
@@ -452,19 +506,19 @@ fn load_config() -> InboxConfig {
 }
 
 /// Parse deadline specs: ISO 8601, `+30m`/`+2h`/`+1d` (or bare `30m`).
-pub fn parse_until_spec(spec: &str, now: DateTime<Utc>) -> DateTime<Utc> {
+pub fn parse_until_spec(spec: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, RunError> {
     let normalized = if is_bare_duration(spec) {
         format!("+{}", spec)
     } else {
         spec.to_string()
     };
     if let Some(dt) = parse_duration_spec(&normalized, now) {
-        return dt;
+        return Ok(dt);
     }
     if let Some(dt) = model::parse_instant(&normalized) {
-        return dt;
+        return Ok(dt);
     }
-    fail(&format!("cannot parse snooze deadline: {}", spec), 2)
+    Err(RunError::usage(format!("cannot parse snooze deadline: {}", spec)))
 }
 
 fn is_bare_duration(spec: &str) -> bool {
@@ -499,14 +553,14 @@ fn parse_duration_spec(spec: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> 
     Some(now + chrono::Duration::milliseconds(ms))
 }
 
-fn snapshot_or_fail(options: &CliOptions) -> SessionSnapshot {
-    commands::session_snapshot(&options.call_options()).unwrap_or_else(|e| fail_command(&e))
+fn snapshot_or_err(options: &CliOptions) -> Result<SessionSnapshot, RunError> {
+    commands::session_snapshot(&options.call_options()).map_err(RunError::from)
 }
 
-fn find_pane<'a>(snapshot: &'a SessionSnapshot, pane_id: &str) -> &'a PaneInfo {
+fn find_pane<'a>(snapshot: &'a SessionSnapshot, pane_id: &str) -> Result<&'a PaneInfo, RunError> {
     snapshot
         .pane(pane_id)
-        .unwrap_or_else(|| fail(&format!("pane not found in session snapshot: {}", pane_id), 1))
+        .ok_or_else(|| RunError::other(format!("pane not found in session snapshot: {}", pane_id)))
 }
 
 /// Project organize state onto pane metadata tokens. Returns warnings.
@@ -553,20 +607,17 @@ fn project_metadata(
 const ORGANIZE_FILTERS: &[&str] = &["settled", "snoozed", "archived", "none"];
 
 /// Parse read-side `list` filters; unknown --organize values are usage errors.
-fn parse_list_filters(args: &[String]) -> InboxFilters {
+fn parse_list_filters(args: &[String]) -> Result<InboxFilters, RunError> {
     let mut filters = InboxFilters::default();
     if args.iter().any(|a| a == "--attention") {
         filters.attention = Some(true);
     }
     if let Some(organize) = flag_value(args, "--organize") {
         if !ORGANIZE_FILTERS.contains(&organize.as_str()) {
-            fail(
-                &format!(
-                    "invalid --organize value (expected settled|snoozed|archived|none): {}",
-                    organize
-                ),
-                2,
-            );
+            return Err(RunError::usage(format!(
+                "invalid --organize value (expected settled|snoozed|archived|none): {}",
+                organize
+            )));
         }
         filters.organize = Some(organize);
     }
@@ -576,14 +627,16 @@ fn parse_list_filters(args: &[String]) -> InboxFilters {
     if let Some(workspace) = flag_value(args, "--workspace") {
         filters.workspace = Some(workspace);
     }
-    filters
+    Ok(filters)
 }
 
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
 
-fn cmd_list(options: &CliOptions) {
+/// `inbox list` core — returns the payload document. Shared by the CLI
+/// dispatch (emits) and the in-process TUI.
+pub fn cmd_list(options: &CliOptions) -> Result<Value, RunError> {
     validate_flags(
         &options.args,
         &flags_spec(&[
@@ -592,33 +645,32 @@ fn cmd_list(options: &CliOptions) {
             ("--search", FlagKind::Value),
             ("--workspace", FlagKind::Value),
         ]),
-    );
+    )?;
     assert_max_positionals(
         &options.args,
         &["--organize", "--search", "--workspace"],
         0,
         "list",
-    );
+    )?;
     let now = Utc::now();
-    let target = resolve_target(&options.target_options()).unwrap_or_else(|e| fail_target(&e));
-    let snapshot = snapshot_or_fail(options);
-    let state = load_state().unwrap_or_else(|e| fail_state(&e));
-    let session_key = session_key_for(&options.target_options())
-        .unwrap_or_else(|e| fail_target(&e));
+    let target = resolve_target(&options.target_options()).map_err(RunError::Target)?;
+    let snapshot = snapshot_or_err(options)?;
+    let state = load_state()?;
+    let session_key = session_key_for(&options.target_options()).map_err(RunError::Target)?;
     let mut entries = state
         .sessions
         .get(&session_key)
         .cloned()
         .unwrap_or_default();
     resolve_state(&mut entries, &snapshot.agents, now);
-    let filters = parse_list_filters(&options.args);
+    let filters = parse_list_filters(&options.args)?;
     let items = apply_inbox_filters(
         &build_inbox(&snapshot.panes, &snapshot.agents, &mut entries, now),
         &filters,
     );
     let inbox: Vec<&InboxItem> = items.iter().filter(|i| i.in_inbox).collect();
 
-    emit(&json!({
+    Ok(json!({
         "contract": CONTRACT,
         "generated_at": model::iso_millis(now),
         "session": {
@@ -642,11 +694,11 @@ fn cmd_list(options: &CliOptions) {
             "linked": items.iter().filter(|i| !i.links.is_empty()).count(),
         },
         "items": items,
-    }));
+    }))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OrganizeCommand {
+pub enum OrganizeCommand {
     Settle,
     Snooze,
     Restore,
@@ -670,7 +722,10 @@ impl OrganizeCommand {
     }
 }
 
-fn cmd_organize(options: &mut CliOptions, kind: OrganizeCommand) {
+/// Organize mutation core (settle/snooze/restore/pin/unpin/archive/
+/// unarchive). Returns the payload document; shared by CLI dispatch and
+/// the in-process TUI.
+pub fn cmd_organize(options: &mut CliOptions, kind: OrganizeCommand) -> Result<Value, RunError> {
     // Every organize command mutates plugin state and pane metadata: the
     // target must be explicit or a consistent ambient context, never the
     // implicit default socket.
@@ -685,15 +740,15 @@ fn cmd_organize(options: &mut CliOptions, kind: OrganizeCommand) {
     } else {
         HashMap::new()
     };
-    validate_flags(&options.args, &spec);
-    assert_max_positionals(&options.args, value_flags, 1, &format!("{} <pane_id>", kind.as_str()));
-    let selection = resolve_pane_selection(&options.args, value_flags);
+    validate_flags(&options.args, &spec)?;
+    assert_max_positionals(&options.args, value_flags, 1, &format!("{} <pane_id>", kind.as_str()))?;
+    let selection = resolve_pane_selection(&options.args, value_flags)?;
     let pane_id = selection.pane_id.clone();
     let now = Utc::now();
-    let snapshot = snapshot_or_fail(options);
-    let pane = find_pane(&snapshot, &pane_id).clone();
+    let snapshot = snapshot_or_err(options)?;
+    let pane = find_pane(&snapshot, &pane_id)?.clone();
     if let Some(ambient) = &selection.ambient {
-        assert_ambient_pane_identity(&pane, ambient).unwrap_or_else(|e| fail_target(&e));
+        assert_ambient_pane_identity(&pane, ambient).map_err(RunError::Target)?;
     }
     let agent = snapshot.agents.get(&pane_id).cloned();
 
@@ -703,22 +758,22 @@ fn cmd_organize(options: &mut CliOptions, kind: OrganizeCommand) {
         let until_spec = flag_value(&options.args, "--until")
             .or_else(|| flag_value(&options.args, "--for"));
         if let Some(spec) = until_spec {
-            until = Some(parse_until_spec(&spec, now));
+            until = Some(parse_until_spec(&spec, now)?);
         } else {
             let config = load_config();
             match &config.default_snooze {
-                Some(spec) => until = Some(parse_until_spec(spec, now)),
-                None => fail(
-                    "snooze requires --until <iso|+duration> or config.json defaultSnooze",
-                    2,
-                ),
+                Some(spec) => until = Some(parse_until_spec(spec, now)?),
+                None => {
+                    return Err(RunError::usage(
+                        "snooze requires --until <iso|+duration> or config.json defaultSnooze",
+                    ))
+                }
             }
         }
     }
 
     let mut warnings: Vec<String> = Vec::new();
-    let session_key = session_key_for(&options.target_options())
-        .unwrap_or_else(|e| fail_target(&e));
+    let session_key = session_key_for(&options.target_options()).map_err(RunError::Target)?;
     let ctx = transition_context(
         Some(pane.clone()),
         agent.clone(),
@@ -810,8 +865,7 @@ fn cmd_organize(options: &mut CliOptions, kind: OrganizeCommand) {
             PendingTransition::None => {}
         }
         entry
-    })
-    .unwrap_or_else(|e| fail_state(&e));
+    })?;
 
     warnings.extend(project_metadata(&pane_id, entry.as_ref(), options));
 
@@ -823,7 +877,7 @@ fn cmd_organize(options: &mut CliOptions, kind: OrganizeCommand) {
         }
     }
 
-    let fresh = load_state().unwrap_or_else(|e| fail_state(&e));
+    let fresh = load_state()?;
     let resolved_entry = fresh
         .sessions
         .get(&session_key)
@@ -839,7 +893,7 @@ fn cmd_organize(options: &mut CliOptions, kind: OrganizeCommand) {
             None
         }
     });
-    emit(&json!({
+    Ok(json!({
         "contract": CONTRACT,
         "command": kind.as_str(),
         "pane_id": pane_id,
@@ -849,7 +903,7 @@ fn cmd_organize(options: &mut CliOptions, kind: OrganizeCommand) {
         "pinned": resolved_entry.map(|e| e.pinned.is_some()).unwrap_or(false),
         "order": resolved_entry.and_then(|e| e.order),
         "warnings": warnings,
-    }));
+    }))
 }
 
 struct ReconcileResult {
@@ -1044,19 +1098,24 @@ fn spawn_snooze_wake(options: &CliOptions, until: DateTime<Utc>) -> Option<Strin
     }
 }
 
+/// Unwrap-or-exit for process-level (CLI-only) commands.
+fn must<T>(r: Result<T, RunError>) -> T {
+    r.unwrap_or_else(|e| e.exit())
+}
+
 /// Internal `_wake` command: sleep until the deadline, then reconcile once.
 fn cmd_wake(options: &mut CliOptions) {
     options.mutation = true;
-    validate_flags(
+    must(validate_flags(
         &options.args,
         &flags_spec(&[("--until", FlagKind::Value)]),
-    );
-    assert_max_positionals(&options.args, &["--until"], 0, "_wake");
+    ));
+    must(assert_max_positionals(&options.args, &["--until"], 0, "_wake"));
     let until_spec = flag_value(&options.args, "--until");
     let Some(spec) = until_spec else {
         fail("_wake requires --until <iso8601>", 2);
     };
-    let until = parse_until_spec(&spec, Utc::now());
+    let until = must(parse_until_spec(&spec, Utc::now()));
     loop {
         let remaining = until.timestamp_millis() - Utc::now().timestamp_millis();
         if remaining <= 0 {
@@ -1072,27 +1131,24 @@ fn cmd_wake(options: &mut CliOptions) {
     }
 }
 
-fn cmd_reconcile(options: &mut CliOptions) {
+/// `inbox reconcile` core — returns the payload document.
+pub fn cmd_reconcile(options: &mut CliOptions) -> Result<Value, RunError> {
     options.mutation = true;
-    validate_flags(&options.args, &HashMap::new());
-    assert_max_positionals(&options.args, &[], 0, "reconcile");
-    match reconcile_once(options) {
-        Ok(result) => {
-            emit(&json!({
-                "contract": CONTRACT,
-                "command": "reconcile",
-                "resolved_at": result.resolved_at,
-                "cleared": result.cleared,
-                "pruned": result.pruned,
-                "projected": result.projected,
-                "warnings": result.warnings,
-            }));
-        }
-        Err(e) => e.exit(),
-    }
+    validate_flags(&options.args, &HashMap::new())?;
+    assert_max_positionals(&options.args, &[], 0, "reconcile")?;
+    let result = reconcile_once(options)?;
+    Ok(json!({
+        "contract": CONTRACT,
+        "command": "reconcile",
+        "resolved_at": result.resolved_at,
+        "cleared": result.cleared,
+        "pruned": result.pruned,
+        "projected": result.projected,
+        "warnings": result.warnings,
+    }))
 }
 
-fn parse_order_placement(args: &[String]) -> OrderPlacement {
+fn parse_order_placement(args: &[String]) -> Result<OrderPlacement, RunError> {
     let before = flag_value(args, "--before");
     let after = flag_value(args, "--after");
     let first = args.iter().any(|a| a == "--first");
@@ -1102,27 +1158,26 @@ fn parse_order_placement(args: &[String]) -> OrderPlacement {
         .filter(|b| **b)
         .count();
     if modes != 1 {
-        fail(
+        return Err(RunError::usage(
             "order requires exactly one of --before <pane> | --after <pane> | --first | --last",
-            2,
-        );
+        ));
     }
     if let Some(b) = before {
-        return OrderPlacement::Before(b);
+        return Ok(OrderPlacement::Before(b));
     }
     if let Some(a) = after {
-        return OrderPlacement::After(a);
+        return Ok(OrderPlacement::After(a));
     }
     if first {
-        OrderPlacement::First
+        Ok(OrderPlacement::First)
     } else {
-        OrderPlacement::Last
+        Ok(OrderPlacement::Last)
     }
 }
 
 /// Manual ordering: rewrite dense `order` ranks for the moved pane's
 /// display group. Ordering never hides or mutates execution state.
-fn cmd_order(options: &mut CliOptions) {
+pub fn cmd_order(options: &mut CliOptions) -> Result<Value, RunError> {
     options.mutation = true;
     let order_flags = flags_spec(&[
         ("--before", FlagKind::Value),
@@ -1131,20 +1186,19 @@ fn cmd_order(options: &mut CliOptions) {
         ("--last", FlagKind::Boolean),
     ]);
     let order_value_flags = ["--before", "--after"];
-    validate_flags(&options.args, &order_flags);
-    assert_max_positionals(&options.args, &order_value_flags, 1, "order <pane_id>");
-    let selection = resolve_pane_selection(&options.args, &order_value_flags);
+    validate_flags(&options.args, &order_flags)?;
+    assert_max_positionals(&options.args, &order_value_flags, 1, "order <pane_id>")?;
+    let selection = resolve_pane_selection(&options.args, &order_value_flags)?;
     let pane_id = selection.pane_id.clone();
-    let placement = parse_order_placement(&options.args);
+    let placement = parse_order_placement(&options.args)?;
     let now = Utc::now();
-    let snapshot = snapshot_or_fail(options);
+    let snapshot = snapshot_or_err(options)?;
     if let Some(ambient) = &selection.ambient {
-        let pane = find_pane(&snapshot, &pane_id);
-        assert_ambient_pane_identity(pane, ambient).unwrap_or_else(|e| fail_target(&e));
+        let pane = find_pane(&snapshot, &pane_id)?;
+        assert_ambient_pane_identity(pane, ambient).map_err(RunError::Target)?;
     }
-    let state = load_state().unwrap_or_else(|e| fail_state(&e));
-    let session_key = session_key_for(&options.target_options())
-        .unwrap_or_else(|e| fail_target(&e));
+    let state = load_state()?;
+    let session_key = session_key_for(&options.target_options()).map_err(RunError::Target)?;
     let mut entries = state.sessions.get(&session_key).cloned().unwrap_or_default();
     resolve_state(&mut entries, &snapshot.agents, now);
     let items = build_inbox(&snapshot.panes, &snapshot.agents, &mut entries, now);
@@ -1154,10 +1208,10 @@ fn cmd_order(options: &mut CliOptions) {
         .find(|item| item.in_inbox && item.pane_id == pane_id)
         .cloned();
     let Some(moved) = moved else {
-        fail(
-            &format!("pane is not in the inbox (hidden panes cannot be ordered): {}", pane_id),
-            1,
-        );
+        return Err(RunError::other(format!(
+            "pane is not in the inbox (hidden panes cannot be ordered): {}",
+            pane_id
+        )));
     };
     let siblings: Vec<InboxItem> = items
         .iter()
@@ -1166,10 +1220,8 @@ fn cmd_order(options: &mut CliOptions) {
         })
         .cloned()
         .collect();
-    let ranks = match compute_order_ranks(&siblings, &pane_id, &placement) {
-        Ok(r) => r,
-        Err(e) => fail(&e, 2),
-    };
+    let ranks = compute_order_ranks(&siblings, &pane_id, &placement)
+        .map_err(RunError::usage)?;
 
     let pane_by_id: HashMap<String, PaneInfo> = snapshot
         .panes
@@ -1185,17 +1237,16 @@ fn cmd_order(options: &mut CliOptions) {
                 entry.order = Some(*rank);
             }
         }
-    })
-    .unwrap_or_else(|e| fail_state(&e));
+    })?;
 
-    emit(&json!({
+    Ok(json!({
         "contract": CONTRACT,
         "command": "order",
         "pane_id": pane_id,
         "order": ranks.get(&pane_id),
         "placement": placement_json(&placement),
         "warnings": [],
-    }));
+    }))
 }
 
 fn placement_json(p: &OrderPlacement) -> Value {
@@ -1211,32 +1262,34 @@ const TRACKER_REF_PATTERN: &str =
     r"^([A-Za-z0-9][A-Za-z0-9_.-]*(?:/[A-Za-z0-9][A-Za-z0-9_.-]*)+)#([1-9][0-9]*)$";
 
 /// Parse "<repo>#<number>" where repo is a forge path like "owner/name".
-pub fn parse_tracker_ref(spec: &str) -> (String, i64) {
+pub fn parse_tracker_ref(spec: &str) -> Result<(String, i64), RunError> {
     let re = regex::Regex::new(TRACKER_REF_PATTERN).expect("tracker ref regex");
     let Some(caps) = re.captures(spec) else {
-        fail(
-            &format!("invalid tracker ref (expected <owner>/<repo>#<number>): {}", spec),
-            2,
-        );
+        return Err(RunError::usage(format!(
+            "invalid tracker ref (expected <owner>/<repo>#<number>): {}",
+            spec
+        )));
     };
     let repo = caps.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
     let number: i64 = caps
         .get(2)
         .and_then(|m| m.as_str().parse().ok())
         .unwrap_or(0);
-    (repo, number)
+    Ok((repo, number))
 }
 
 /// Exactly one of --pr/--issue must carry the tracker ref.
-fn tracker_kind_and_ref(args: &[String]) -> (LinkKind, String) {
+fn tracker_kind_and_ref(args: &[String]) -> Result<(LinkKind, String), RunError> {
     let pr = flag_value(args, "--pr");
     let issue = flag_value(args, "--issue");
     if pr.is_some() == issue.is_some() {
-        fail("requires exactly one of --pr <repo>#<n> or --issue <repo>#<n>", 2);
+        return Err(RunError::usage(
+            "requires exactly one of --pr <repo>#<n> or --issue <repo>#<n>",
+        ));
     }
     match pr {
-        Some(ref_) => ("pr".to_string(), ref_),
-        None => ("issue".to_string(), issue.unwrap()),
+        Some(ref_) => Ok(("pr".to_string(), ref_)),
+        None => Ok(("issue".to_string(), issue.unwrap())),
     }
 }
 
@@ -1310,7 +1363,7 @@ fn link_views(links: Option<&Vec<PaneLink>>) -> Vec<Value> {
 }
 
 /// Declare a user-owned tracker link (PR/Issue) on a pane.
-fn cmd_link(options: &mut CliOptions) {
+pub fn cmd_link(options: &mut CliOptions) -> Result<Value, RunError> {
     options.mutation = true;
     let link_flags = flags_spec(&[
         ("--pr", FlagKind::Value),
@@ -1318,17 +1371,17 @@ fn cmd_link(options: &mut CliOptions) {
         ("--verify", FlagKind::Boolean),
     ]);
     let link_value_flags = ["--pr", "--issue"];
-    validate_flags(&options.args, &link_flags);
-    assert_max_positionals(&options.args, &link_value_flags, 1, "link <pane_id>");
-    let selection = resolve_pane_selection(&options.args, &link_value_flags);
+    validate_flags(&options.args, &link_flags)?;
+    assert_max_positionals(&options.args, &link_value_flags, 1, "link <pane_id>")?;
+    let selection = resolve_pane_selection(&options.args, &link_value_flags)?;
     let pane_id = selection.pane_id.clone();
-    let (kind, ref_) = tracker_kind_and_ref(&options.args);
-    let (repo, number) = parse_tracker_ref(&ref_);
+    let (kind, ref_) = tracker_kind_and_ref(&options.args)?;
+    let (repo, number) = parse_tracker_ref(&ref_)?;
     let now = Utc::now();
-    let snapshot = snapshot_or_fail(options);
-    let pane = find_pane(&snapshot, &pane_id).clone();
+    let snapshot = snapshot_or_err(options)?;
+    let pane = find_pane(&snapshot, &pane_id)?.clone();
     if let Some(ambient) = &selection.ambient {
-        assert_ambient_pane_identity(&pane, ambient).unwrap_or_else(|e| fail_target(&e));
+        assert_ambient_pane_identity(&pane, ambient).map_err(RunError::Target)?;
     }
     let agent = snapshot.agents.get(&pane_id).cloned();
 
@@ -1339,8 +1392,7 @@ fn cmd_link(options: &mut CliOptions) {
         }
     }
 
-    let session_key = session_key_for(&options.target_options())
-        .unwrap_or_else(|e| fail_target(&e));
+    let session_key = session_key_for(&options.target_options()).map_err(RunError::Target)?;
     let canonical_ref = format!("{}#{}", repo, number);
     update_state(|state| {
         let entries = session_entries(state, &session_key);
@@ -1356,48 +1408,46 @@ fn cmd_link(options: &mut CliOptions) {
             },
             now,
         );
-    })
-    .unwrap_or_else(|e| fail_state(&e));
+    })?;
 
-    let fresh = load_state().unwrap_or_else(|e| fail_state(&e));
+    let fresh = load_state()?;
     let links = fresh
         .sessions
         .get(&session_key)
         .and_then(|m| m.get(&pane_id))
         .and_then(|e| e.links.as_ref());
-    emit(&json!({
+    Ok(json!({
         "contract": CONTRACT,
         "command": "link",
         "pane_id": pane_id,
         "link": {"kind": kind, "repo": repo, "number": number, "ref": canonical_ref},
         "links": link_views(links),
         "warnings": warnings,
-    }));
+    }))
 }
 
 /// Remove one declared link; the pane must still exist in the snapshot.
-fn cmd_unlink(options: &mut CliOptions) {
+pub fn cmd_unlink(options: &mut CliOptions) -> Result<Value, RunError> {
     options.mutation = true;
     let unlink_flags = flags_spec(&[
         ("--pr", FlagKind::Value),
         ("--issue", FlagKind::Value),
     ]);
     let unlink_value_flags = ["--pr", "--issue"];
-    validate_flags(&options.args, &unlink_flags);
-    assert_max_positionals(&options.args, &unlink_value_flags, 1, "unlink <pane_id>");
-    let selection = resolve_pane_selection(&options.args, &unlink_value_flags);
+    validate_flags(&options.args, &unlink_flags)?;
+    assert_max_positionals(&options.args, &unlink_value_flags, 1, "unlink <pane_id>")?;
+    let selection = resolve_pane_selection(&options.args, &unlink_value_flags)?;
     let pane_id = selection.pane_id.clone();
-    let (kind, ref_) = tracker_kind_and_ref(&options.args);
-    let (repo, number) = parse_tracker_ref(&ref_);
+    let (kind, ref_) = tracker_kind_and_ref(&options.args)?;
+    let (repo, number) = parse_tracker_ref(&ref_)?;
     let now = Utc::now();
-    let snapshot = snapshot_or_fail(options);
-    let pane = find_pane(&snapshot, &pane_id).clone();
+    let snapshot = snapshot_or_err(options)?;
+    let pane = find_pane(&snapshot, &pane_id)?.clone();
     if let Some(ambient) = &selection.ambient {
-        assert_ambient_pane_identity(&pane, ambient).unwrap_or_else(|e| fail_target(&e));
+        assert_ambient_pane_identity(&pane, ambient).map_err(RunError::Target)?;
     }
 
-    let session_key = session_key_for(&options.target_options())
-        .unwrap_or_else(|e| fail_target(&e));
+    let session_key = session_key_for(&options.target_options()).map_err(RunError::Target)?;
     let canonical_ref = format!("{}#{}", repo, number);
     let removed: Option<PaneLink> = update_state(|state| {
         // An unlinked PR stops being watched: drop its poll baseline too.
@@ -1408,58 +1458,59 @@ fn cmd_unlink(options: &mut CliOptions) {
         };
         remove_watch_link(state, &session_key, &pane_id, &canonical_ref);
         removed
-    })
-    .unwrap_or_else(|e| fail_state(&e));
+    })?;
     let Some(removed) = removed else {
-        fail(
-            &format!("no matching {} link on pane {}: {}#{}", kind, pane_id, repo, number),
-            1,
-        );
+        return Err(RunError::other(format!(
+            "no matching {} link on pane {}: {}#{}",
+            kind, pane_id, repo, number
+        )));
     };
 
-    let fresh = load_state().unwrap_or_else(|e| fail_state(&e));
+    let fresh = load_state()?;
     let links = fresh
         .sessions
         .get(&session_key)
         .and_then(|m| m.get(&pane_id))
         .and_then(|e| e.links.as_ref());
-    emit(&json!({
+    Ok(json!({
         "contract": CONTRACT,
         "command": "unlink",
         "pane_id": pane_id,
         "removed": serde_json::to_value(to_public_link(&removed)).unwrap_or(Value::Null),
         "links": link_views(links),
         "warnings": [],
-    }));
+    }))
 }
 
 /// Read the declared links stored for a pane (staleness already resolved).
-fn cmd_links(options: &CliOptions) {
-    validate_flags(&options.args, &HashMap::new());
-    assert_max_positionals(&options.args, &[], 1, "links <pane_id>");
-    let selection = resolve_pane_selection(&options.args, &[]);
+pub fn cmd_links(options: &CliOptions) -> Result<Value, RunError> {
+    validate_flags(&options.args, &HashMap::new())?;
+    assert_max_positionals(&options.args, &[], 1, "links <pane_id>")?;
+    let selection = resolve_pane_selection(&options.args, &[])?;
     let pane_id = selection.pane_id.clone();
     let now = Utc::now();
-    let snapshot = snapshot_or_fail(options);
+    let snapshot = snapshot_or_err(options)?;
     if let Some(ambient) = &selection.ambient {
-        let pane = find_pane(&snapshot, &pane_id);
-        assert_ambient_pane_identity(pane, ambient).unwrap_or_else(|e| fail_target(&e));
+        let pane = find_pane(&snapshot, &pane_id)?;
+        assert_ambient_pane_identity(pane, ambient).map_err(RunError::Target)?;
     }
-    let state = load_state().unwrap_or_else(|e| fail_state(&e));
-    let session_key = session_key_for(&options.target_options())
-        .unwrap_or_else(|e| fail_target(&e));
+    let state = load_state()?;
+    let session_key = session_key_for(&options.target_options()).map_err(RunError::Target)?;
     let mut entries = state.sessions.get(&session_key).cloned().unwrap_or_default();
     resolve_state(&mut entries, &snapshot.agents, now);
     let Some(entry) = entries.get(&pane_id) else {
-        fail(&format!("no inbox state for pane: {}", pane_id), 1);
+        return Err(RunError::other(format!(
+            "no inbox state for pane: {}",
+            pane_id
+        )));
     };
-    emit(&json!({
+    Ok(json!({
         "contract": CONTRACT,
         "command": "links",
         "pane_id": pane_id,
         "links": link_views(entry.links.as_ref()),
         "warnings": [],
-    }));
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1471,11 +1522,11 @@ fn cmd_links(options: &CliOptions) {
 /// Stops on SIGINT/SIGTERM (exit 0) or unexpected stream end (exit 1).
 fn cmd_watch(options: &mut CliOptions) {
     options.mutation = true;
-    validate_flags(
+    must(validate_flags(
         &options.args,
         &flags_spec(&[("--interval", FlagKind::Value)]),
-    );
-    assert_max_positionals(&options.args, &["--interval"], 0, "watch");
+    ));
+    must(assert_max_positionals(&options.args, &["--interval"], 0, "watch"));
     let interval_raw = flag_value(&options.args, "--interval");
     let interval_sec = interval_raw
         .as_deref()
@@ -2136,20 +2187,20 @@ fn watch_pr_tick(
 /// `watch-pr [pane_id] [--interval SEC] [--once] [--git-root PATH]`.
 fn cmd_watch_pr(options: &mut CliOptions) {
     options.mutation = true;
-    validate_flags(
+    must(validate_flags(
         &options.args,
         &flags_spec(&[
             ("--interval", FlagKind::Value),
             ("--once", FlagKind::Boolean),
             ("--git-root", FlagKind::Value),
         ]),
-    );
-    assert_max_positionals(
+    ));
+    must(assert_max_positionals(
         &options.args,
         &["--interval", "--git-root"],
         1,
         "watch-pr [pane_id]",
-    );
+    ));
     let interval_sec = flag_value(&options.args, "--interval")
         .and_then(|s| s.parse::<f64>().ok())
         .unwrap_or(WATCH_PR_DEFAULT_INTERVAL_SEC as f64);
@@ -2266,20 +2317,19 @@ fn cmd_watch_pr(options: &mut CliOptions) {
 // transitions: read-only page over the organize-transition log (#182)
 // ---------------------------------------------------------------------------
 
-fn cmd_transitions(options: &CliOptions) {
-    validate_flags(
+pub fn cmd_transitions(options: &CliOptions) -> Result<Value, RunError> {
+    must(validate_flags(
         &options.args,
         &flags_spec(&[
             ("--after", FlagKind::Value),
             ("--limit", FlagKind::Value),
         ]),
-    );
-    assert_max_positionals(&options.args, &["--after", "--limit"], 0, "transitions");
+    ));
+    must(assert_max_positionals(&options.args, &["--after", "--limit"], 0, "transitions"));
     let now = Utc::now();
-    let snapshot = snapshot_or_fail(options);
-    let state = load_state().unwrap_or_else(|e| fail_state(&e));
-    let session_key = session_key_for(&options.target_options())
-        .unwrap_or_else(|e| fail_target(&e));
+    let snapshot = snapshot_or_err(options)?;
+    let state = load_state()?;
+    let session_key = session_key_for(&options.target_options()).map_err(RunError::Target)?;
     let mut entries = state.sessions.get(&session_key).cloned().unwrap_or_default();
     resolve_state(&mut entries, &snapshot.agents, now);
 
@@ -2293,20 +2343,21 @@ fn cmd_transitions(options: &CliOptions) {
     let after: Option<i64> = match flag_value(&options.args, "--after") {
         Some(raw) => match raw.parse::<i64>() {
             Ok(v) if v >= 0 => Some(v),
-            _ => fail("--after must be a non-negative integer seq", 2),
+            _ => {
+                return Err(RunError::usage("--after must be a non-negative integer seq"));
+            }
         },
         None => None,
     };
     let limit: usize = match flag_value(&options.args, "--limit") {
         Some(raw) => match raw.parse::<usize>() {
             Ok(v) if v >= 1 && v <= MAX_TRANSITIONS_PER_SESSION => v,
-            _ => fail(
-                &format!(
+            _ => {
+                return Err(RunError::usage(format!(
                     "--limit must be an integer between 1 and {}",
                     MAX_TRANSITIONS_PER_SESSION
-                ),
-                2,
-            ),
+                )));
+            }
         },
         None => 200,
     };
@@ -2335,7 +2386,7 @@ fn cmd_transitions(options: &CliOptions) {
             .collect(),
     };
 
-    emit(&json!({
+    Ok(json!({
         "contract": CONTRACT,
         "command": "transitions",
         "generated_at": model::iso_millis(now),
@@ -2344,13 +2395,13 @@ fn cmd_transitions(options: &CliOptions) {
         "oldest_seq": oldest_seq,
         "dropped": log.map(|l| l.dropped).unwrap_or(0),
         "transitions": page_values,
-    }));
+    }))
 }
 
-fn cmd_capability(options: &CliOptions) {
-    validate_flags(&options.args, &HashMap::new());
-    assert_max_positionals(&options.args, &[], 0, "capability");
-    emit(&json!({
+pub fn cmd_capability(options: &CliOptions) -> Result<Value, RunError> {
+    must(validate_flags(&options.args, &HashMap::new()));
+    must(assert_max_positionals(&options.args, &[], 0, "capability"));
+    Ok(json!({
         "contract": CONTRACT,
         "plugin": PLUGIN_ID,
         "version": env!("CARGO_PKG_VERSION"),
@@ -2370,33 +2421,41 @@ fn cmd_capability(options: &CliOptions) {
         "startup": ["reconcile"],
         "state_file": state::state_file_path().to_string_lossy(),
         "socket": options.socket_path,
-    }));
+    }))
 }
 
 const USAGE: &str = "rebuildup.inbox — agent work inbox (contract herdr-plugins.inbox/v1)\n\nUsage:\n  inbox list [--session NAME] [--socket PATH]\n  inbox settle <pane_id> [--session NAME]\n  inbox snooze <pane_id> --until <iso8601|+30m|+2h|+1d> [--session NAME]\n  inbox restore <pane_id> [--session NAME]\n  inbox pin <pane_id> [--session NAME]\n  inbox unpin <pane_id> [--session NAME]\n  inbox archive <pane_id> [--session NAME]\n  inbox unarchive <pane_id> [--session NAME]\n  inbox order <pane_id> (--first | --last | --before <pane_id> | --after <pane_id>) [--session NAME]\n  inbox link <pane_id> (--pr <owner>/<repo>#<n> | --issue <owner>/<repo>#<n>) [--verify] [--session NAME]\n  inbox unlink <pane_id> (--pr <owner>/<repo>#<n> | --issue <owner>/<repo>#<n>) [--session NAME]\n  inbox links <pane_id> [--session NAME]\n  inbox list [--attention] [--organize settled|snoozed|archived|none] [--search <text>] [--workspace <id>]\n  inbox reconcile [--session NAME]\n  inbox transitions [--after <seq>] [--limit <n>] [--session NAME]\n  inbox watch [--interval SECONDS] [--session NAME]\n  inbox watch-pr [pane_id] [--interval SECONDS] [--once] [--git-root PATH] [--session NAME]\n  inbox capability [--session NAME]\n\nPane id may be omitted inside a plugin action/hook context (HERDR_PANE_ID\nor HERDR_PLUGIN_CONTEXT_JSON.focused_pane_id).\n";
+
+/// Emit a core command's payload or exit with the mapped code/stderr.
+fn emit_or_fail(result: Result<Value, RunError>) {
+    match result {
+        Ok(value) => emit(&value),
+        Err(e) => e.exit(),
+    }
+}
 
 /// Entry point for the CLI surface. `argv` excludes the program name.
 pub fn run(argv: &[String]) -> ! {
     let mut options = parse_args(argv);
     match options.command.as_str() {
-        "list" => cmd_list(&options),
-        "settle" => cmd_organize(&mut options, OrganizeCommand::Settle),
-        "snooze" => cmd_organize(&mut options, OrganizeCommand::Snooze),
-        "restore" => cmd_organize(&mut options, OrganizeCommand::Restore),
-        "pin" => cmd_organize(&mut options, OrganizeCommand::Pin),
-        "unpin" => cmd_organize(&mut options, OrganizeCommand::Unpin),
-        "archive" => cmd_organize(&mut options, OrganizeCommand::Archive),
-        "unarchive" => cmd_organize(&mut options, OrganizeCommand::Unarchive),
-        "order" => cmd_order(&mut options),
-        "link" => cmd_link(&mut options),
-        "unlink" => cmd_unlink(&mut options),
-        "links" => cmd_links(&options),
-        "reconcile" => cmd_reconcile(&mut options),
-        "transitions" => cmd_transitions(&options),
+        "list" => emit_or_fail(cmd_list(&options)),
+        "settle" => emit_or_fail(cmd_organize(&mut options, OrganizeCommand::Settle)),
+        "snooze" => emit_or_fail(cmd_organize(&mut options, OrganizeCommand::Snooze)),
+        "restore" => emit_or_fail(cmd_organize(&mut options, OrganizeCommand::Restore)),
+        "pin" => emit_or_fail(cmd_organize(&mut options, OrganizeCommand::Pin)),
+        "unpin" => emit_or_fail(cmd_organize(&mut options, OrganizeCommand::Unpin)),
+        "archive" => emit_or_fail(cmd_organize(&mut options, OrganizeCommand::Archive)),
+        "unarchive" => emit_or_fail(cmd_organize(&mut options, OrganizeCommand::Unarchive)),
+        "order" => emit_or_fail(cmd_order(&mut options)),
+        "link" => emit_or_fail(cmd_link(&mut options)),
+        "unlink" => emit_or_fail(cmd_unlink(&mut options)),
+        "links" => emit_or_fail(cmd_links(&options)),
+        "reconcile" => emit_or_fail(cmd_reconcile(&mut options)),
+        "transitions" => emit_or_fail(cmd_transitions(&options)),
+        "capability" => emit_or_fail(cmd_capability(&options)),
         "_wake" => cmd_wake(&mut options),
         "watch" => cmd_watch(&mut options),
         "watch-pr" => cmd_watch_pr(&mut options),
-        "capability" => cmd_capability(&options),
         "help" | "--help" | "-h" => {
             print!("{}", USAGE);
             std::process::exit(0);
