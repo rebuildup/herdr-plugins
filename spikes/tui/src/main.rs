@@ -547,9 +547,14 @@ fn main() -> io::Result<()> {
             }
         }
 
-        // Poll with a small timeout so async progress repaints without
-        // busy-looping and without needing a second thread for rendering.
-        if !event::poll(Duration::from_millis(50))? {
+        // Event-driven: block until input when idle; poll at 50 ms only
+        // while an async op needs progress repaints.
+        let timeout = if app.op.is_some() {
+            Duration::from_millis(50)
+        } else {
+            Duration::from_secs(3600)
+        };
+        if !event::poll(timeout)? {
             continue;
         }
         match event::read()? {

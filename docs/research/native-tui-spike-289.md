@@ -145,11 +145,14 @@ Failures hit during the spike (all harness/app-level, none library-level):
    harness bug, worked around by reading `screen.buffer` cells directly
    in `tools/drive.py`. Snapshots are therefore cell-accurate text but
    approximate for glyph shaping (ZWJ/flags/combining render partially).
-4. **Constant redraw loop** — the spike redraws every 50 ms poll tick
-   even when idle (frames=50–70 per ~3 s scenario). Harmless for a
-   spike but wasteful; a real implementation must render on
-   event/dirty-flag, not on a timer — except where async progress needs
-   repaints, which the task channel already covers.
+4. **Constant redraw loop (fixed during spike hardening)** — the first
+   cut polled at 50 ms unconditionally, redrawing every tick even when
+   idle (~20 fps of no-op frames). Fixed to event-driven rendering:
+   block on `event::poll` until input when no async op is active, poll
+   at 50 ms only while an op needs progress repaints. Frame count for
+   the `basic` scenario dropped 53→8; `async` still ticks during the
+   op as intended. A real implementation must keep this discipline —
+   render on event/dirty, never on a free-running timer.
 5. **Off-by-one in mouse hit-testing** — the spike guesses the list
    rect (`row - 2`) instead of tracking layout rects; selection landed
    one row off in `mouse-02`. Real implementation must store the
