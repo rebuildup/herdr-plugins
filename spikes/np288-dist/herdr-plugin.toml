@@ -11,7 +11,7 @@
 
 id = "rebuildup.np288-dist"
 name = "NP288 Distribution Spike"
-version = "0.1.0"
+version = "0.1.1"
 min_herdr_version = "0.9.0"
 description = "SPIKE ONLY (issue #288): verifies native Rust binary distribution through the official herdr plugin install path. No product behavior."
 platforms = ["macos"]
@@ -29,6 +29,16 @@ command = ["./bin/np288-dist", "ping"]
 
 [[startup]]
 command = ["./bin/np288-dist", "startup"]
+
+# Pane entrypoint: opens a transient overlay pane running the spike
+# binary. The process prints its env and exits immediately — enough to
+# prove entrypoint launch without a real TUI.
+[[panes]]
+id = "main"
+title = "NP288 spike pane"
+description = "SPIKE: prints version/env and exits."
+placement = "overlay"
+command = ["./bin/np288-dist", "ping"]
 
 # Event hook evidence: fires when any pane exits in a session running
 # this plugin. The hook only appends to plugin state; it must never
