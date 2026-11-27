@@ -10,7 +10,11 @@ snapshots, per-scenario stats, raw ANSI typescripts) and
 This document answers the #289 acceptance criteria: per-capability
 results with evidence, failure causes and alternatives, latency
 measurements, the minimal common-UX policy, the platform verification
-matrix, and the RC residual-verification list. The adoption decision it
+matrix, and the RC residual-verification list. Verification ran at two
+levels: a Python `pty` + `pyte` harness (`tools/drive.py`,
+`evidence/*.txt|*.typescript|stats-*`) and a **real herdr 0.9.5 pane** in
+an isolated named session `np289` (`evidence/herdr-*.txt`; session
+deleted afterwards, live session untouched). The adoption decision it
 feeds is recorded in **ADR-0035** (native TUI runtime + Inbox boundary).
 
 ## 1. What was compared
@@ -68,6 +72,7 @@ background (selection highlight).
 
 | capability | result | evidence |
 | --- | --- | --- |
+| **real herdr 0.9.5 pane run** | **PASS** | isolated session `np289` (dedicated XDG dirs under `/var/tmp/herdr-np289`, headless `herdr --session np289 server`, deleted afterwards; live session untouched): workspace `w1` + pane `w1:p1` ran the release binary — list render, `j j Enter`→detail, `/`+`café` filter (typed `é`), `d`→confirm dialog with target+consequence, `r`→async progress + `ctrl+c`→`refresh cancelled`, `?`→help, `ctrl+c`/`q`→clean exit with shell prompt restored. Snapshots: `evidence/herdr-01..09-*.txt` |
 | list rendering | PASS | `basic-01-list.txt` — 8 items, bordered block, status + help lines |
 | keyboard nav + selection | PASS | `basic-02-selected.txt` (`bg_rows=[4]` after `j`,`j`) |
 | detail view + scroll/viewport | PASS | `basic-03/04-detail*.txt` — wrapped paragraph + scrollbar (`▲/█/║/▼`) |
@@ -80,10 +85,10 @@ background (selection highlight).
 | CJK text | PASS (cell level) | `basic-01-list.txt`, `resize-*.txt` — Japanese titles render aligned; widths computed by `unicode-width` |
 | ambiguous-width chars | PASS w/ caveat | `・αβγ・`, `┌─┐│└─┘` render without breaking row alignment in snapshots; **caveat:** UAX#11 "ambiguous" = 1 cell in unicode-width; terminals in CJK locales may draw 2 — same exposure as the TS wcwidth table, must be rechecked per terminal at RC |
 | combining chars | PASS | `café` (precomposed) and pasted `カフェ́` (combining U+0301) both kept in filter line and list without layout breakage (`filter-02-filter-pasted.txt`) |
-| emoji (ZWJ sequence, flag) | PARTIAL | raw typescript contains the full `👨‍👩‍👧‍👦` ZWJ bytes and `🇯🇵` RI pair (verified byte-level); the pyte harness cannot shape ZWJ/RI glyphs so snapshots show fragments — **glyph-level rendering needs a real-terminal eyeball at RC** |
+| emoji (ZWJ sequence, flag) | PASS (herdr pane level) | raw typescript contains the full `👨‍👩‍👧‍👦` ZWJ bytes and `🇯🇵` RI pair; inside a real herdr 0.9.5 pane `pane read` shows both glyphs intact (`herdr-01-list.txt`) — herdr's terminal model handles width/ZWJ correctly. External-terminal eyeball still on the RC list |
 | untrusted-text escape safety | PASS (spike level) | fixture `</span>\x1b[31mRED\x1b[0m` renders as literal `[31mRED[0m` text — `sanitize()` strips C0/C1/ESC before render |
 | bracketed paste | PASS | `filter.typescript` contains `ESC[200~…ESC[201~`; pasted `絵文字🔍とカフェ́` lands in the filter verbatim (`filter-02-filter-pasted.txt`) |
-| resize | PASS | `resize-01..04` — 100×30 → 60×18 → 120×40 via `TIOCSWINSZ`/SIGWINCH, layout reflows, no artifacts |
+| resize | PASS (PTY level) / PARTIAL (herdr pane) | `resize-01..04` — 100×30 → 60×18 → 120×40 via `TIOCSWINSZ`/SIGWINCH, layout reflows cleanly. Inside a **headless** herdr session, `pane split`/`pane resize` changed layout rects but the pane PTY winsize did **not** follow (p1 stayed ~119 cols while its rect shrank to 12; `stty size` inside the pane confirmed) — the app kept rendering at PTY width and herdr cropped. This is a herdr headless-server behavior (no attached client renderer), not a spike defect — identical exposure for the TS TUI. Attached-client resize propagation → RC |
 | non-TTY fallback | PASS | `hoxay-tui-spike </dev/null` prints plain list, exit 0 |
 | IME committed-input / cursor | UNVERIFIED | cannot be driven through a pty harness — see §4 |
 | synchronized output (mode 2026) | NOT IMPLEMENTED | ratatui-crossterm does not emit `?2026h`; flicker mitigation = cell diff only. `packages/tui` uses 2026 where detected — parity gap to evaluate |
@@ -150,6 +155,21 @@ Failures hit during the spike (all harness/app-level, none library-level):
    one row off in `mouse-02`. Real implementation must store the
    `Rect` returned by `Layout` and hit-test against it. Recorded as a
    known spike shortcut, not a library defect.
+6. **Headless herdr does not propagate layout resize to pane PTY
+   winsize** — in the isolated `np289` session, `pane split`/`pane
+   resize` shrank the visible rect (down to 12 cols) while `stty size`
+   inside the pane still reported ~119 cols; the app kept rendering at
+   PTY width and herdr cropped the display. No crash, clean exit. This
+   is a *herdr headless-server* behavior — with no attached client
+   there is no renderer driving PTY winsize — and affects the TS TUI
+   identically, so it is not a Rust regression. It does mean
+   attached-client resize behavior is unverifiable from this harness →
+   RC item (real session with an attached client).
+7. **`send-keys` Escape+Enter coalescing** — sending `Escape Enter d`
+   in one `pane send-keys` call produced filter-Enter semantics rather
+   than two discrete events (raw `ESC`+`CR` can merge in escape
+   parsing). Harness artifact of batched key injection, not an app bug;
+   noted so future live-verification scripts send keys with delays.
 
 Alternatives considered and rejected for the core:
 
@@ -203,7 +223,8 @@ with #287 before final sign-off; do not block this ticket on it**.
 
 | platform | status | evidence / gap |
 | --- | --- | --- |
-| macOS arm64, pty harness (this machine) | VERIFIED for §3 capabilities | `evidence/*`; harness = real pty + pyte screen model, **not** a real terminal emulator |
+| macOS arm64, pty harness (this machine) | VERIFIED for §3 capabilities | `evidence/*`; harness = real pty + pyte screen model |
+| macOS arm64, real herdr 0.9.5 pane | VERIFIED for render/input/async-cancel/exit | isolated session `np289`, headless server; `evidence/herdr-*.txt`. Resize propagation unverified headlessly (see §5.6) |
 | macOS Terminal.app / iTerm2 real-app eyeball | PARTIAL — bytes verified, glyphs unverified | needs a human-driven session; RC |
 | Windows Terminal / ConPTY | UNVERIFIED | crossterm uses the ConPTY/Win32 console API; mouse/IME/paste semantics differ — RC |
 | WSL2 | UNVERIFIED | inherits terminal of the Windows-side emulator; RC |
@@ -284,7 +305,10 @@ claimed from this spike):
 3. Mouse click/scroll/wheel on Windows Terminal, WSL2, tmux
    (`mouse=a`/`alternate-screen` interactions).
 4. Bracketed paste of multi-byte text on each target.
-5. Resize storms (rapid SIGWINCH) and very small sizes (≤ 40×10).
+5. Resize storms (rapid SIGWINCH) and very small sizes (≤ 40×10),
+   **including pane-split resize with an attached herdr client** — the
+   headless session did not propagate layout resize to PTY winsize, so
+   the attached-client path is unverified (§5.6).
 6. SSH-attached herdr session: pane opens server-side, client terminal
    capabilities.
 7. `TERM=dumb` / `NO_COLOR` degradation paths.
