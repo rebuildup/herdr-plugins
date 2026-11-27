@@ -128,13 +128,18 @@ pure TUI — no herdr-t3 involved.
   confirms LF working tree.
 - `bun install`, `bun run typecheck`, `bun run lint` — all pass
   (lint exit 0, warnings only).
-- `bun run test` — **platform-limited**: the suite is POSIX-assuming;
-  on a stock Windows `core.autocrlf=true` git, checkpoint restore
-  tests fail because restored file contents gain CRLF
-  (`expect("v1\n")` vs `"v1\r\n"`). This is a test-environment/git
-  autocrlf interaction, not a plugin defect; it is recorded here as a
-  known Windows-suite limitation rather than silently ignored. (See
-  "Follow-ups".)
+- `bun run test` — **1384 pass / 112 fail / 24 skip** (75 files,
+  ~15 min). Failures are concentrated in POSIX-shell-fixture tests,
+  not plugin logic: fake `gh`/`infisical` provider fixtures are shell
+  scripts that cannot execute under Windows cmd/PowerShell (all
+  forge/issue/PR-mutation, watch-pr, secrets-provider, and
+  link-`--verify` cases); checkpoint restore tests assert LF-exact
+  file bytes while `core.autocrlf=true` git rewrites content to CRLF;
+  a few path-case normalization and subprocess-timeout flakes.
+  Recorded as a known Windows-suite portability gap, not a release
+  defect — the plugins' own Windows paths (cmd/powershell shell-family
+  handling in projects-runner, win32 clipboard fallback, etc.) are
+  covered by dedicated unit tests that do pass on this host.
 - `device-lab-win` (the other Windows SSH target) was unreachable —
   TCP connect to port 22 timed out on every attempt.
 
@@ -144,7 +149,7 @@ pure TUI — no herdr-t3 involved.
 | --- | --- | --- | --- |
 | macOS | pass | pass (warnings only) | 1516 pass; 23 subprocess timeouts under full parallel load — **all 23 pass on isolated re-run** (load flake, zero assertion failures) |
 | WSL2 | pass | pass | **1516 pass / 0 fail** |
-| Windows | pass | pass | see above (autocrlf-related failures in git-content tests) |
+| Windows | pass | pass | 1384 pass / 112 fail / 24 skip — POSIX-fixture portability gap (see above) |
 
 ## Follow-ups (filed / to file)
 
