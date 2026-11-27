@@ -348,7 +348,7 @@ describe("rebuildup.mcp events surface (T4, #140)", () => {
       ) as unknown as PollResult;
       expect(polled.events).toHaveLength(1);
       expect(polled.events[0]?.event).toBe("pane.agent_status_changed");
-      expect((polled.events[0]?.data as { pane_id: string }).pane_id).toBe("pane-1");
+      expect(((polled.events[0]?.data ?? {}) as { pane_id: string }).pane_id).toBe("pane-1");
 
       // workspace_id filter: pane-2 lives in ws-2.
       const wsSub = ok(
@@ -385,7 +385,9 @@ describe("rebuildup.mcp events surface (T4, #140)", () => {
         await client.tool("events_poll", { subscription_id: statusSub.id as string }),
       ) as unknown as PollResult;
       expect(statusPolled.events).toHaveLength(1);
-      expect((statusPolled.events[0]?.data as { agent_status: string }).agent_status).toBe("done");
+      expect(((statusPolled.events[0]?.data ?? {}) as { agent_status: string }).agent_status).toBe(
+        "done",
+      );
 
       for (const id of [paneId, wsSub.id as string, statusSub.id as string]) {
         await client.tool("events_unsubscribe", { subscription_id: id });

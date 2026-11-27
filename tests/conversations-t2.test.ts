@@ -766,8 +766,8 @@ describe("conversations t2 cli", () => {
         extra,
       );
       const all = [
-        ...(p1.json?.events as Record<string, unknown>[]),
-        ...(p2.json?.events as Record<string, unknown>[]),
+        ...((p1.json?.events ?? []) as Record<string, unknown>[]),
+        ...((p2.json?.events ?? []) as Record<string, unknown>[]),
       ];
       expect(all.map((e) => e.event_id)).toEqual(events.map((e) => e.event_id));
 
@@ -854,7 +854,7 @@ describe("conversations t2 cli", () => {
       const miss = skipped.find((s) => s.pane_id === "w1:p1");
       expect(miss?.reason).toBe("session_not_found");
       expect(miss?.transcript_path).toContain("opencode.db");
-      expect((r.json?.indexed as unknown[]).length).toBe(1);
+      expect(((r.json?.indexed ?? []) as unknown[]).length).toBe(1);
 
       // legacy-only layout → unsupported_layout
       const r2 = await runCliAsync(["index", "--socket", herdr.socketPath], {
@@ -892,8 +892,8 @@ describe("conversations t2 cli", () => {
         extra,
       );
       expect(h.status).toBe(0);
-      expect((h.json?.events as unknown[]).length).toBe(0);
-      expect((h.json?.page as Record<string, unknown>).events_present).toBe(false);
+      expect(((h.json?.events ?? []) as unknown[]).length).toBe(0);
+      expect(((h.json?.page ?? {}) as Record<string, unknown>).events_present).toBe(false);
 
       // re-index rebuilds the missing event log (missing detection)
       const re = await runCliAsync(["index", "--socket", herdr.socketPath], extra);
@@ -902,7 +902,7 @@ describe("conversations t2 cli", () => {
         ["history", "--session-id", `codex:${CODEX_SESSION}`, "--offline"],
         extra,
       );
-      expect((h2.json?.events as unknown[]).length).toBe(5);
+      expect(((h2.json?.events ?? []) as unknown[]).length).toBe(5);
 
       // cursor beyond the events file size → cursor_invalid
       const eventsPath = path.join(stateDir, "events", `codex_${CODEX_SESSION}.jsonl`);

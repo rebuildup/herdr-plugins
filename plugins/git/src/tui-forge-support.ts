@@ -263,9 +263,7 @@ function parseCliEnvelope(
  * context focused_pane_id=<origin pane> and fails closed with
  * `ambient_identity_mismatch` on every forge call.
  */
-export function forgeCliChildEnv(
-  env: NodeJS.ProcessEnv = process.env,
-): Record<string, string> {
+export function forgeCliChildEnv(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) {
     if (value === undefined) continue;

@@ -12,8 +12,8 @@
 import { GitError, gitOk, runGit } from "../git";
 import { type BranchEntry, parseBranches } from "./model";
 
-export { parseBranches };
 export type { BranchEntry };
+export { parseBranches };
 
 const BRANCH_FORMAT =
   "%(refname:short)%09%(HEAD)%09%(upstream:short)%09%(upstream:track)%09%(objectname)";

@@ -930,6 +930,6 @@ export function registryDriverState(registry: SessionRegistry): { state: string;
   return resolveDriverState(Object.values(registry.drivers));
 }
 
+export type { Destination, RunRecord, RunView, Schedule, TaskRecord, TaskView };
 // Re-exported for cli convenience / tests.
-export { nextOccurrenceAfter, parseSchedule, parseDestination };
-export type { Destination, Schedule, TaskRecord, TaskView, RunRecord, RunView };
+export { nextOccurrenceAfter, parseDestination, parseSchedule };

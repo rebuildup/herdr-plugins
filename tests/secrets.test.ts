@@ -488,7 +488,7 @@ describe("inject", () => {
       );
       expect(tabResult.status).toBe(0);
       const tabCall = herdr.calls.find((c) => c.method === "tab.create");
-      expect((tabCall?.params.env as Record<string, string>).ALPHA_KEY).toBe(
+      expect(((tabCall?.params.env ?? {}) as Record<string, string>).ALPHA_KEY).toBe(
         `${FAKE_VALUE}-ALPHA_SECRET`,
       );
 
@@ -511,7 +511,7 @@ describe("inject", () => {
       expect(paneResult.status).toBe(0);
       const paneCall = herdr.calls.find((c) => c.method === "pane.split");
       expect(paneCall?.params.direction).toBe("down");
-      expect((paneCall?.params.env as Record<string, string>).ALPHA_KEY).toBe(
+      expect(((paneCall?.params.env ?? {}) as Record<string, string>).ALPHA_KEY).toBe(
         `${FAKE_VALUE}-ALPHA_SECRET`,
       );
     } finally {

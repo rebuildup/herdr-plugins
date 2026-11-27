@@ -282,7 +282,7 @@ describe("conversations t3 read APIs", () => {
     try {
       const idx = await runCliAsync(["index", "--socket", herdr.socketPath], extra);
       expect(idx.status).toBe(0);
-      expect((idx.json?.indexed as unknown[]).length).toBe(2);
+      expect(((idx.json?.indexed ?? []) as unknown[]).length).toBe(2);
 
       // case-insensitive substring across both sessions
       const all = await runCliAsync(["search", "NEEDLE", "--offline"], extra);
@@ -309,9 +309,9 @@ describe("conversations t3 read APIs", () => {
         ["search", "needle", "--session-id", `claude:${SESSION_ID}`, "--offline"],
         extra,
       );
-      expect((scoped.json?.results as unknown[]).length).toBe(3);
+      expect(((scoped.json?.results ?? []) as unknown[]).length).toBe(3);
       const byPane = await runCliAsync(["search", "needle", "--pane", "w1:p2", "--offline"], extra);
-      expect((byPane.json?.results as unknown[]).length).toBe(0);
+      expect(((byPane.json?.results ?? []) as unknown[]).length).toBe(0);
       expect(byPane.json?.selector_note).toBe("filtered_by_pane");
 
       // tool_name is searchable
@@ -365,8 +365,8 @@ describe("conversations t3 read APIs", () => {
         extra,
       );
       const allEvents = [
-        ...(h1.json?.events as Record<string, unknown>[]),
-        ...(h2.json?.events as Record<string, unknown>[]),
+        ...((h1.json?.events ?? []) as Record<string, unknown>[]),
+        ...((h2.json?.events ?? []) as Record<string, unknown>[]),
       ];
       const ids = allEvents.map((e) => e.event_id);
       expect(new Set(ids).size).toBe(ids.length);
@@ -384,8 +384,8 @@ describe("conversations t3 read APIs", () => {
         extra,
       );
       const allMatches = [
-        ...(s1.json?.results as Record<string, unknown>[]),
-        ...(s2.json?.results as Record<string, unknown>[]),
+        ...((s1.json?.results ?? []) as Record<string, unknown>[]),
+        ...((s2.json?.results ?? []) as Record<string, unknown>[]),
       ];
       const matchIds = allMatches.map((r) => r.event_id);
       expect(new Set(matchIds).size).toBe(matchIds.length);
@@ -412,7 +412,7 @@ describe("conversations t3 read APIs", () => {
       expect(byEvent.status).toBe(0);
       expect(byEvent.json?.resolved).toEqual({ kind: "event_id" });
       expect(byEvent.json?.matched).toBe(1);
-      const ev = (byEvent.json?.results as Record<string, unknown>[])[0]?.event as Record<
+      const ev = ((byEvent.json?.results ?? []) as Record<string, unknown>[])[0]?.event as Record<
         string,
         unknown
       >;
@@ -442,7 +442,7 @@ describe("conversations t3 read APIs", () => {
       const miss = await runCliAsync(["show", "no-such-id", "--offline"], extra);
       expect(miss.status).toBe(0);
       expect(miss.json?.matched).toBe(0);
-      expect((miss.json?.results as unknown[]).length).toBe(0);
+      expect(((miss.json?.results ?? []) as unknown[]).length).toBe(0);
     } finally {
       await herdr.close();
     }
@@ -471,7 +471,7 @@ describe("conversations t3 read APIs", () => {
         ["usage", "--session-id", `claude:${SESSION_ID}`, "--offline"],
         extra,
       );
-      expect((scoped.json?.results as unknown[]).length).toBe(2);
+      expect(((scoped.json?.results ?? []) as unknown[]).length).toBe(2);
     } finally {
       await herdr.close();
     }
@@ -488,23 +488,25 @@ describe("conversations t3 read APIs", () => {
       // indexed events still readable, status unchanged until re-index
       rmSync(transcript, { force: true });
       const s = await runCliAsync(["search", "needle", "--offline"], extra);
-      const sess = (s.json?.sessions as Record<string, unknown>[])[0];
+      const sess = ((s.json?.sessions ?? []) as Record<string, unknown>[])[0];
       expect(sess?.transcript_present).toBe(false);
-      expect((s.json?.results as unknown[]).length).toBe(3);
+      expect(((s.json?.results ?? []) as unknown[]).length).toBe(3);
 
       // events file deleted → events_present:false + empty results
       rmSync(path.join(stateDir, "events", `claude_${SESSION_ID}.jsonl`), { force: true });
       const s2 = await runCliAsync(["search", "needle", "--offline"], extra);
-      const sess2 = (s2.json?.sessions as Record<string, unknown>[])[0];
+      const sess2 = ((s2.json?.sessions ?? []) as Record<string, unknown>[])[0];
       expect(sess2?.events_present).toBe(false);
-      expect((s2.json?.results as unknown[]).length).toBe(0);
+      expect(((s2.json?.results ?? []) as unknown[]).length).toBe(0);
       const sh = await runCliAsync(["show", "u-1", "--offline"], extra);
-      expect((sh.json?.results as unknown[]).length).toBe(0);
-      expect((sh.json?.sessions as Record<string, unknown>[])[0]?.events_present).toBe(false);
+      expect(((sh.json?.results ?? []) as unknown[]).length).toBe(0);
+      expect(((sh.json?.sessions ?? []) as Record<string, unknown>[])[0]?.events_present).toBe(
+        false,
+      );
 
       // sessions listing also reports transcript_present
       const list = await runCliAsync(["sessions", "--offline"], extra);
-      const entry = (list.json?.sessions as Record<string, unknown>[])[0];
+      const entry = ((list.json?.sessions ?? []) as Record<string, unknown>[])[0];
       expect(entry?.transcript_present).toBe(false);
     } finally {
       await herdr.close();
@@ -516,7 +518,7 @@ describe("conversations t3 read APIs", () => {
     // nothing indexed at all
     const empty = await runCliAsync(["search", "anything", "--offline"], extra);
     expect(empty.status).toBe(0);
-    expect((empty.json?.results as unknown[]).length).toBe(0);
+    expect(((empty.json?.results ?? []) as unknown[]).length).toBe(0);
     expect(empty.json?.hint).toContain("index");
 
     // explicit selector with no matching record → session_not_found + hint

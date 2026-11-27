@@ -28,8 +28,8 @@ import { HerdrRpcError, request, resolveTarget } from "../../../packages/herdr-c
 import type { SelectItem } from "../../../packages/tui/src/index";
 import { type CheckpointEntry, loadState, PLUGIN_ID, sessionKeyFor } from "./state";
 
-export { PLUGIN_ID };
 export type { CheckpointEntry };
+export { PLUGIN_ID };
 
 // --- pinned target identity -------------------------------------------------
 

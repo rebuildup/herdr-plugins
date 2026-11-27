@@ -17,8 +17,8 @@ import {
   runGit,
 } from "../../../packages/git-core/src/index";
 
-export { GitError, gitOk, resolveRepo, runGit };
 export type { GitErrorKind, GitResult, RepoInfo } from "../../../packages/git-core/src/index";
+export { GitError, gitOk, resolveRepo, runGit };
 
 export interface ChangeCounts {
   staged: number;
