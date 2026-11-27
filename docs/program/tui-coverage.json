@@ -1036,9 +1036,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/rc-0-4-0-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/rc-0-4-0-verification.md"],
           "upstream_gap": null,
           "notes": "discovery document"
         }
@@ -1192,9 +1190,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/automations-t4-live-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/automations-t4-live-verification.md"],
           "upstream_gap": null,
           "notes": "firing driver internals"
         },
@@ -1251,9 +1247,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/automations-t4-live-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/automations-t4-live-verification.md"],
           "upstream_gap": null,
           "notes": "discovery document"
         }
@@ -1377,9 +1371,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/conversations-v1-real-data-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/conversations-v1-real-data-verification.md"],
           "upstream_gap": null,
           "notes": "discovery document"
         }
@@ -1458,9 +1450,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/usage-v1-real-data-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/usage-v1-real-data-verification.md"],
           "upstream_gap": null,
           "notes": "discovery document"
         }
@@ -1584,9 +1574,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/controls-v1-live-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/controls-v1-live-verification.md"],
           "upstream_gap": null,
           "notes": "discovery document; also exposes providers/dialogs tables"
         }
@@ -1974,9 +1962,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/artifacts-v1-live-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/artifacts-v1-live-verification.md"],
           "upstream_gap": null,
           "notes": "discovery document"
         }
@@ -2055,9 +2041,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/secrets-v1-live-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/secrets-v1-live-verification.md"],
           "upstream_gap": null,
           "notes": "discovery document; provider/auth status"
         }
@@ -2106,9 +2090,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/machines-v1-live-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/machines-v1-live-verification.md"],
           "upstream_gap": null,
           "notes": "discovery document"
         }
@@ -2142,9 +2124,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/mcp-v1-live-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
           "upstream_gap": null,
           "notes": "stdio MCP server; NOT screen-ified (ADR-0025)"
         },
@@ -2156,9 +2136,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/mcp-v1-live-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
           "upstream_gap": null,
           "notes": "usage text"
         }
@@ -2172,9 +2150,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/mcp-v1-live-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
           "upstream_gap": null,
           "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
         },
@@ -2186,9 +2162,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/mcp-v1-live-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
           "upstream_gap": null,
           "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
         },
@@ -2200,9 +2174,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/mcp-v1-live-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
           "upstream_gap": null,
           "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
         },
@@ -2214,9 +2186,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/mcp-v1-live-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
           "upstream_gap": null,
           "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
         },
@@ -2228,9 +2198,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/mcp-v1-live-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
           "upstream_gap": null,
           "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
         },
@@ -2242,9 +2210,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/mcp-v1-live-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
           "upstream_gap": null,
           "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
         },
@@ -2256,9 +2222,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/mcp-v1-live-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
           "upstream_gap": null,
           "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
         },
@@ -2270,9 +2234,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/mcp-v1-live-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
           "upstream_gap": null,
           "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
         },
@@ -2284,9 +2246,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/mcp-v1-live-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
           "upstream_gap": null,
           "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
         },
@@ -2298,9 +2258,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/mcp-v1-live-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
           "upstream_gap": null,
           "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
         },
@@ -2312,9 +2270,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/mcp-v1-live-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
           "upstream_gap": null,
           "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
         },
@@ -2326,9 +2282,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/mcp-v1-live-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
           "upstream_gap": null,
           "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
         },
@@ -2340,9 +2294,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/mcp-v1-live-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
           "upstream_gap": null,
           "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
         },
@@ -2354,9 +2306,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/mcp-v1-live-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
           "upstream_gap": null,
           "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
         },
@@ -2368,9 +2318,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/mcp-v1-live-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
           "upstream_gap": null,
           "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
         },
@@ -2382,9 +2330,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/mcp-v1-live-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
           "upstream_gap": null,
           "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
         },
@@ -2396,9 +2342,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/mcp-v1-live-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
           "upstream_gap": null,
           "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
         },
@@ -2410,9 +2354,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/mcp-v1-live-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
           "upstream_gap": null,
           "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
         },
@@ -2424,9 +2366,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/mcp-v1-live-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
           "upstream_gap": null,
           "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
         },
@@ -2438,9 +2378,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/mcp-v1-live-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
           "upstream_gap": null,
           "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
         },
@@ -2452,9 +2390,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/mcp-v1-live-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
           "upstream_gap": null,
           "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
         },
@@ -2466,9 +2402,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/mcp-v1-live-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
           "upstream_gap": null,
           "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
         },
@@ -2480,9 +2414,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/mcp-v1-live-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
           "upstream_gap": null,
           "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
         },
@@ -2494,9 +2426,7 @@
           "tui_action": "none",
           "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
           "gui": "consumer:herdr-t3 (#7)",
-          "real_machine_evidence": [
-            "docs/research/mcp-v1-live-verification.md"
-          ],
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
           "upstream_gap": null,
           "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
         }
