@@ -11,7 +11,7 @@ import {
   canonicalTriggerEventName,
   extractWorktreePath,
 } from "../plugins/projects/src/triggers";
-import { herdrSocketEndpoint, testEnv } from "./helpers/test-env";
+import { herdrSocketEndpoint, normalizePath, testEnv } from "./helpers/test-env";
 
 const dirs: string[] = [];
 const savedStateDir = process.env.HERDR_PLUGIN_STATE_DIR;
@@ -502,7 +502,7 @@ describe("scripts tick drain (fake hook events)", () => {
       expect(run?.trigger?.kind).toBe("worktree.created");
       expect(run?.trigger?.worktree_path).toBe(worktree);
       expect(run?.trigger?.event_received_at).toBeTruthy();
-      expect(run?.repo.root).toBe(worktree);
+      expect(normalizePath(run?.repo.root ?? "")).toBe(normalizePath(worktree));
       expect(run?.project_id).toBe(projectId);
 
       // Marks consumed; a second tick fires nothing new. The settle

@@ -1605,7 +1605,7 @@ async function cmdCapability(options: CliOptions): Promise<void> {
   emit({
     contract: CONTRACT,
     plugin: PLUGIN_ID,
-    version: "0.5.0",
+    version: "0.6.0",
     commands: [
       "list",
       "settle",
@@ -1624,6 +1624,24 @@ async function cmdCapability(options: CliOptions): Promise<void> {
       "watch",
       "watch-pr",
       "capability",
+    ],
+    // Commands that write organize state or herdr-visible metadata
+    // (#224); mirrors the `options.mutation` gating set. `links`,
+    // `transitions`, `list`, and `capability` are read-only.
+    mutation_commands: [
+      "settle",
+      "snooze",
+      "restore",
+      "pin",
+      "unpin",
+      "archive",
+      "unarchive",
+      "order",
+      "link",
+      "unlink",
+      "reconcile",
+      "watch",
+      "watch-pr",
     ],
     actions: ["settle", "restore", "snooze", "pin", "unpin", "archive", "unarchive"],
     events: ["pane.agent_status_changed", "pane.closed"],

@@ -24,6 +24,58 @@ import { sanitizedChildEnv } from "../../packages/git-core/src/git-env";
 import { socketEndpoint } from "../../packages/herdr-client/src/socket";
 
 /**
+ * Case-insensitive environment lookup (issue #225). On Windows the ambient
+ * env block stores the search path under `Path`, so `env.PATH` on a plain
+ * object snapshot is `undefined` while `process.env.PATH` still resolves.
+ * Always read env maps through this helper in tests.
+ */
+export function envValue(
+  env: Record<string, string | undefined>,
+  name: string,
+): string | undefined {
+  const direct = env[name];
+  if (direct !== undefined) return direct;
+  const lower = name.toLowerCase();
+  for (const key of Object.keys(env)) {
+    if (key.toLowerCase() === lower) return env[key];
+  }
+  return undefined;
+}
+
+/** Current process `PATH` regardless of platform casing (`Path` on Windows). */
+export function pathEnvValue(): string | undefined {
+  return envValue(process.env, "PATH");
+}
+
+/**
+ * `dir` prepended to the process `PATH` using the platform delimiter
+ * (`:` POSIX, `;` Windows). Replaces the POSIX-only `${dir}:${PATH}`
+ * interpolation that produced a single bogus PATH entry on Windows.
+ */
+export function joinPathEnv(dir: string): string {
+  return `${dir}${path.delimiter}${pathEnvValue() ?? ""}`;
+}
+
+/**
+ * Canonicalize a filesystem path for cross-boundary comparisons in tests
+ * (issue #225). `git` reports repository roots with forward slashes
+ * (`C:/Users/...`) while `fs.realpathSync` returns backslashes — and on
+ * Windows may add a `\\?\` verbatim prefix. Path comparison on Windows is
+ * case-insensitive, so the result is lowercased there only.
+ */
+export function normalizePath(p: string): string {
+  let out = p;
+  if (out.startsWith("\\\\?\\") || out.startsWith("//?/")) out = out.slice(4);
+  out = out.replace(/\\/g, "/");
+  return process.platform === "win32" ? out.toLowerCase() : out;
+}
+
+/** `true` when two paths denote the same location (see {@link normalizePath}). */
+export function samePath(a: string, b: string): boolean {
+  return normalizePath(a) === normalizePath(b);
+}
+
+/**
  * Ambient herdr context variables that identify a live session/pane.
  * Documented for reviewers; the scrub itself is prefix-based (`HERDR_*`)
  * so future context vars are covered without list maintenance.
@@ -142,6 +194,15 @@ export function testEnv(
   }
   for (const [key, value] of Object.entries(extra)) {
     if (value === undefined) continue;
+    // Windows env keys are case-insensitive: an extra `PATH` must replace
+    // an inherited `Path` (and vice versa) instead of producing a
+    // duplicate-key env block where the winner is lexicographic luck.
+    if (process.platform === "win32") {
+      const lower = key.toLowerCase();
+      for (const existing of Object.keys(merged)) {
+        if (existing !== key && existing.toLowerCase() === lower) delete merged[existing];
+      }
+    }
     merged[key] = value;
   }
   return merged;

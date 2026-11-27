@@ -99,6 +99,14 @@ reachable, `unverified` otherwise), API generators with `enabled` and
 `cli` path status, redacted config, and config warnings. Works without
 a reachable herdr session.
 
+The document also carries `mutation_commands` (added in plugin
+v0.7.0, #224 — additive): `generate` and `watch-next-prompt` (they
+drive herdr agent panes and record pane metadata) plus the
+config-writing subcommands `config set-default-provider`,
+`config set-default-model`, `config add-api-generator`, and
+`config remove-api-generator`. `capability`, `git-context`, and
+`config show` are read-only.
+
 ### `generate`
 
 ```bash

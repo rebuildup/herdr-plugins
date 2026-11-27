@@ -1,11 +1,11 @@
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { ghChildEnv, sanitizedChildEnv } from "../packages/git-core/src/git-env";
 import { collectCommit, collectFiles, collectStatus, resolveRepo } from "../plugins/git/src/git";
-import { testEnv } from "./helpers/test-env";
+import { envValue, normalizePath, testEnv } from "./helpers/test-env";
 
 // ---------------------------------------------------------------------------
 // sanitizedChildEnv unit tests
@@ -130,7 +130,7 @@ describe("sanitizedChildEnv", () => {
   test("non-GIT environment passes through", () => {
     poisonAmbientGitEnv();
     const env = sanitizedChildEnv();
-    expect(env.PATH).toBe(process.env.PATH);
+    expect(envValue(env, "PATH")).toBe(envValue(process.env, "PATH"));
     expect(env.HOME).toBe(process.env.HOME);
   });
 });
@@ -198,7 +198,7 @@ describe("git operations ignore ambient repo-redirecting GIT_*", () => {
     process.env.GIT_WORK_TREE = repoA;
     try {
       const status = await collectStatus(repoB);
-      expect(status.repo.root).toBe(repoB);
+      expect(normalizePath(status.repo.root)).toBe(normalizePath(repoB));
       expect(status.changes.untracked).toBe(1);
     } finally {
       delete process.env.GIT_DIR;
@@ -235,8 +235,8 @@ describe("git operations ignore ambient repo-redirecting GIT_*", () => {
     process.env.GIT_COMMON_DIR = path.join(main, ".git");
     try {
       const info = await resolveRepo(worktree);
-      expect(info.root).toBe(realpathSync(worktree));
-      expect(info.root).not.toBe(main);
+      expect(normalizePath(info.root)).toBe(normalizePath(realpathSync(worktree)));
+      expect(normalizePath(info.root)).not.toBe(normalizePath(main));
     } finally {
       delete process.env.GIT_DIR;
       delete process.env.GIT_WORK_TREE;
@@ -275,12 +275,12 @@ describe("git operations ignore ambient repo-redirecting GIT_*", () => {
   test("GIT_CONFIG_PARAMETERS and GIT_CEILING_DISCOVERY cannot confuse discovery", async () => {
     const repo = initRepo();
     const nested = path.join(repo, "sub", "dir");
-    spawnSync("mkdir", ["-p", nested]);
+    mkdirSync(nested, { recursive: true });
     process.env.GIT_CONFIG_PARAMETERS = "'core.bare=true'";
     process.env.GIT_CEILING_DIRECTORIES = path.dirname(repo);
     try {
       const info = await resolveRepo(nested);
-      expect(info.root).toBe(repo);
+      expect(normalizePath(info.root)).toBe(normalizePath(repo));
     } finally {
       delete process.env.GIT_CONFIG_PARAMETERS;
       delete process.env.GIT_CEILING_DIRECTORIES;

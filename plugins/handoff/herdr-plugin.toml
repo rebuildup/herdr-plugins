@@ -1,6 +1,6 @@
 id = "rebuildup.handoff"
 name = "Handoff"
-version = "0.6.0"
+version = "0.7.0"
 min_herdr_version = "0.9.0"
 description = "Handoff / delegation foundation: versioned handoff records binding a source pane/agent generation to a payload of references (conversations, checkpoints, excerpts) plus a status lifecycle."
 platforms = ["linux", "macos", "windows"]

@@ -13,7 +13,7 @@ import {
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { herdrSocketEndpoint, testEnv } from "./helpers/test-env";
+import { herdrSocketEndpoint, normalizePath, testEnv } from "./helpers/test-env";
 
 const dirs: string[] = [];
 const savedStateDir = process.env.HERDR_PLUGIN_STATE_DIR;
@@ -239,7 +239,7 @@ describe("checkpoints cli", () => {
     const payload = expectOk(runCli(["create", "--repo", repo, "--label", "wip"]));
     const ckpt = checkpointOf(payload);
     expect(typeof ckpt.id).toBe("string");
-    expect(ckpt.repo_root).toBe(repo);
+    expect(normalizePath(String(ckpt.repo_root))).toBe(normalizePath(repo));
     expect(ckpt.branch).toBe("main");
     expect(ckpt.label).toBe("wip");
     expect(String(ckpt.ref)).toMatch(/^refs\/herdr-plugins\/checkpoints\/[0-9a-f]{16}\/.+/);

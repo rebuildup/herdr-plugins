@@ -5,7 +5,7 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { loadRuns, updateRuns } from "../plugins/projects/src/runs";
-import { herdrSocketEndpoint, testEnv } from "./helpers/test-env";
+import { herdrSocketEndpoint, normalizePath, testEnv } from "./helpers/test-env";
 
 /**
  * Contract tests for the #182 settle triggers: projects drains
@@ -483,7 +483,7 @@ describe("settle triggers: runOnSettle / stopOnSettle (#182)", () => {
         pane_id: "w1:p1",
         transition_seq: 1,
       });
-      expect(run?.repo.root).toBe(worktree);
+      expect(normalizePath(run?.repo.root ?? "")).toBe(normalizePath(worktree));
 
       // Cursor advanced: a second tick is a full no-op.
       const tick2 = await runProjects(fx, ["scripts", "tick"]);

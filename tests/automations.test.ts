@@ -92,6 +92,33 @@ describe("automations capability (T1 scaffold, #137; finalized #147)", () => {
     }
   });
 
+  test("advertises mutation_commands covering every state/herdr write path (#224)", () => {
+    const doc = capabilityDocument();
+    expect(doc.mutation_commands).toEqual([
+      "create",
+      "update",
+      "set-enabled",
+      "delete",
+      "run-now",
+      "reconcile",
+      "fire",
+      "tick",
+      "watch",
+      "schedule install",
+      "schedule uninstall",
+      "schedule status",
+    ]);
+    // Read-only commands must never appear in mutation_commands.
+    for (const readOnly of ["capability", "list", "get", "runs"]) {
+      expect(doc.mutation_commands).not.toContain(readOnly);
+    }
+    // Every advertised mutation names a real command surface.
+    for (const mutation of doc.mutation_commands) {
+      const base = mutation.split(" ")[0] as string;
+      expect(doc.commands).toContain(base);
+    }
+  });
+
   test("state_file points at the plugin state dir document", () => {
     expect(capabilityDocument().state_file).toBe("state.json");
   });

@@ -251,6 +251,15 @@ describe("textgen cli", () => {
     ]);
     const providers = res.json?.providers as Record<string, unknown>;
     expect((providers.cli as { status: string }).status).toBe("unsupported");
+    // mutation_commands (#224): generation + config-writing subcommands.
+    expect(res.json?.mutation_commands).toEqual([
+      "generate",
+      "watch-next-prompt",
+      "config set-default-provider",
+      "config set-default-model",
+      "config add-api-generator",
+      "config remove-api-generator",
+    ]);
   });
 
   test("generate via agent path: full socket sequence + validated result", async () => {

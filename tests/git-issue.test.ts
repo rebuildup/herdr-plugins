@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import net from "node:net";
 import path from "node:path";
-import { herdrSocketEndpoint, testEnv } from "./helpers/test-env";
+import { herdrSocketEndpoint, joinPathEnv, testEnv } from "./helpers/test-env";
 
 // ---------------------------------------------------------------------------
 // CLI contract tests for `git issue` (Issue #174): fake herdr session on an
@@ -149,73 +149,27 @@ async function runCli(args: string[], env: Record<string, string>): Promise<CliR
 }
 
 describe.skipIf(IS_WINDOWS)("git issue CLI (fake herdr + fake gh)", () => {
-  const workdir = mkdtempSync(path.join("/tmp", "git-issue-"));
-  const xdgConfig = path.join(workdir, "xdg-config");
-  const xdgState = path.join(workdir, "xdg-state");
-  const binDir = path.join(workdir, "bin");
-  const repoDir = path.join(workdir, "repo");
-  const ghDir = path.join(workdir, "gh");
-  mkdirSync(binDir, { recursive: true });
-  mkdirSync(ghDir, { recursive: true });
-  mkdirSync(repoDir, { recursive: true });
-
-  const sockPath = path.join(xdgConfig, "herdr", "sessions", "aaa", "herdr.sock");
-  const inboxStateFile = path.join(xdgState, "herdr", "plugins", "rebuildup.inbox", "state.json");
-
-  const issueListFile = path.join(ghDir, "issue-list.json");
-  const issueViewFile = path.join(ghDir, "issue-view.json");
-  const commentPostFile = path.join(ghDir, "comment-post.json");
-  writeFileSync(
-    issueListFile,
-    JSON.stringify([{ number: 5, title: "bug", state: "OPEN", url: "u" }]),
-  );
-  writeFileSync(
-    issueViewFile,
-    JSON.stringify({
-      number: 5,
-      title: "bug: widget crashes",
-      state: "OPEN",
-      stateReason: "",
-      closed: false,
-      author: { login: "alice" },
-      labels: [{ name: "bug" }],
-      assignees: [],
-      milestone: null,
-      body: "repro steps",
-      comments: [
-        {
-          id: 1,
-          author: { login: "bob" },
-          body: "same here",
-          createdAt: "2026-01-01T00:00:00Z",
-          updatedAt: "2026-01-01T00:00:00Z",
-          url: "https://example.com/c/1",
-        },
-      ],
-      reactionGroups: [],
-      createdAt: "2026-01-01T00:00:00Z",
-      updatedAt: "2026-01-02T00:00:00Z",
-      url: "https://github.com/octo/widgets/issues/5",
-    }),
-  );
-  writeFileSync(
-    commentPostFile,
-    JSON.stringify({
-      id: 77,
-      user: { login: "alice" },
-      body: "hello",
-      created_at: "2026-01-03T00:00:00Z",
-      updated_at: "2026-01-03T00:00:00Z",
-      html_url: "https://example.com/c/77",
-    }),
-  );
+  // bun:test evaluates this callback even when skipIf skips the suite, so
+  // all filesystem setup is deferred into beforeAll — mkdtempSync("/tmp/…")
+  // would throw ENOENT on Windows at collection time (issue #225).
+  let workdir = "";
+  let xdgConfig = "";
+  let xdgState = "";
+  let binDir = "";
+  let repoDir = "";
+  let ghDir = "";
+  let sockPath = "";
+  let inboxStateFile = "";
+  let issueListFile = "";
+  let issueViewFile = "";
+  let commentPostFile = "";
 
   const servers: FakeHerdr[] = [];
   const baseEnv = () => ({
     XDG_CONFIG_HOME: xdgConfig,
     XDG_STATE_HOME: xdgState,
     HOME: workdir,
-    PATH: `${binDir}:${process.env.PATH ?? ""}`,
+    PATH: joinPathEnv(binDir),
     GH_STUB_ISSUE_LIST: issueListFile,
     GH_STUB_ISSUE_VIEW: issueViewFile,
     GH_STUB_COMMENT_POST: commentPostFile,
@@ -223,6 +177,67 @@ describe.skipIf(IS_WINDOWS)("git issue CLI (fake herdr + fake gh)", () => {
   const sessionArg = ["--session", "aaa"];
 
   beforeAll(async () => {
+    workdir = mkdtempSync(path.join("/tmp", "git-issue-"));
+    xdgConfig = path.join(workdir, "xdg-config");
+    xdgState = path.join(workdir, "xdg-state");
+    binDir = path.join(workdir, "bin");
+    repoDir = path.join(workdir, "repo");
+    ghDir = path.join(workdir, "gh");
+    mkdirSync(binDir, { recursive: true });
+    mkdirSync(ghDir, { recursive: true });
+    mkdirSync(repoDir, { recursive: true });
+
+    sockPath = path.join(xdgConfig, "herdr", "sessions", "aaa", "herdr.sock");
+    inboxStateFile = path.join(xdgState, "herdr", "plugins", "rebuildup.inbox", "state.json");
+
+    issueListFile = path.join(ghDir, "issue-list.json");
+    issueViewFile = path.join(ghDir, "issue-view.json");
+    commentPostFile = path.join(ghDir, "comment-post.json");
+    writeFileSync(
+      issueListFile,
+      JSON.stringify([{ number: 5, title: "bug", state: "OPEN", url: "u" }]),
+    );
+    writeFileSync(
+      issueViewFile,
+      JSON.stringify({
+        number: 5,
+        title: "bug: widget crashes",
+        state: "OPEN",
+        stateReason: "",
+        closed: false,
+        author: { login: "alice" },
+        labels: [{ name: "bug" }],
+        assignees: [],
+        milestone: null,
+        body: "repro steps",
+        comments: [
+          {
+            id: 1,
+            author: { login: "bob" },
+            body: "same here",
+            createdAt: "2026-01-01T00:00:00Z",
+            updatedAt: "2026-01-01T00:00:00Z",
+            url: "https://example.com/c/1",
+          },
+        ],
+        reactionGroups: [],
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-02T00:00:00Z",
+        url: "https://github.com/octo/widgets/issues/5",
+      }),
+    );
+    writeFileSync(
+      commentPostFile,
+      JSON.stringify({
+        id: 77,
+        user: { login: "alice" },
+        body: "hello",
+        created_at: "2026-01-03T00:00:00Z",
+        updated_at: "2026-01-03T00:00:00Z",
+        html_url: "https://example.com/c/77",
+      }),
+    );
+
     // Real git repo as the pane cwd so resolveRepo/ensureGh/resolveForgeRepo run.
     git(repoDir, ["init", "-b", "main"]);
     git(repoDir, ["config", "user.email", "t@t"]);

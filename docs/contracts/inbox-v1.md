@@ -33,12 +33,18 @@ An external client resolves the CLI as follows:
 {
   "contract": "herdr-plugins.inbox/v1",
   "plugin": "rebuildup.inbox",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "commands": [
     "list", "settle", "snooze", "restore",
     "pin", "unpin", "archive", "unarchive", "order",
     "link", "unlink", "links",
     "reconcile", "transitions", "watch", "watch-pr", "capability"
+  ],
+  "mutation_commands": [
+    "settle", "snooze", "restore",
+    "pin", "unpin", "archive", "unarchive", "order",
+    "link", "unlink",
+    "reconcile", "watch", "watch-pr"
   ],
   "actions": ["settle", "restore", "snooze", "pin", "unpin", "archive", "unarchive"],
   "events": ["pane.agent_status_changed", "pane.closed"],
@@ -69,7 +75,11 @@ explicit and ambient targets — or between the two ambient variables — is a
 and `_wake` mutate plugin state and pane metadata, so they require an
 explicit or ambient target — the implicit default socket is rejected with
 `target_required` (exit 1). Read commands (`list`, `capability`) may use
-the default fallback.
+the default fallback. The `mutation_commands` capability field (added in
+plugin v0.6.0, #224 — additive) advertises the full set of state/herdr-
+visible mutating commands: the organize verbs, `order`, `link`/`unlink`,
+`reconcile`, `watch`, and `watch-pr`; `list`, `links`, `transitions`, and
+`capability` are read-only.
 
 **Ambient pane identity**: when the pane id comes from `HERDR_PANE_ID` or
 `HERDR_PLUGIN_CONTEXT_JSON.focused_pane_id` (not an explicit positional),

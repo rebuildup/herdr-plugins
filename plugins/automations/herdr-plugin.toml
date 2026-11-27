@@ -1,6 +1,6 @@
 id = "rebuildup.automations"
 name = "Automations"
-version = "0.7.0"
+version = "0.8.0"
 min_herdr_version = "0.9.0"
 description = "Scheduled and triggered agent runs: interval/fixed_time/once tasks fired by OS schedulers or an opt-in watch process, plus event schedules fired by herdr lifecycle hooks (contract herdr-plugins.automations/v1, stable). Webhook triggers are unsupported in v1 — upstream gap, ADR-0026."
 platforms = ["linux", "macos", "windows"]
