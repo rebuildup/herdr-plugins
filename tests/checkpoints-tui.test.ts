@@ -353,7 +353,7 @@ describe("checkpoint formatting", () => {
       repo_root: "/repos/demo",
       commit: ENTRY.commit,
       ref: { name: ENTRY.ref, exists: true, oid: ENTRY.commit },
-      plan: { files_to_change: 3, untracked_to_delete: ["a.log", "b.log"], already_matches: false },
+      plan: { files_to_change: 3, untracked_to_delete: 2, already_matches: false },
       warnings: ["submodule gitlinks recorded"],
     });
     const text = lines.join("\n");
@@ -585,7 +585,7 @@ function detailCli(opts: { checkpoint?: CheckpointEntry | null } = {}): CliHandl
         checkpoint: ENTRY,
         repo_root: "/repos/demo",
         commit: ENTRY.commit,
-        plan: { files_to_change: 1, untracked_to_delete: [], already_matches: false },
+        plan: { files_to_change: 1, untracked_to_delete: 0, already_matches: false },
         warnings: [],
       };
     }

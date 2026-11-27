@@ -590,12 +590,7 @@ export function formatPlanPayload(payload: Record<string, unknown>): string[] {
   const plan = asRecord(payload.plan);
   if (plan !== null) {
     lines.push(`files to change: ${fmt(plan.files_to_change)}`);
-    const untracked = Array.isArray(plan.untracked_to_delete)
-      ? (plan.untracked_to_delete as unknown[]).map(String)
-      : [];
-    lines.push(`untracked files to delete: ${untracked.length}`);
-    for (const p of untracked.slice(0, 50)) lines.push(`  - ${p}`);
-    if (untracked.length > 50) lines.push(`  … and ${untracked.length - 50} more`);
+    lines.push(`untracked files to delete: ${fmt(plan.untracked_to_delete)}`);
     if (plan.already_matches === true) lines.push("worktree already matches the checkpoint");
   }
   for (const w of Array.isArray(payload.warnings) ? payload.warnings : []) {
