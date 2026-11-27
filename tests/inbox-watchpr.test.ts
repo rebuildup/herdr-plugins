@@ -253,7 +253,9 @@ interface CliResult {
 }
 
 async function runCli(args: string[], env: Record<string, string>): Promise<CliResult> {
-  const proc = Bun.spawn(["bun", "run", INBOX_CLI, ...args], {
+  // process.execPath is bun itself — a bare "bun" argv does not resolve
+  // through PATH on Windows (issue #266).
+  const proc = Bun.spawn([process.execPath, "run", INBOX_CLI, ...args], {
     env,
     stdout: "pipe",
     stderr: "pipe",
@@ -542,7 +544,7 @@ describe("watch-pr contract", () => {
     } finally {
       await h.fake.close();
     }
-  }, 30000);
+  }, 60000);
 
   test("issue links are not polled (no git read surface) → no_links", async () => {
     const h = await harness();
@@ -554,7 +556,7 @@ describe("watch-pr contract", () => {
     } finally {
       await h.fake.close();
     }
-  }, 30000);
+  }, 60000);
 
   test("baseline poll stores observation without attention; check failure restores", async () => {
     const h = await harness();
@@ -603,7 +605,7 @@ describe("watch-pr contract", () => {
     } finally {
       await h.fake.close();
     }
-  }, 30000);
+  }, 60000);
 
   test("PR merge triggers attention once, records terminal, watch exits all_terminal", async () => {
     const h = await harness();
@@ -644,7 +646,7 @@ describe("watch-pr contract", () => {
     } finally {
       await h.fake.close();
     }
-  }, 30000);
+  }, 60000);
 
   test("unreachable gh → honest error state with backoff, no fabricated data", async () => {
     const h = await harness();
@@ -652,12 +654,18 @@ describe("watch-pr contract", () => {
       await runCli(["link", "w1:p1", "--pr", "octo/widgets#5", ...SOCKET(h)], h.env);
       // Remove gh from PATH entirely while keeping bun/git resolvable:
       // only the toolchain dirs, never the dir containing `gh`.
-      const noGhPath = [
-        path.dirname(process.execPath),
-        "/usr/bin",
-        "/bin",
-        tempDir("inbox-watchpr-empty-"),
-      ].join(":");
+      // Directories are platform-specific and joined with path.delimiter —
+      // the POSIX "/usr/bin:/bin" literals are meaningless on Windows,
+      // where git lives under "C:\Program Files\Git\cmd" (#266).
+      const toolDirs = [path.dirname(process.execPath)];
+      if (process.platform === "win32") {
+        const gitBin = Bun.which("git");
+        if (gitBin !== null) toolDirs.push(path.dirname(gitBin));
+      } else {
+        toolDirs.push("/usr/bin", "/bin");
+      }
+      toolDirs.push(tempDir("inbox-watchpr-empty-"));
+      const noGhPath = toolDirs.join(path.delimiter);
       const noGhEnv = { ...h.env, PATH: noGhPath };
 
       const first = await runCli(["watch-pr", "--once", ...SOCKET(h)], noGhEnv);
@@ -684,7 +692,7 @@ describe("watch-pr contract", () => {
     } finally {
       await h.fake.close();
     }
-  }, 30000);
+  }, 60000);
 
   test("gh rate-limit failure reports error and preserves last good freshness", async () => {
     const h = await harness();
@@ -710,7 +718,7 @@ describe("watch-pr contract", () => {
     } finally {
       await h.fake.close();
     }
-  }, 30000);
+  }, 60000);
 
   test("pane without organize marks: attention event is a no-op on state", async () => {
     const h = await harness();
@@ -734,7 +742,7 @@ describe("watch-pr contract", () => {
     } finally {
       await h.fake.close();
     }
-  }, 30000);
+  }, 60000);
 
   test("stale link (agent-session change) is never polled", async () => {
     const h = await harness({ agentSession: true });
@@ -758,7 +766,7 @@ describe("watch-pr contract", () => {
     } finally {
       await h.fake.close();
     }
-  }, 30000);
+  }, 60000);
 
   test("unlink removes the watch baseline", async () => {
     const h = await harness();
@@ -771,7 +779,7 @@ describe("watch-pr contract", () => {
     } finally {
       await h.fake.close();
     }
-  }, 30000);
+  }, 60000);
 });
 
 // ---------------------------------------------------------------------------

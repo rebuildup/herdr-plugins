@@ -524,16 +524,21 @@ process.exit(0);
       installStub(ghBin, { name: "gh", posix: GH_VERIFY_POSIX, windows: GH_VERIFY_TS });
 
       // Ambient poison vars that ghChildEnv must strip before spawn.
-      const verifyEnv: Record<string, string> = {
-        ...env,
-        PATH: `${ghBin}${path.delimiter}${envValue(env, "PATH") ?? ""}`,
-        GH_DEBUG: "api",
-        GH_REPO: "evil/repo",
-        GH_FORCE_TTY: "1",
-        GIT_DIR: "/tmp/poison-git-dir",
-        GIT_CONFIG_COUNT: "1",
-        GIT_CONFIG_PARAMETERS: "'core.sshCommand=evil'",
-      };
+      // Windows env keys are case-insensitive: `env` may carry "Path"
+      // while the literal below adds "PATH" — a duplicate-key env block
+      // lets the real gh win over the stub. Drop case variants first
+      // (issue #266).
+      const verifyEnv: Record<string, string> = { ...env };
+      for (const key of Object.keys(verifyEnv)) {
+        if (key !== "PATH" && key.toLowerCase() === "path") delete verifyEnv[key];
+      }
+      verifyEnv.PATH = `${ghBin}${path.delimiter}${envValue(env, "PATH") ?? ""}`;
+      verifyEnv.GH_DEBUG = "api";
+      verifyEnv.GH_REPO = "evil/repo";
+      verifyEnv.GH_FORCE_TTY = "1";
+      verifyEnv.GIT_DIR = "/tmp/poison-git-dir";
+      verifyEnv.GIT_CONFIG_COUNT = "1";
+      verifyEnv.GIT_CONFIG_PARAMETERS = "'core.sshCommand=evil'";
       const runVerify = (extra: Record<string, string>) =>
         runCli(
           ["link", "w1:p1", "--pr", "owner/repo#216", "--verify", "--socket", herdr.socketPath],

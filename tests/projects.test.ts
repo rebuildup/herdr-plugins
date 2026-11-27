@@ -217,7 +217,9 @@ function runCli(args: string[]): CliResult {
       HERDR_PLUGIN_STATE_DIR: process.env.HERDR_PLUGIN_STATE_DIR,
       HERDR_PLUGIN_CONFIG_DIR: process.env.HERDR_PLUGIN_CONFIG_DIR,
     }),
-    timeout: 15_000,
+    // 30s: `repos list` runs live per-repo git probes; on Windows each
+    // spawned CLI/git call is far slower than POSIX (#266).
+    timeout: 30_000,
   });
   let json: Record<string, unknown> | null = null;
   let error: Record<string, unknown> | null = null;
