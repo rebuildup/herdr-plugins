@@ -348,7 +348,9 @@ describe("resolvePinnedTarget / assertTargetFresh", () => {
   test("resolves repo root + HEAD pin from cwd (no pane)", async () => {
     const dir = initRepo();
     const target = await resolvePinnedTarget({ paneId: null, cwd: dir, workspaceId: null });
-    expect(target.repoRoot).toBe(normalizePath(dir));
+    // repo.root is `git rev-parse --show-toplevel` output (forward slashes,
+    // case preserved on Windows) — compare canonicalized (#266).
+    expect(normalizePath(target.repoRoot)).toBe(normalizePath(dir));
     expect(target.headSha).toMatch(/^[0-9a-f]{40}$/);
     expect(target.branchName).toBe("main");
     expect(target.detached).toBe(false);

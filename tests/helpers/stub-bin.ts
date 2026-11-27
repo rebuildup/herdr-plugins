@@ -61,7 +61,11 @@ function ensureStubExe(name: string, source: string): string {
   writeFileSync(src, source);
   // Compile to a pid-unique name then rename: two test workers compiling
   // the same stub concurrently must never observe a half-written exe.
-  const tmp = path.join(dir, `${name}.exe.${process.pid}.tmp`);
+  // The name must already end in `.exe`: on Windows `bun build --compile`
+  // appends `.exe` to an outfile lacking the extension, so a `.tmp`
+  // outfile would produce `<tmp>.exe` and the existsSync check below
+  // would never see it (issue #266).
+  const tmp = path.join(dir, `${name}.exe.${process.pid}.tmp.exe`);
   const result = spawnSync(process.execPath, ["build", "--compile", src, "--outfile", tmp], {
     encoding: "utf8",
     timeout: 120_000,

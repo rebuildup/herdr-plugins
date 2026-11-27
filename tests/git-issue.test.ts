@@ -1,16 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
+import { tmpdir } from "node:os";
 import path from "node:path";
+import { installStub } from "./helpers/stub-bin";
 import { herdrSocketEndpoint, joinPathEnv, testEnv } from "./helpers/test-env";
 
 // ---------------------------------------------------------------------------
@@ -21,7 +15,6 @@ import { herdrSocketEndpoint, joinPathEnv, testEnv } from "./helpers/test-env";
 // ---------------------------------------------------------------------------
 
 const GIT_CLI = path.join(import.meta.dir, "..", "plugins", "git", "src", "cli.ts");
-const IS_WINDOWS = process.platform === "win32";
 
 const GH_STUB = `#!/usr/bin/env bash
 set -u
@@ -46,6 +39,70 @@ case "\${1:-}" in
     exit 0;;
 esac
 exit 1
+`;
+
+/**
+ * TypeScript twin of {@link GH_STUB} for Windows (issue #266) — compiled
+ * to `gh.exe` by `installStub`. No backslashes/backticks/`${` so it can
+ * live inside a template literal verbatim; `NL` stands in for "\n".
+ * Semantics mirror the bash stub branch-for-branch: `${VAR:?}` unset or
+ * empty is a hard failure, a missing fixture file still exits 0 (cat
+ * failure is swallowed by the trailing `exit 0`).
+ */
+const GH_STUB_TS = `import { readFileSync } from "node:fs";
+
+const NL = String.fromCharCode(10);
+const env = (n: string): string => process.env[n] ?? "";
+const catEnv = (n: string): boolean => {
+  const f = process.env[n];
+  if (f === undefined || f === "") return false;
+  try {
+    process.stdout.write(readFileSync(f, "utf8"));
+  } catch {
+    /* cat failure is swallowed by the trailing exit 0 */
+  }
+  return true;
+};
+const line = (s: string): void => {
+  process.stdout.write(s + NL);
+};
+
+const args = process.argv.slice(2);
+const joined = args.join(" ");
+const cmd = args[0] ?? "";
+const sub = args[1] ?? "";
+let code = 0;
+
+if (cmd === "--version") {
+  line("gh version 2.105.0");
+} else if (cmd === "auth") {
+  line("github.com");
+} else if (cmd === "repo") {
+  const repo = env("GH_STUB_REPO");
+  line(repo === "" ? "octo/widgets" : repo);
+} else if (cmd === "issue") {
+  if (sub === "list") {
+    if (!catEnv("GH_STUB_ISSUE_LIST")) code = 1;
+  } else if (sub === "view") {
+    if (!catEnv("GH_STUB_ISSUE_VIEW")) code = 1;
+  } else if (sub === "create") {
+    line("https://github.com/octo/widgets/issues/9");
+  } else if (sub === "edit" || sub === "close" || sub === "reopen") {
+    line("ok");
+  } else {
+    code = 1;
+  }
+} else if (cmd === "api") {
+  if (joined.includes("--input") || /--method[^]*POST/.test(joined)) {
+    if (!catEnv("GH_STUB_COMMENT_POST")) code = 1;
+  } else {
+    code = 1;
+  }
+} else {
+  code = 1;
+}
+
+process.exitCode = code;
 `;
 
 interface FakeHerdr {
@@ -148,10 +205,10 @@ async function runCli(args: string[], env: Record<string, string>): Promise<CliR
   return { status: result.status ?? -1, stdout: result.stdout, stderr: result.stderr, json, error };
 }
 
-describe.skipIf(IS_WINDOWS)("git issue CLI (fake herdr + fake gh)", () => {
-  // bun:test evaluates this callback even when skipIf skips the suite, so
-  // all filesystem setup is deferred into beforeAll — mkdtempSync("/tmp/…")
-  // would throw ENOENT on Windows at collection time (issue #225).
+describe("git issue CLI (fake herdr + fake gh)", () => {
+  // All filesystem setup is deferred into beforeAll so collection stays
+  // side-effect free on every platform (issue #225); the gh stub goes
+  // through installStub so Windows gets a compiled gh.exe (issue #266).
   let workdir = "";
   let xdgConfig = "";
   let xdgState = "";
@@ -177,7 +234,7 @@ describe.skipIf(IS_WINDOWS)("git issue CLI (fake herdr + fake gh)", () => {
   const sessionArg = ["--session", "aaa"];
 
   beforeAll(async () => {
-    workdir = mkdtempSync(path.join("/tmp", "git-issue-"));
+    workdir = mkdtempSync(path.join(tmpdir(), "git-issue-"));
     xdgConfig = path.join(workdir, "xdg-config");
     xdgState = path.join(workdir, "xdg-state");
     binDir = path.join(workdir, "bin");
@@ -246,8 +303,7 @@ describe.skipIf(IS_WINDOWS)("git issue CLI (fake herdr + fake gh)", () => {
     git(repoDir, ["add", "a.txt"]);
     git(repoDir, ["commit", "-qm", "init"]);
 
-    writeFileSync(path.join(binDir, "gh"), GH_STUB);
-    chmodSync(path.join(binDir, "gh"), 0o755);
+    installStub(binDir, { name: "gh", posix: GH_STUB, windows: GH_STUB_TS });
 
     servers.push(
       await startFakeHerdr(sockPath, {
