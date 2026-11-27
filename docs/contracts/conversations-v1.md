@@ -52,7 +52,7 @@ bun run src/cli.ts show <ref> [--pane PANE] [--session-id ID] [--provider ID] [-
   "contract": "herdr-plugins.conversations/v1",
   "command": "capability",
   "plugin": "rebuildup.conversations",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "read_only": false,
   "mutation_commands": ["index", "refresh"],
   "commands": ["capability", "index", "refresh", "sessions", "history", "search", "show", "usage"],

@@ -1,0 +1,2436 @@
+{
+  "schema_version": "1.0.0",
+  "purpose": "Per-command TUI/GUI/CLI coverage ledger for program #228 (TUI-first-class plugin surface). Foundation designed in #229; implementation tickets #230-#233; acceptance #234.",
+  "verified_against": {
+    "herdr_version": "0.9.5",
+    "herdr_source": "herdrdev/herdr @ e8d7d970 (post-v0.9.5) + docs/versions/0.9.5",
+    "adr": [
+      "docs/adr/0031-tui-surface-architecture.md",
+      "docs/adr/0032-tui-library-selection.md",
+      "docs/adr/0033-tui-launcher-and-safety-contract.md"
+    ],
+    "contract": "docs/contracts/tui-v1.md"
+  },
+  "foundation": {
+    "ticket": "#236",
+    "package": "packages/tui",
+    "status": "implemented",
+    "adr": "docs/adr/0032-tui-library-selection.md",
+    "contract": "docs/contracts/tui-v1.md",
+    "provides": [
+      "raw-mode UTF-8-safe key parsing with bracketed paste (src/input.ts)",
+      "diff renderer: alternate screen, cursor addressing, synchronized output, NO_COLOR/TERM=dumb/ASCII degradation, Unicode-width truncation (src/screen.ts, src/unicode.ts, src/ansi.ts)",
+      "shared components: SelectList, DetailView, TextInput/PromptView, ConfirmView, HelpView (src/components.ts)",
+      "TaskRunner with progress/cancel/timeout/partial (src/task.ts)",
+      "TuiApp screen-stack shell with reserved keys and confirm/prompt/select/task APIs (src/app.ts)",
+      "safety helpers: untrusted-text sanitization (CSI/OSC/DCS + bidi marks), bounded buffers, throttle, spawn-without-shell (src/safety.ts)",
+      "terminal capability detection (src/terminal.ts)"
+    ],
+    "verification": {
+      "unit_tests": "tests/tui-input.test.ts, tests/tui-unicode.test.ts, tests/tui-safety.test.ts, tests/tui-screen.test.ts, tests/tui-components.test.ts, tests/tui-task.test.ts",
+      "pty_smoke": "packages/tui/examples/demo.ts under script(1) PTY: launch, key input, alt-screen enter/exit, clean exit verified",
+      "resize": "covered by unit tests (Renderer resize forces full redraw); live PTY resize not exercised in smoke",
+      "install_mode_reachability": "PASS (#237): `herdr plugin install rebuildup/herdr-plugins/plugins/inbox --ref 237` managed checkout is a full-repo clone; `../../../packages/tui` resolves and the pane rendered live on herdr 0.9.5 — see docs/research/inbox-tui-v237-live-verification.md"
+    },
+    "deviations_from_adr_0032": []
+  },
+  "status_legend": {
+    "cli": "implemented = CLI command exists and is contract-covered",
+    "tui_action": "none = no manifest [[actions]] entry today; 'declared:<id>' = exists",
+    "interactive_tui": "implemented:#NNN = interactive TUI shipped in that ticket; planned:#NNN = scheduled in that implementation ticket; 'n/a' variants = not a human-interactive surface",
+    "gui": "GUI is owned by herdr-t3 (#7); this repo records consumption intent only — GUI-done NEVER implies TUI-done",
+    "real_machine_evidence": "paths under docs/research/ with live/real verification; absence does not imply untested, only no recorded real-machine run",
+    "upstream_gap": "non-null = blocked on herdr/T3Code upstream; never worked around by PTY guessing"
+  },
+  "plugins": {
+    "rebuildup.inbox": {
+      "contract": "herdr-plugins.inbox/v1",
+      "contract_status": "stable",
+      "implementation_ticket": "#230",
+      "commands": [
+        {
+          "command": "list",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "none",
+          "interactive_tui": "implemented:#237",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/rc-0-1-0-verification.md",
+            "docs/research/inbox-v0-2-0-live-verification.md",
+            "docs/research/inbox-tui-v237-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "inbox browser: attention/search/filter/organize state; TUI browser itself (read-only open)"
+        },
+        {
+          "command": "settle",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:settle",
+          "interactive_tui": "implemented:#237",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/rc-0-1-0-verification.md",
+            "docs/research/inbox-v0-2-0-live-verification.md",
+            "docs/research/inbox-tui-v237-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "organize verb; also manifest action 'settle'; TUI key s (confirm)"
+        },
+        {
+          "command": "snooze",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:snooze",
+          "interactive_tui": "implemented:#237",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/rc-0-1-0-verification.md",
+            "docs/research/inbox-v0-2-0-live-verification.md",
+            "docs/research/inbox-tui-v237-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "organize verb; also manifest action 'snooze'; TUI key n (confirm + spec prompt)"
+        },
+        {
+          "command": "restore",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:restore",
+          "interactive_tui": "implemented:#237",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/rc-0-1-0-verification.md",
+            "docs/research/inbox-v0-2-0-live-verification.md",
+            "docs/research/inbox-tui-v237-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "organize verb; also manifest action 'restore'; TUI key r (confirm)"
+        },
+        {
+          "command": "pin",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:pin",
+          "interactive_tui": "implemented:#237",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/rc-0-1-0-verification.md",
+            "docs/research/inbox-v0-2-0-live-verification.md",
+            "docs/research/inbox-tui-v237-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "organize verb; also manifest action 'pin'; TUI key p (confirm)"
+        },
+        {
+          "command": "unpin",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:unpin",
+          "interactive_tui": "implemented:#237",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/rc-0-1-0-verification.md",
+            "docs/research/inbox-v0-2-0-live-verification.md",
+            "docs/research/inbox-tui-v237-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "organize verb; also manifest action 'unpin'; TUI key p (confirm)"
+        },
+        {
+          "command": "archive",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:archive",
+          "interactive_tui": "implemented:#237",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/rc-0-1-0-verification.md",
+            "docs/research/inbox-v0-2-0-live-verification.md",
+            "docs/research/inbox-tui-v237-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "organize verb; also manifest action 'archive'; TUI key a (confirm)"
+        },
+        {
+          "command": "unarchive",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:unarchive",
+          "interactive_tui": "implemented:#237",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/rc-0-1-0-verification.md",
+            "docs/research/inbox-v0-2-0-live-verification.md",
+            "docs/research/inbox-tui-v237-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "organize verb; also manifest action 'unarchive'; TUI key a (confirm)"
+        },
+        {
+          "command": "order",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "none",
+          "interactive_tui": "implemented:#237",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/rc-0-1-0-verification.md",
+            "docs/research/inbox-v0-2-0-live-verification.md",
+            "docs/research/inbox-tui-v237-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "manual ordering; pane-scoped layout hint; TUI keys [ / ] (confirm)"
+        },
+        {
+          "command": "link",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "none",
+          "interactive_tui": "implemented:#237",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/rc-0-1-0-verification.md",
+            "docs/research/inbox-v0-2-0-live-verification.md",
+            "docs/research/inbox-tui-v237-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "explicit PR/Issue link on pane; TUI key l (confirm + spec prompt)"
+        },
+        {
+          "command": "unlink",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "none",
+          "interactive_tui": "implemented:#237",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/rc-0-1-0-verification.md",
+            "docs/research/inbox-v0-2-0-live-verification.md",
+            "docs/research/inbox-tui-v237-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "remove PR/Issue link; TUI key u (confirm)"
+        },
+        {
+          "command": "links",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "none",
+          "interactive_tui": "implemented:#237",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/rc-0-1-0-verification.md",
+            "docs/research/inbox-v0-2-0-live-verification.md",
+            "docs/research/inbox-tui-v237-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "list links for pane/session; links surfaced in TUI detail/status via list payload"
+        },
+        {
+          "command": "reconcile",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "none",
+          "interactive_tui": "implemented:#237",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/rc-0-1-0-verification.md",
+            "docs/research/inbox-v0-2-0-live-verification.md",
+            "docs/research/inbox-tui-v237-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "startup+explicit reconcile; lazy-clear semantics, TUI shows status not auto-run; TUI key c (explicit, confirm; never on open)"
+        },
+        {
+          "command": "transitions",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "none",
+          "interactive_tui": "implemented:#237",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/rc-0-1-0-verification.md",
+            "docs/research/inbox-v0-2-0-live-verification.md",
+            "docs/research/inbox-tui-v237-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "organize-transition log; powers settle-trigger consumers; TUI key t (read-only log view)"
+        },
+        {
+          "command": "watch",
+          "mutating": true,
+          "class": "daemon",
+          "cli": "implemented",
+          "tui_action": "none",
+          "interactive_tui": "n/a",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/rc-0-1-0-verification.md",
+            "docs/research/inbox-v0-2-0-live-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "opt-in watch process; daemon lifecycle stays CLI/systemd"
+        },
+        {
+          "command": "watch-pr",
+          "mutating": true,
+          "class": "daemon",
+          "cli": "implemented",
+          "tui_action": "none",
+          "interactive_tui": "n/a",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/rc-0-1-0-verification.md",
+            "docs/research/inbox-v0-2-0-live-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "opt-in PR watcher daemon; TUI may show status via list/runs only"
+        },
+        {
+          "command": "capability",
+          "mutating": false,
+          "class": "diagnostic",
+          "cli": "implemented",
+          "tui_action": "none",
+          "interactive_tui": "n/a",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/rc-0-1-0-verification.md",
+            "docs/research/inbox-v0-2-0-live-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "discovery document"
+        }
+      ]
+    },
+    "rebuildup.git": {
+      "contract": "herdr-plugins.git/v1 + forge surface",
+      "contract_status": "stable",
+      "implementation_ticket": "#230",
+      "commands": [
+        {
+          "command": "status",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#238",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/git-pr-read-verification.md",
+            "docs/research/git-pr-mutation-verification.md",
+            "docs/research/git-pr-merge-verification.md",
+            "docs/research/git-issue-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "status view per repo/pane — TUI surface in Git UI pane (#238)"
+        },
+        {
+          "command": "files",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#238",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/git-pr-read-verification.md",
+            "docs/research/git-pr-mutation-verification.md",
+            "docs/research/git-pr-merge-verification.md",
+            "docs/research/git-issue-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "changed-file list feeding diff viewer — TUI surface in Git UI pane (#238)"
+        },
+        {
+          "command": "diff",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#238",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/git-pr-read-verification.md",
+            "docs/research/git-pr-mutation-verification.md",
+            "docs/research/git-pr-merge-verification.md",
+            "docs/research/git-issue-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "bounded patch view; terminal-friendly already — TUI surface in Git UI pane (#238)"
+        },
+        {
+          "command": "log",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#238",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/git-pr-read-verification.md",
+            "docs/research/git-pr-mutation-verification.md",
+            "docs/research/git-pr-merge-verification.md",
+            "docs/research/git-issue-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "commit history / compare base — TUI surface in Git UI pane (#238)"
+        },
+        {
+          "command": "compare",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#238",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/git-pr-read-verification.md",
+            "docs/research/git-pr-mutation-verification.md",
+            "docs/research/git-pr-merge-verification.md",
+            "docs/research/git-issue-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "branch comparison — TUI surface in Git UI pane (#238)"
+        },
+        {
+          "command": "stage",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#238",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/git-pr-read-verification.md",
+            "docs/research/git-pr-mutation-verification.md",
+            "docs/research/git-pr-merge-verification.md",
+            "docs/research/git-issue-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "per-file stage; needs confirm on bulk — TUI surface in Git UI pane (#238)"
+        },
+        {
+          "command": "unstage",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#238",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/git-pr-read-verification.md",
+            "docs/research/git-pr-mutation-verification.md",
+            "docs/research/git-pr-merge-verification.md",
+            "docs/research/git-issue-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "per-file unstage — TUI surface in Git UI pane (#238)"
+        },
+        {
+          "command": "commit",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#238",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/git-pr-read-verification.md",
+            "docs/research/git-pr-mutation-verification.md",
+            "docs/research/git-pr-merge-verification.md",
+            "docs/research/git-issue-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "commit editor surface; irreversible-ish -> confirm — TUI surface in Git UI pane (#238)"
+        },
+        {
+          "command": "branch",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#238",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/git-pr-read-verification.md",
+            "docs/research/git-pr-mutation-verification.md",
+            "docs/research/git-pr-merge-verification.md",
+            "docs/research/git-issue-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "branch ops (create/switch/delete guards) — TUI surface in Git UI pane (#238)"
+        },
+        {
+          "command": "upstream",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#238",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/git-pr-read-verification.md",
+            "docs/research/git-pr-mutation-verification.md",
+            "docs/research/git-pr-merge-verification.md",
+            "docs/research/git-issue-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "set/unset upstream — TUI surface in Git UI pane (#238)"
+        },
+        {
+          "command": "fetch",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#238",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/git-pr-read-verification.md",
+            "docs/research/git-pr-mutation-verification.md",
+            "docs/research/git-pr-merge-verification.md",
+            "docs/research/git-issue-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "fetch remotes — TUI surface in Git UI pane (#238)"
+        },
+        {
+          "command": "push",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#238",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/git-pr-read-verification.md",
+            "docs/research/git-pr-mutation-verification.md",
+            "docs/research/git-pr-merge-verification.md",
+            "docs/research/git-issue-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "push; --force guarded, confirm required — TUI surface in Git UI pane (#238)"
+        },
+        {
+          "command": "remote",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#238",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/git-pr-read-verification.md",
+            "docs/research/git-pr-mutation-verification.md",
+            "docs/research/git-pr-merge-verification.md",
+            "docs/research/git-issue-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "remote list — TUI surface in Git UI pane (#238)"
+        },
+        {
+          "command": "pr",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open-forge",
+          "interactive_tui": "implemented:#239",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/git-pr-read-verification.md",
+            "docs/research/git-pr-mutation-verification.md",
+            "docs/research/git-pr-merge-verification.md",
+            "docs/research/git-issue-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "forge TUI pane 'forge': list/status/view + comments/reviews/checks/logs reads, confirm-gated create/review/comment/reply/reviewers/merge with fresh --expect-head revalidation; merge keeps release-train guard; repo-status TUI still planned:#230"
+        },
+        {
+          "command": "issue",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open-forge",
+          "interactive_tui": "implemented:#239",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/git-pr-read-verification.md",
+            "docs/research/git-pr-mutation-verification.md",
+            "docs/research/git-pr-merge-verification.md",
+            "docs/research/git-issue-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "forge TUI pane 'forge': list/view + confirm-gated create/edit/comment/close-reopen with updated_at drift revalidation (no head sha analog); pane link/unlink/links stay CLI-only"
+        },
+        {
+          "command": "project",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:project",
+          "interactive_tui": "n/a",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/git-pr-read-verification.md",
+            "docs/research/git-pr-mutation-verification.md",
+            "docs/research/git-pr-merge-verification.md",
+            "docs/research/git-issue-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "pane metadata projection refresh; agent-facing, no interactive TUI surface"
+        },
+        {
+          "command": "capability",
+          "mutating": false,
+          "class": "diagnostic",
+          "cli": "implemented",
+          "tui_action": "none",
+          "interactive_tui": "n/a",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/git-pr-read-verification.md",
+            "docs/research/git-pr-mutation-verification.md",
+            "docs/research/git-pr-merge-verification.md",
+            "docs/research/git-issue-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "discovery document"
+        }
+      ]
+    },
+    "rebuildup.projects": {
+      "contract": "herdr-plugins.projects/v1",
+      "contract_status": "stable",
+      "implementation_ticket": "#231",
+      "commands": [
+        {
+          "command": "list",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#240",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/projects-180-live-verification.md",
+            "docs/research/projects-184-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "project list/search"
+        },
+        {
+          "command": "show",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#240",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/projects-180-live-verification.md",
+            "docs/research/projects-184-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "project detail"
+        },
+        {
+          "command": "discover",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#240",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/projects-180-live-verification.md",
+            "docs/research/projects-184-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "repo discovery for registration"
+        },
+        {
+          "command": "register",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#240",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/projects-180-live-verification.md",
+            "docs/research/projects-184-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "register repo(s) as project"
+        },
+        {
+          "command": "update",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#240",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/projects-180-live-verification.md",
+            "docs/research/projects-184-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "edit project"
+        },
+        {
+          "command": "archive",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#240",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/projects-180-live-verification.md",
+            "docs/research/projects-184-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "archive project"
+        },
+        {
+          "command": "unarchive",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#240",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/projects-180-live-verification.md",
+            "docs/research/projects-184-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "restore project"
+        },
+        {
+          "command": "pin",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#240",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/projects-180-live-verification.md",
+            "docs/research/projects-184-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "pin project"
+        },
+        {
+          "command": "unpin",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#240",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/projects-180-live-verification.md",
+            "docs/research/projects-184-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "unpin project"
+        },
+        {
+          "command": "settings",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#240",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/projects-180-live-verification.md",
+            "docs/research/projects-184-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "settings get/set/unset (set/unset mutating)"
+        },
+        {
+          "command": "scripts",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open-scripts",
+          "interactive_tui": "implemented:#240,#241",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/projects-180-live-verification.md",
+            "docs/research/projects-184-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "project-defined scripts run/stop/tick + list; dedicated scripts TUI (#241): project/repo-path target, run, stop, results, logs"
+        },
+        {
+          "command": "repos",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#240",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/projects-180-live-verification.md",
+            "docs/research/projects-184-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "repo membership add/remove + association list"
+        },
+        {
+          "command": "capability",
+          "mutating": false,
+          "class": "diagnostic",
+          "cli": "implemented",
+          "tui_action": "none",
+          "interactive_tui": "n/a",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/projects-180-live-verification.md",
+            "docs/research/projects-184-live-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "discovery document"
+        }
+      ]
+    },
+    "rebuildup.checkpoints": {
+      "contract": "herdr-plugins.checkpoints/v1",
+      "contract_status": "stable",
+      "implementation_ticket": "#231",
+      "commands": [
+        {
+          "command": "create",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#242",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/rc-0-4-0-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "capture pane repo state; manifest action 'create'"
+        },
+        {
+          "command": "save",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#242",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/rc-0-4-0-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "multi-repo group save"
+        },
+        {
+          "command": "list",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#242",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/rc-0-4-0-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "checkpoint list w/ filters"
+        },
+        {
+          "command": "show",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#242",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/rc-0-4-0-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "checkpoint detail"
+        },
+        {
+          "command": "diff",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#242",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/rc-0-4-0-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "checkpoint diff view"
+        },
+        {
+          "command": "plan",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#242",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/rc-0-4-0-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "restore plan preview (no mutation)"
+        },
+        {
+          "command": "restore",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#242",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/rc-0-4-0-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "restore; dirty-tree guard + confirm"
+        },
+        {
+          "command": "restore-group",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#242",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/rc-0-4-0-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "group restore; confirm"
+        },
+        {
+          "command": "delete",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#242",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/rc-0-4-0-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "delete checkpoint; confirm"
+        },
+        {
+          "command": "gc",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#242",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/rc-0-4-0-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "retention GC; confirm w/ count preview"
+        },
+        {
+          "command": "prune",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#242",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/rc-0-4-0-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "prune; confirm"
+        },
+        {
+          "command": "capability",
+          "mutating": false,
+          "class": "diagnostic",
+          "cli": "implemented",
+          "tui_action": "none",
+          "interactive_tui": "n/a",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/rc-0-4-0-verification.md"],
+          "upstream_gap": null,
+          "notes": "discovery document"
+        }
+      ]
+    },
+    "rebuildup.automations": {
+      "contract": "herdr-plugins.automations/v1",
+      "contract_status": "stable",
+      "implementation_ticket": "#231",
+      "commands": [
+        {
+          "command": "create",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#243",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/automations-t4-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "task CRUD form"
+        },
+        {
+          "command": "list",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#243",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/automations-t4-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "task list"
+        },
+        {
+          "command": "get",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#243",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/automations-t4-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "task detail"
+        },
+        {
+          "command": "update",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#243",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/automations-t4-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "task edit form"
+        },
+        {
+          "command": "set-enabled",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#243",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/automations-t4-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "enable/disable toggle"
+        },
+        {
+          "command": "delete",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#243",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/automations-t4-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "delete task; confirm"
+        },
+        {
+          "command": "run-now",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#243",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/automations-t4-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "manual fire; confirm + result view"
+        },
+        {
+          "command": "runs",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#243",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/automations-t4-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "run history/logs viewer"
+        },
+        {
+          "command": "reconcile",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#243",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/automations-t4-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "explicit reconcile; not auto-run on open"
+        },
+        {
+          "command": "fire",
+          "mutating": true,
+          "class": "daemon",
+          "cli": "implemented",
+          "tui_action": "none",
+          "interactive_tui": "n/a",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/automations-t4-live-verification.md"],
+          "upstream_gap": null,
+          "notes": "firing driver internals"
+        },
+        {
+          "command": "tick",
+          "mutating": true,
+          "class": "daemon",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#243",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/automations-t4-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "explicit tick-now in driver diagnostics (confirm-gated); never auto-run on open"
+        },
+        {
+          "command": "watch",
+          "mutating": true,
+          "class": "daemon",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#243",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/automations-t4-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "start detached watch via driver diagnostics (confirm-gated); stop via CLI/pid"
+        },
+        {
+          "command": "schedule",
+          "mutating": true,
+          "class": "daemon",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#243",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/automations-t4-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "install/uninstall/status in driver diagnostics; status is explicit (writes driver record)"
+        },
+        {
+          "command": "capability",
+          "mutating": false,
+          "class": "diagnostic",
+          "cli": "implemented",
+          "tui_action": "none",
+          "interactive_tui": "n/a",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/automations-t4-live-verification.md"],
+          "upstream_gap": null,
+          "notes": "discovery document"
+        }
+      ]
+    },
+    "rebuildup.conversations": {
+      "contract": "herdr-plugins.conversations/v1",
+      "contract_status": "stable",
+      "implementation_ticket": "#232",
+      "commands": [
+        {
+          "command": "index",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#244",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/conversations-v1-real-data-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "reindex action inside history UI"
+        },
+        {
+          "command": "refresh",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#244",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/conversations-v1-real-data-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "incremental refresh"
+        },
+        {
+          "command": "sessions",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#244",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/conversations-v1-real-data-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "session list"
+        },
+        {
+          "command": "history",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#244",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/conversations-v1-real-data-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "turn/tool detail browser"
+        },
+        {
+          "command": "search",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#244",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/conversations-v1-real-data-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "full-text search"
+        },
+        {
+          "command": "show",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#244",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/conversations-v1-real-data-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "single session/turn detail"
+        },
+        {
+          "command": "usage",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#244",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/conversations-v1-real-data-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "per-session usage summary (feeds usage plugin too)"
+        },
+        {
+          "command": "capability",
+          "mutating": false,
+          "class": "diagnostic",
+          "cli": "implemented",
+          "tui_action": "none",
+          "interactive_tui": "n/a",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/conversations-v1-real-data-verification.md"],
+          "upstream_gap": null,
+          "notes": "discovery document"
+        }
+      ]
+    },
+    "rebuildup.usage": {
+      "contract": "herdr-plugins.usage/v1",
+      "contract_status": "stable",
+      "implementation_ticket": "#232",
+      "commands": [
+        {
+          "command": "usage",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#244",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/usage-v1-real-data-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "totals by provider/model/host/project/session/pane + period filters"
+        },
+        {
+          "command": "quota",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#244",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/usage-v1-real-data-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "subscription quota/reset report"
+        },
+        {
+          "command": "divergence",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#244",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/usage-v1-real-data-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "quota-vs-measured divergence"
+        },
+        {
+          "command": "cost",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#244",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/usage-v1-real-data-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "estimated API cost, labeled"
+        },
+        {
+          "command": "capability",
+          "mutating": false,
+          "class": "diagnostic",
+          "cli": "implemented",
+          "tui_action": "none",
+          "interactive_tui": "n/a",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/usage-v1-real-data-verification.md"],
+          "upstream_gap": null,
+          "notes": "discovery document"
+        }
+      ]
+    },
+    "rebuildup.controls": {
+      "contract": "herdr-plugins.controls/v1",
+      "contract_status": "stable",
+      "implementation_ticket": "#232",
+      "commands": [
+        {
+          "command": "send",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#245",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/controls-v1-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "send text to agent pane w/ target echo"
+        },
+        {
+          "command": "command",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#245",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/controls-v1-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "provider slash-command passthrough"
+        },
+        {
+          "command": "wait",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#245",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/controls-v1-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "wait-for-state; long-running -> progress+cancel"
+        },
+        {
+          "command": "interrupt",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#245",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/controls-v1-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "PTY-level interrupt; confirm"
+        },
+        {
+          "command": "read",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#245",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/controls-v1-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "scrollback read viewer"
+        },
+        {
+          "command": "rename",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#245",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/controls-v1-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "pane/agent rename"
+        },
+        {
+          "command": "start",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#245",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/controls-v1-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "agent start w/ launch args/model/permission"
+        },
+        {
+          "command": "capability",
+          "mutating": false,
+          "class": "diagnostic",
+          "cli": "implemented",
+          "tui_action": "none",
+          "interactive_tui": "n/a",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/controls-v1-live-verification.md"],
+          "upstream_gap": null,
+          "notes": "discovery document; also exposes providers/dialogs tables"
+        }
+      ]
+    },
+    "rebuildup.handoff": {
+      "contract": "herdr-plugins.handoff/v1",
+      "contract_status": "stable",
+      "implementation_ticket": "#232",
+      "commands": [
+        {
+          "command": "create",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#245",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/handoff-v1-live-verification.md",
+            "docs/research/handoff-remote-api-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "handoff record composer"
+        },
+        {
+          "command": "list",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#245",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/handoff-v1-live-verification.md",
+            "docs/research/handoff-remote-api-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "record list/lineage browser"
+        },
+        {
+          "command": "status",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#245",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/handoff-v1-live-verification.md",
+            "docs/research/handoff-remote-api-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "status lifecycle incl. reconcile-on-delivered"
+        },
+        {
+          "command": "execute",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#245",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/handoff-v1-live-verification.md",
+            "docs/research/handoff-remote-api-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "execute handoff on target; strategy select + confirm"
+        },
+        {
+          "command": "resume-info",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#245",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/handoff-v1-live-verification.md",
+            "docs/research/handoff-remote-api-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "resume payload preview"
+        },
+        {
+          "command": "remote-probe",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#245",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/handoff-v1-live-verification.md",
+            "docs/research/handoff-remote-api-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "remote target probe"
+        },
+        {
+          "command": "delegate",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#245",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/handoff-v1-live-verification.md",
+            "docs/research/handoff-remote-api-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "delegation w/ lineage; target select + confirm"
+        },
+        {
+          "command": "merge-back",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#245",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/handoff-v1-live-verification.md",
+            "docs/research/handoff-remote-api-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "merge-back; confirm"
+        },
+        {
+          "command": "capability",
+          "mutating": false,
+          "class": "diagnostic",
+          "cli": "implemented",
+          "tui_action": "none",
+          "interactive_tui": "n/a",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/handoff-v1-live-verification.md",
+            "docs/research/handoff-remote-api-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "discovery document"
+        }
+      ]
+    },
+    "rebuildup.textgen": {
+      "contract": "herdr-plugins.textgen/v1",
+      "contract_status": "stable",
+      "implementation_ticket": "#232",
+      "commands": [
+        {
+          "command": "generate",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#246",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/textgen-v1-agent-pane-verification.md",
+            "docs/research/textgen-v1-real-provider-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "task picker + contract input form (@file for long text) + provider/model select + confirm-gated generate; result review/copy only — not persisted (#249), generation!=apply; cancel detaches to preserve agent-path cleanup"
+        },
+        {
+          "command": "git-context",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#246",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/textgen-v1-agent-pane-verification.md",
+            "docs/research/textgen-v1-real-provider-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "read-only preview inside the generate flow for --git-pane tasks"
+        },
+        {
+          "command": "watch-next-prompt",
+          "mutating": true,
+          "class": "daemon",
+          "cli": "implemented",
+          "tui_action": "none",
+          "interactive_tui": "n/a",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/textgen-v1-agent-pane-verification.md",
+            "docs/research/textgen-v1-real-provider-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "opt-in watcher daemon"
+        },
+        {
+          "command": "config",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "none",
+          "interactive_tui": "planned:#232",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/textgen-v1-agent-pane-verification.md",
+            "docs/research/textgen-v1-real-provider-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "provider/model/api-generator config forms"
+        },
+        {
+          "command": "capability",
+          "mutating": false,
+          "class": "diagnostic",
+          "cli": "implemented",
+          "tui_action": "none",
+          "interactive_tui": "n/a",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/textgen-v1-agent-pane-verification.md",
+            "docs/research/textgen-v1-real-provider-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "discovery document"
+        }
+      ]
+    },
+    "rebuildup.artifacts": {
+      "contract": "herdr-plugins.artifacts/v1",
+      "contract_status": "stable",
+      "implementation_ticket": "#233",
+      "commands": [
+        {
+          "command": "register",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#247",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/artifacts-v1-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "register file/dir; kind+storage-mode select"
+        },
+        {
+          "command": "list",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#247",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/artifacts-v1-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "artifact list/search"
+        },
+        {
+          "command": "get",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#247",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/artifacts-v1-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "artifact detail/metadata"
+        },
+        {
+          "command": "search",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#247",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/artifacts-v1-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "full-text/metadata search"
+        },
+        {
+          "command": "verify",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#247",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/artifacts-v1-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "integrity/metadata verify"
+        },
+        {
+          "command": "delete",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#247",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/artifacts-v1-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "delete; confirm"
+        },
+        {
+          "command": "deliver",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#247",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/artifacts-v1-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "deliver reference; path-safe, confirm"
+        },
+        {
+          "command": "gc",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#247",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/artifacts-v1-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "retention GC; confirm w/ preview"
+        },
+        {
+          "command": "export",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#247",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/artifacts-v1-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "export index/report"
+        },
+        {
+          "command": "capability",
+          "mutating": false,
+          "class": "diagnostic",
+          "cli": "implemented",
+          "tui_action": "none",
+          "interactive_tui": "n/a",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/artifacts-v1-live-verification.md"],
+          "upstream_gap": null,
+          "notes": "discovery document"
+        }
+      ]
+    },
+    "rebuildup.secrets": {
+      "contract": "herdr-plugins.secrets/v1",
+      "contract_status": "stable",
+      "implementation_ticket": "#233",
+      "commands": [
+        {
+          "command": "resolve",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#247",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/secrets-v1-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "metadata-only resolve preview; values never shown"
+        },
+        {
+          "command": "run",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#247",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/secrets-v1-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "explicit run w/ injected env; binding select + confirm"
+        },
+        {
+          "command": "inject",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#247",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/secrets-v1-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "inject into surface-create env; confirm"
+        },
+        {
+          "command": "config",
+          "mutating": true,
+          "class": "mutation",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#247",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/secrets-v1-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "bindings config; metadata only"
+        },
+        {
+          "command": "capability",
+          "mutating": false,
+          "class": "diagnostic",
+          "cli": "implemented",
+          "tui_action": "none",
+          "interactive_tui": "n/a",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/secrets-v1-live-verification.md"],
+          "upstream_gap": null,
+          "notes": "discovery document; provider/auth status"
+        }
+      ]
+    },
+    "rebuildup.machines": {
+      "contract": "herdr-plugins.machines/v1",
+      "contract_status": "draft",
+      "implementation_ticket": "#233",
+      "commands": [
+        {
+          "command": "list",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#247",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/machines-v1-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "machine inventory table"
+        },
+        {
+          "command": "probe",
+          "mutating": false,
+          "class": "read",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#247",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/machines-v1-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "reachability/version/plugin-surface probe; progress+cancel"
+        },
+        {
+          "command": "capability",
+          "mutating": false,
+          "class": "diagnostic",
+          "cli": "implemented",
+          "tui_action": "none",
+          "interactive_tui": "n/a",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/machines-v1-live-verification.md"],
+          "upstream_gap": null,
+          "notes": "discovery document"
+        }
+      ]
+    },
+    "rebuildup.mcp": {
+      "contract": "herdr-plugins.mcp/v1",
+      "contract_status": "stable",
+      "implementation_ticket": "#233",
+      "commands": [
+        {
+          "command": "capability",
+          "mutating": false,
+          "class": "diagnostic",
+          "cli": "implemented",
+          "tui_action": "declared:open",
+          "interactive_tui": "implemented:#248",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": [
+            "docs/research/mcp-v1-live-verification.md",
+            "docs/research/tui-rc-0-11-0-verification.md"
+          ],
+          "upstream_gap": null,
+          "notes": "access level + tool list + per-plugin availability; diagnostics TUI (read-only, server not screen-ified)"
+        },
+        {
+          "command": "serve",
+          "mutating": false,
+          "class": "agent-only",
+          "cli": "implemented",
+          "tui_action": "none",
+          "interactive_tui": "n/a",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
+          "upstream_gap": null,
+          "notes": "stdio MCP server; NOT screen-ified (ADR-0025)"
+        },
+        {
+          "command": "help",
+          "mutating": false,
+          "class": "diagnostic",
+          "cli": "implemented",
+          "tui_action": "none",
+          "interactive_tui": "n/a",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
+          "upstream_gap": null,
+          "notes": "usage text"
+        }
+      ],
+      "mcp_tools": [
+        {
+          "tool": "herdr_capability",
+          "mutating": false,
+          "class": "read",
+          "cli": "n/a (MCP tool, not CLI command)",
+          "tui_action": "none",
+          "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
+          "upstream_gap": null,
+          "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
+        },
+        {
+          "tool": "session_snapshot",
+          "mutating": false,
+          "class": "read",
+          "cli": "n/a (MCP tool, not CLI command)",
+          "tui_action": "none",
+          "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
+          "upstream_gap": null,
+          "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
+        },
+        {
+          "tool": "agent_list",
+          "mutating": false,
+          "class": "read",
+          "cli": "n/a (MCP tool, not CLI command)",
+          "tui_action": "none",
+          "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
+          "upstream_gap": null,
+          "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
+        },
+        {
+          "tool": "agent_get",
+          "mutating": false,
+          "class": "read",
+          "cli": "n/a (MCP tool, not CLI command)",
+          "tui_action": "none",
+          "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
+          "upstream_gap": null,
+          "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
+        },
+        {
+          "tool": "agent_read",
+          "mutating": false,
+          "class": "read",
+          "cli": "n/a (MCP tool, not CLI command)",
+          "tui_action": "none",
+          "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
+          "upstream_gap": null,
+          "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
+        },
+        {
+          "tool": "workspace_list",
+          "mutating": false,
+          "class": "read",
+          "cli": "n/a (MCP tool, not CLI command)",
+          "tui_action": "none",
+          "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
+          "upstream_gap": null,
+          "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
+        },
+        {
+          "tool": "pane_list",
+          "mutating": false,
+          "class": "read",
+          "cli": "n/a (MCP tool, not CLI command)",
+          "tui_action": "none",
+          "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
+          "upstream_gap": null,
+          "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
+        },
+        {
+          "tool": "conversations_search",
+          "mutating": false,
+          "class": "read",
+          "cli": "n/a (MCP tool, not CLI command)",
+          "tui_action": "none",
+          "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
+          "upstream_gap": null,
+          "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
+        },
+        {
+          "tool": "conversations_show",
+          "mutating": false,
+          "class": "read",
+          "cli": "n/a (MCP tool, not CLI command)",
+          "tui_action": "none",
+          "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
+          "upstream_gap": null,
+          "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
+        },
+        {
+          "tool": "git_status",
+          "mutating": false,
+          "class": "read",
+          "cli": "n/a (MCP tool, not CLI command)",
+          "tui_action": "none",
+          "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
+          "upstream_gap": null,
+          "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
+        },
+        {
+          "tool": "git_files",
+          "mutating": false,
+          "class": "read",
+          "cli": "n/a (MCP tool, not CLI command)",
+          "tui_action": "none",
+          "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
+          "upstream_gap": null,
+          "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
+        },
+        {
+          "tool": "git_log",
+          "mutating": false,
+          "class": "read",
+          "cli": "n/a (MCP tool, not CLI command)",
+          "tui_action": "none",
+          "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
+          "upstream_gap": null,
+          "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
+        },
+        {
+          "tool": "projects_list",
+          "mutating": false,
+          "class": "read",
+          "cli": "n/a (MCP tool, not CLI command)",
+          "tui_action": "none",
+          "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
+          "upstream_gap": null,
+          "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
+        },
+        {
+          "tool": "usage_report",
+          "mutating": false,
+          "class": "read",
+          "cli": "n/a (MCP tool, not CLI command)",
+          "tui_action": "none",
+          "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
+          "upstream_gap": null,
+          "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
+        },
+        {
+          "tool": "agent_prompt",
+          "mutating": true,
+          "class": "agent-only",
+          "cli": "n/a (MCP tool, not CLI command)",
+          "tui_action": "none",
+          "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
+          "upstream_gap": null,
+          "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
+        },
+        {
+          "tool": "agent_wait",
+          "mutating": false,
+          "class": "agent-only",
+          "cli": "n/a (MCP tool, not CLI command)",
+          "tui_action": "none",
+          "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
+          "upstream_gap": null,
+          "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
+        },
+        {
+          "tool": "agent_interrupt",
+          "mutating": true,
+          "class": "agent-only",
+          "cli": "n/a (MCP tool, not CLI command)",
+          "tui_action": "none",
+          "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
+          "upstream_gap": null,
+          "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
+        },
+        {
+          "tool": "agent_start",
+          "mutating": true,
+          "class": "agent-only",
+          "cli": "n/a (MCP tool, not CLI command)",
+          "tui_action": "none",
+          "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
+          "upstream_gap": null,
+          "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
+        },
+        {
+          "tool": "workspace_create",
+          "mutating": true,
+          "class": "agent-only",
+          "cli": "n/a (MCP tool, not CLI command)",
+          "tui_action": "none",
+          "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
+          "upstream_gap": null,
+          "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
+        },
+        {
+          "tool": "handoff_invoke",
+          "mutating": true,
+          "class": "agent-only",
+          "cli": "n/a (MCP tool, not CLI command)",
+          "tui_action": "none",
+          "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
+          "upstream_gap": null,
+          "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
+        },
+        {
+          "tool": "events_subscribe",
+          "mutating": true,
+          "class": "agent-only",
+          "cli": "n/a (MCP tool, not CLI command)",
+          "tui_action": "none",
+          "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
+          "upstream_gap": null,
+          "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
+        },
+        {
+          "tool": "events_poll",
+          "mutating": true,
+          "class": "agent-only",
+          "cli": "n/a (MCP tool, not CLI command)",
+          "tui_action": "none",
+          "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
+          "upstream_gap": null,
+          "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
+        },
+        {
+          "tool": "events_wait",
+          "mutating": true,
+          "class": "agent-only",
+          "cli": "n/a (MCP tool, not CLI command)",
+          "tui_action": "none",
+          "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
+          "upstream_gap": null,
+          "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
+        },
+        {
+          "tool": "events_unsubscribe",
+          "mutating": true,
+          "class": "agent-only",
+          "cli": "n/a (MCP tool, not CLI command)",
+          "tui_action": "none",
+          "interactive_tui": "n/a (MCP server not screen-ified; diagnostics surface only)",
+          "gui": "consumer:herdr-t3 (#7)",
+          "real_machine_evidence": ["docs/research/mcp-v1-live-verification.md"],
+          "upstream_gap": null,
+          "notes": "exposed via stdio MCP; TUI coverage limited to capability/diagnostics per ADR-0025/0033"
+        }
+      ]
+    }
+  }
+}

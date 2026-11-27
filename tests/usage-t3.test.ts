@@ -877,11 +877,11 @@ describe("cliproxy hub quota source", () => {
     try {
       const env = { ...hubEnv(server), HERDR_USAGE_QUOTA_HUB_KEY: HUB_KEY };
       const ok = await runUsageCliAsync(["quota"], env);
-      expect((ok.json?.hubs as Record<string, unknown>[])[0]?.status).toBe("ok");
+      expect(((ok.json?.hubs ?? []) as Record<string, unknown>[])[0]?.status).toBe("ok");
 
       server.setMode("unauthorized");
       const denied = await runUsageCliAsync(["quota", "--refresh"], env);
-      const dh = (denied.json?.hubs as Record<string, unknown>[])[0];
+      const dh = ((denied.json?.hubs ?? []) as Record<string, unknown>[])[0];
       // fresh cache exists → stale serve flagged, not a fabricated fresh zero
       expect(dh?.status).toBe("ok");
       expect(dh?.stale).toBe(true);
@@ -890,14 +890,14 @@ describe("cliproxy hub quota source", () => {
       // no cache → honest unauthorized
       const env2 = { ...hubEnv(server), HERDR_USAGE_QUOTA_HUB_KEY: HUB_KEY };
       const denied2 = await runUsageCliAsync(["quota"], env2);
-      const dh2 = (denied2.json?.hubs as Record<string, unknown>[])[0];
+      const dh2 = ((denied2.json?.hubs ?? []) as Record<string, unknown>[])[0];
       expect(dh2?.status).toBe("unauthorized");
       expect(dh2?.accounts).toEqual([]);
 
       server.setMode("fail");
       const env3 = { ...hubEnv(server), HERDR_USAGE_QUOTA_HUB_KEY: HUB_KEY };
       const failed = await runUsageCliAsync(["quota"], env3);
-      const fh = (failed.json?.hubs as Record<string, unknown>[])[0];
+      const fh = ((failed.json?.hubs ?? []) as Record<string, unknown>[])[0];
       expect(fh?.status).toBe("request_failed");
       expect(fh?.detail).toContain("HTTP 500");
     } finally {
@@ -912,7 +912,7 @@ describe("cliproxy hub quota source", () => {
       server.setMode("slow");
       const r = await runUsageCliAsync(["quota", "--timeout", "400"], env);
       expect(r.status).toBe(0);
-      const hub = (r.json?.hubs as Record<string, unknown>[])[0];
+      const hub = ((r.json?.hubs ?? []) as Record<string, unknown>[])[0];
       // auth-files is fast in "slow" mode? no — slow delays both; hub may fail.
       // Accept either hub-level failure or per-account failure, both honest.
       if (hub?.status === "ok") {
@@ -993,12 +993,12 @@ describe("divergence command", () => {
       };
       const r = await runUsageCliAsync(["divergence", "--offline"], env);
       expect(r.status).toBe(0);
-      const claude = (r.json?.comparisons as Record<string, unknown>[]).find(
+      const claude = ((r.json?.comparisons ?? []) as Record<string, unknown>[]).find(
         (c) => c.provider === "claude",
       );
       expect(claude?.verdict).toBe("quota_unavailable");
-      expect((claude?.measured as Record<string, unknown>).events).toBe(2);
-      expect((claude?.quota as Record<string, unknown>).status).toBe("no_credential");
+      expect(((claude?.measured ?? {}) as Record<string, unknown>).events).toBe(2);
+      expect(((claude?.quota ?? {}) as Record<string, unknown>).status).toBe("no_credential");
       expect(server.hits["/claude-usage"] ?? 0).toBe(0); // no credential → no HTTP call
     } finally {
       await server.close();

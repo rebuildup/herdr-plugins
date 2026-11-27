@@ -17,6 +17,32 @@ platforms = ["linux", "macos", "windows"]
 # triggers resolved as an upstream gap (ADR-0026) — no `serve`,
 # `webhook` schedules stay `unsupported_schedule`; contract v1
 # finalized STABLE.
+#
+# Interactive TUI surface (#243, contract docs/contracts/tui-v1.md,
+# ADR-0031/0032/0033): one tab-placed pane entrypoint plus an `open`
+# action that pins the origin context and calls `plugin.pane.open`.
+# The UI consumes this plugin's own CLI for every read/mutation (with
+# `--socket` pinned to the launch session), so the public contract
+# stays the single source of truth; task CRUD/schedule/destination
+# edits go through guided forms, run-now/delete/tick/schedule/watch
+# are confirm-gated via `mutation_commands`, and lazy mutations
+# (tick drain, reconcile, schedule status) are explicit-only — never
+# implicit on open.
+
+[[panes]]
+id = "main"
+title = "Automations: tasks"
+description = "Automation task browser: list/search, create/edit tasks (schedule + destination forms), enable/disable, run-now, runs history, driver diagnostics (OS scheduler/watch/tick)."
+platforms = ["linux", "macos", "windows"]
+placement = "tab"
+command = ["bun", "run", "src/tui.ts", "main"]
+
+[[actions]]
+id = "open"
+title = "Automations: open UI"
+description = "Open the automations TUI in a new tab."
+contexts = ["pane", "workspace"]
+command = ["bun", "run", "src/tui.ts", "open"]
 
 # Event hooks (#146): one [[events]] entry per upstream
 # PLUGIN_HOOK_EVENT_KINDS name so `event` schedules can subscribe to

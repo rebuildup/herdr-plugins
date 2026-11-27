@@ -122,3 +122,54 @@ Missed runs: occurrences owed only inside enabled windows
 jitter grace are derived as `missed` at read time — never reported as
 having run. `reconcile` (and `set-enabled false`) materialize them
 into real run records.
+
+## Interactive TUI (#243)
+
+The plugin ships a tab-placed pane entrypoint plus an `open` action
+(`herdr-plugins.tui/v1`; ADR-0031/0032/0033):
+
+```toml
+# herdr-plugin.toml (already declared)
+[[panes]] id = "main"  placement = "tab"  command = ["bun","run","src/tui.ts","main"]
+[[actions]] id = "open" contexts = ["pane","workspace"]  command = ["bun","run","src/tui.ts","open"]
+```
+
+- `open` pins the origin context (workspace/tab/focused pane/cwd) once
+  and calls `plugin.pane.open` with `placement = "tab"`, forwarding the
+  pins as `HERDR_TUI_*` env vars. `HERDR_PANE_ID` inside the UI is the
+  UI pane's own surface identity — never a mutation target. Every CLI
+  call additionally carries `--socket <resolved>`, so the UI always
+  targets the same herdr session (and session-namespaced registry) it
+  was launched in — schedule management works GUI-less on WSL/SSH/
+  headless hosts.
+- The UI consumes this plugin's own CLI (`src/cli.ts`) for every read
+  and mutation, so the public contract stays the single source of
+  truth and CLI/MCP/GUI behavior cannot drift. Opening performs reads
+  only — `tick` drains, `reconcile` materialization, and `schedule
+  status` driver-record writes never run implicitly; they are explicit,
+  confirm-gated keys in the driver diagnostics view.
+- Surfaces: task list/search (`/` filter), guided create/edit forms
+  (name, prompt, schedule `interval`/`fixed_time`/`once`/`event` —
+  `webhook` renders disabled per ADR-0026 — destination `pane`/`launch`,
+  misfire policy), per-task detail with recent runs, enable/disable,
+  run-now, per-task reconcile, delete, a runs history viewer (stored
+  runs merged with honestly-labeled derived `missed` entries), and
+  driver diagnostics (stored driver state + explicit `schedule
+  status|install|uninstall`, `tick` now, detached `watch` start).
+- Every mutation is confirm-gated (exact target + consequence, Esc
+  cancels), checked against `capability`/`mutation_commands` (fail
+  closed when unavailable), and task mutations re-validate via `get`
+  immediately before writing — a vanished task aborts `stale`, a
+  changed `updated_at` asks before applying.
+- Non-TTY stdin degrades to a plain-text task list; the non-
+  interactive CLI is unchanged.
+
+Opt-in keybind (user-owned; plugins never write herdr config):
+
+```toml
+[[keys.command]]
+key = "prefix+A"
+type = "plugin_action"
+command = "rebuildup.automations.open"
+description = "open automations TUI"
+```

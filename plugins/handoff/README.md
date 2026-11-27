@@ -72,9 +72,38 @@ session (the transfer identity carries its own `session_key`).
   mismatch) is reported, never applied.
 - Agent Router routing (dotfiles `script/agent`, `config/agents.toml`)
   is not reimplemented; `provider_hint` is an opaque label (ADR-0017).
-- #30 boundary: handoff stays CLI-only in v1 — whether MCP should
+- #30 boundary: handoff stays CLI+TUI in v1 — whether MCP should
   expose these commands is #30's decision; this contract is the
   surface it consumes (ADR-0021).
 - #32 boundary: no scheduled/triggered handoff — automations own
   automation; a future automation may *invoke* `delegate`/`merge-back`/
   `execute` through this CLI (ADR-0021).
+
+## Interactive TUI
+
+The plugin ships a tab-placed pane entrypoint plus an `open` action
+(`herdr-plugins.tui/v1`, ADR-0031/0032/0033, issue #245):
+
+```bash
+herdr plugin action invoke rebuildup.handoff.open   # or the manifest pane
+```
+
+The TUI is a record browser: `list` with status filter, a minimal
+`create` composer (source pane → strategy → note/requirement/external),
+and a detail view showing transfer identity, lineage (parent/children),
+execution target/agent/remote/worktree, and the honest
+transfer/target/remote checks. `i` shows `resume-info` on demand (may
+be slow — never fetched on open), `R` resolves payload refs and probes
+the recorded remote machine, `s` runs the gated status reconcile, and
+`f` returns focus to the origin agent pane — only when the record's
+host+session match this session (pane ids repeat across sessions).
+
+Mutations: `x` execute (target mode select — recorded hint / pane /
+workspace / new workspace / worktree / remote machine — then a
+`--dry-run` plan preview and a confirm showing the exact target
+identity including the remote machine label/target/session), `d`
+delegate (subagent_spawn child; execute or record-only, optional
+worktree), `m` merge-back (result delivered to the parent's existing
+pane). Every mutation revalidates the record (`updated_at` drift asks
+before applying), is gated against `capability`/`mutation_commands`,
+and runs through the plugin CLI so CLI/MCP/GUI behavior cannot drift.

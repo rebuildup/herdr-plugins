@@ -41,7 +41,7 @@ import {
 } from "./source";
 
 const PLUGIN_ID = "rebuildup.usage";
-const PLUGIN_VERSION = "0.5.0";
+const PLUGIN_VERSION = "0.6.0";
 
 interface CliOptions {
   command: string;

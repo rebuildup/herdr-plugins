@@ -347,7 +347,7 @@ async function indexFixtures(env: FixtureEnv, herdrSocket: string): Promise<void
     HERDR_SOCKET_PATH: herdrSocket,
   });
   expect(idx.status).toBe(0);
-  expect((idx.json?.indexed as unknown[]).length).toBe(2);
+  expect(((idx.json?.indexed ?? []) as unknown[]).length).toBe(2);
 }
 
 const t = (name: string, fn: () => void | Promise<void>) => test(name, fn, 60_000);
@@ -481,7 +481,7 @@ describe("usage plugin contract", () => {
     const hub = sources.find((s) => s.id === "cliproxy-api");
     expect(hub?.status).toBe("available");
     expect(hub?.credential_boundary).toContain("0015");
-    expect((r.json?.commands as string[]).includes("divergence")).toBe(true);
+    expect(((r.json?.commands ?? []) as string[]).includes("divergence")).toBe(true);
   });
 
   t("aggregates claude+codex fixtures end-to-end with cache tokens", async () => {
@@ -533,7 +533,7 @@ describe("usage plugin contract", () => {
       expect(source.contract).toBe("herdr-plugins.conversations/v1");
       expect(source.complete).toBe(true);
       expect(source.resolved_via).toBe("override");
-      expect((r.json?.warnings as unknown[]).length).toBe(0);
+      expect(((r.json?.warnings ?? []) as unknown[]).length).toBe(0);
     } finally {
       await herdr.close();
     }
@@ -548,11 +548,11 @@ describe("usage plugin contract", () => {
       await indexFixtures(env, herdr.socketPath);
 
       const byProvider = runUsage(["usage", "--provider", "claude", "--offline"], env.usageEnv);
-      expect((byProvider.json?.totals as Record<string, unknown>).events).toBe(2);
-      expect((byProvider.json?.totals as Record<string, unknown>).input_tokens).toBe(30);
+      expect(((byProvider.json?.totals ?? {}) as Record<string, unknown>).events).toBe(2);
+      expect(((byProvider.json?.totals ?? {}) as Record<string, unknown>).input_tokens).toBe(30);
 
       const byPane = runUsage(["usage", "--pane", "w1:p2", "--offline"], env.usageEnv);
-      expect((byPane.json?.totals as Record<string, unknown>).input_tokens).toBe(100);
+      expect(((byPane.json?.totals ?? {}) as Record<string, unknown>).input_tokens).toBe(100);
 
       // claude events are 2026-01-01, codex 2026-01-02
       const windowed = runUsage(
@@ -580,9 +580,9 @@ describe("usage plugin contract", () => {
     // nothing indexed → honest empty aggregate + hint
     const empty = runUsage(["usage", "--offline"], env.usageEnv);
     expect(empty.status).toBe(0);
-    expect((empty.json?.totals as Record<string, unknown>).events).toBe(0);
+    expect(((empty.json?.totals ?? {}) as Record<string, unknown>).events).toBe(0);
     expect(empty.json?.hint).toContain("index");
-    expect((empty.json?.coverage as Record<string, unknown>).sessions_total).toBe(0);
+    expect(((empty.json?.coverage ?? {}) as Record<string, unknown>).sessions_total).toBe(0);
 
     // unresolvable conversations root → structured error
     const missing = runUsage(

@@ -128,3 +128,32 @@ Full contract: `docs/contracts/usage-v1.md`.
 Spec: `docs/specs/usage.md`. Design: ADR-0013 (index reuse),
 ADR-0014 (quota credential boundary), ADR-0015 (hub credential
 boundary), ADR-0016 (cost pricing + retention/GC).
+
+## Interactive TUI
+
+A report browser for `usage`/`quota`/`cost`/`divergence`, per
+`docs/contracts/tui-v1.md` (ADR-0031/0032/0033). The plugin is
+read-only (`mutation_commands: []`), so the TUI performs reads only;
+source refresh (`f`) is always an explicit keypress:
+
+```bash
+herdr plugin pane open --plugin rebuildup.usage --entrypoint main --placement tab
+# or via the action:
+herdr plugin action invoke rebuildup.usage.open
+```
+
+Keys:
+
+| key | action |
+| --- | --- |
+| `enter` | open report (usage / quota / cost / divergence) |
+| `w` | cycle period (all / 24h / 7d / 30d) on windowed reports |
+| `p` | cycle provider filter |
+| `b` | browse breakdown dimensions → entries → JSON detail (usage/cost) |
+| `f` | refresh quota/pricing sources (`--refresh`, explicit only) |
+| `r` | reload |
+| `?`/`h`, `esc`/`q`, `ctrl+c` | help / back / cancel-exit (reserved) |
+
+Quota and hub detail views redact credential-shaped fields before
+display (ADR-0014/0015 boundary). Non-TTY invocations print the CLI
+equivalent and exit.

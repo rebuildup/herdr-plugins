@@ -499,8 +499,9 @@ describe("textgen cli", () => {
     expect(add.status).toBe(0);
     expect(add.json?.note).toContain("DISABLED");
     const show = await runCli(["config", "show"], env);
-    const gens = (show.json?.config as { apiGenerators: Array<{ id: string; enabled: boolean }> })
-      .apiGenerators;
+    const gens = (
+      (show.json?.config ?? {}) as { apiGenerators: Array<{ id: string; enabled: boolean }> }
+    ).apiGenerators;
     expect(gens[0]?.id).toBe("gw");
     expect(gens[0]?.enabled).toBe(false);
     // config file must not contain a key value

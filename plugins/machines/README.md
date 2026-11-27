@@ -28,6 +28,13 @@ bun run src/cli.ts probe <machine-id|label>
 bun run src/cli.ts probe --all
 ```
 
+Every command accepts the shared target flags `--socket PATH` and
+`--session NAME`, which select the **local** herdr instance (explicit
+flag beats ambient `HERDR_SOCKET_PATH`/`HERDR_SESSION`). The `herdr`
+CLI itself has no target flags, so they are forwarded to spawned
+children as `HERDR_SOCKET_PATH` / `HERDR_SESSION`. This is unrelated to
+the remote `session` field on each saved machine.
+
 - `list` — `herdr machine list --json` merged with last-known probe
   metadata (`last_probe`, null when never probed). Never probes live.
 - `probe` — live probe via `herdr --machine <id>`: remote `api
@@ -43,7 +50,9 @@ Exit codes: 0 success, 1 handled error, 2 usage.
 
 Each remote call is a fresh `herdr` CLI spawn (45s timeout) with
 ambient `HERDR_*` env stripped — the ADR-0020 `SavedSshApiBridge` path,
-same as handoff's `remote-probe`. Probe logic is duplicated minimally
+same as handoff's `remote-probe`. Explicit `--socket`/`--session` CLI
+flags are re-injected into the child env as `HERDR_SOCKET_PATH` /
+`HERDR_SESSION` (see above). Probe logic is duplicated minimally
 from `plugins/handoff/src/remote.ts` per ADR-0028 §2 (no `packages/`
 extraction until a second consumer justifies it).
 
@@ -51,3 +60,38 @@ extraction until a second consumer justifies it).
 
 [Bun](https://bun.sh) — the plugin is dependency-free TypeScript run
 directly by `bun run src/cli.ts`.
+
+## Interactive TUI (#247)
+
+```toml
+# herdr-plugin.toml (already declared)
+[[panes]] id = "main"  placement = "tab"  command = ["bun","run","src/tui.ts","main"]
+[[actions]] id = "open" contexts = ["pane","workspace"]  command = ["bun","run","src/tui.ts","open"]
+```
+
+- `open` pins the origin context once and calls `plugin.pane.open`
+  with `placement = "tab"`, forwarding the pins as `HERDR_TUI_*` env
+  vars. `HERDR_PANE_ID` inside the UI is the UI pane's own surface
+  identity — never a mutation target.
+- The UI consumes this plugin's own CLI (`src/cli.ts`) for every read.
+  Opening performs reads only (`list`) — it never probes live.
+- Surfaces: saved-machine list (enabled/disabled/selected +
+  last-known probe state), per-machine detail (target, session,
+  reachability, remote herdr version/protocol, plugin surface, remote
+  plugin entries), `p`robe selected / `a`ll (slow SSH probes run in
+  the task runner — progress shown, Ctrl-C/Esc cancels the CLI
+  child), `i` capability/contract info, `R` refresh.
+- READ-ONLY: the plugin has no mutating commands; the TUI exposes no
+  mutating affordance. Machine lifecycle stays with `herdr machine`.
+- Non-TTY stdin degrades to a plain-text machine list; the
+  non-interactive CLI is unchanged.
+
+Opt-in keybind (user-owned; plugins never write herdr config):
+
+```toml
+[[keys.command]]
+key = "prefix+M"
+type = "plugin_action"
+command = "rebuildup.machines.open"
+description = "open machines TUI"
+```

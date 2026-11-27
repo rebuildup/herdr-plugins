@@ -8,6 +8,27 @@ platforms = ["linux", "macos", "windows"]
 # No build step: the plugin is dependency-free TypeScript executed by Bun
 # (runtime prerequisite, see plugins/machines/README.md).
 #
-# No [[actions]] / [[events]] / [[startup]]: the plugin is CLI-only.
-# Issue #161 (parent #34, ADR-0028): read-only inventory/probe only —
-# machine add/remove/enable/disable is never reimplemented.
+# No [[events]] / [[startup]]: inventory and probe are explicit
+# invocations. Issue #161 (parent #34, ADR-0028): read-only
+# inventory/probe only — machine add/remove/enable/disable is never
+# reimplemented.
+#
+# TUI surface (#247, contract herdr-plugins.tui/v1, ADR-0031/0032/0033):
+# `main` pane = machines browser (list + on-demand probe + capability
+# info; read-only — no mutating affordance); `open` action opens it in
+# a tab. CLI behavior is unchanged.
+
+[[panes]]
+id = "main"
+title = "Machines: inventory"
+description = "Saved machines browser: list with last-known probe state, on-demand probe (progress + cancel), plugin-surface support, capability info. Read-only."
+platforms = ["linux", "macos", "windows"]
+placement = "tab"
+command = ["bun", "run", "src/tui.ts", "main"]
+
+[[actions]]
+id = "open"
+title = "Machines: open inventory UI"
+description = "Open the machines inventory TUI in a new tab."
+contexts = ["pane", "workspace"]
+command = ["bun", "run", "src/tui.ts", "open"]

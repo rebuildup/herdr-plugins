@@ -27,13 +27,22 @@ An external client resolves the CLI as follows:
 3. Alternatively invoke manifest actions (`settle`/`restore`/`snooze`) via
    `plugin.action.invoke` for focused-pane operations without arguments.
 
+Since plugin v0.7.0 (#237) the plugin also ships an interactive terminal
+surface under `herdr-plugins.tui/v1`: pane entrypoint `main`
+(`[[panes]]`, placement `tab`) plus action `open`, which opens the
+inbox browser via `plugin.pane.open`. The TUI is a view over this same
+CLI contract — it performs no writes of its own, keeps the origin
+context pinned at launch, revalidates agent generation before every
+mutation, gates every mutation behind confirmation, and never runs
+`reconcile` implicitly on open. See `docs/contracts/tui-v1.md`.
+
 `capability` returns machine-readable discovery:
 
 ```json
 {
   "contract": "herdr-plugins.inbox/v1",
   "plugin": "rebuildup.inbox",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "commands": [
     "list", "settle", "snooze", "restore",
     "pin", "unpin", "archive", "unarchive", "order",
@@ -46,7 +55,8 @@ An external client resolves the CLI as follows:
     "link", "unlink",
     "reconcile", "watch", "watch-pr"
   ],
-  "actions": ["settle", "restore", "snooze", "pin", "unpin", "archive", "unarchive"],
+  "actions": ["open", "settle", "restore", "snooze", "pin", "unpin", "archive", "unarchive"],
+  "tui": { "contract": "herdr-plugins.tui/v1", "entrypoint": "main", "action": "open" },
   "events": ["pane.agent_status_changed", "pane.closed"],
   "startup": ["reconcile"],
   "state_file": "…",

@@ -10,6 +10,8 @@ Issue #22 (Program: T3 Code 機能の最大化と herdr エコシステムへの
 | --- | --- |
 | `docs/program/feature-ledger.json` | 機械可読台帳 (schema_version 1.0.0) |
 | `docs/program/README.md` | 本ファイル。索引・依存グラフ・リリース計画 |
+| `docs/program/tui-coverage.json` / `tui-coverage.md` | #228 TUI program のコマンド単位 CLI/TUI/GUI/実機/upstream-gap 台帳 (機械可読 + 人間向け索引) |
+| `docs/contracts/tui-v1.md` | TUI surface の規範契約 (`herdr-plugins.tui/v1`)。#230–#233 が実装する基準 |
 | `docs/research/t3code-feature-inventory.md` | 初期調査の履歴 (正本は本ディレクトリ) |
 
 ### 台帳スキーマ (`schema_version: "1.0.0"`)
@@ -17,6 +19,9 @@ Issue #22 (Program: T3 Code 機能の最大化と herdr エコシステムへの
 - `pinned_revisions`: 上流照合基準。T3 Code は `9cc4018c`、本リポジトリは
   台帳作成時点の `release-0-2-0` HEAD を記録する。
 - `classification_legend`: 分類の定義 (JSON 内にも同内容を保持)。
+- `tui_coverage` (optional top-level pointer, #228): TUI program の台帳・
+  契約・設計 ADR への参照。機能の TUI/GUI 状態は `feature-ledger` の
+  classification とは別軸で `tui-coverage.json` が正本。
 - `features[]`: 機能エリアごとのエントリ。
   - `id`: 台帳内一意 ID (依存グラフのノード名)。
   - `title_ja`: 日本語タイトル。
@@ -104,6 +109,8 @@ Issue 番号ベースの直列・blocked-by 関係 (release-0-2-0):
 | release-0-7-0 | #30, #31, #32, #135-#147 | `mcp-outside-agents`, `artifacts-snapshots`, `automations` | 実装完了・リリース承認待ち。実機検証: `mcp-v1-live-verification.md`, `artifacts-v1-live-verification.md`, `automations-t4-live-verification.md`。automations webhook は upstream gap (ADR-0026、filing deferred) として契約 v1 で確定 — リリース済み v0.7.0 (tag `v0.7.0`, PR #163) |
 | release-0-8-0 | #34, #160, #161, #167 | `secrets-remote-devices` 棚卸し・責務割当 + 残差 `rebuildup.secrets` / `rebuildup.machines` | 実装完了・RC 検証済み (macOS/herdr 0.9.5, `rc-0-8-0-verification.md`, audit 境界違反なし)・リリース承認待ち。upstream-blocked/out-of-scope 残差は台帳 `secrets-remote-devices` の verification に記録 — リリース済み v0.8.0 (tag `v0.8.0`, PR #169。公開前修正: #209/#199/#211) |
 | release-0-9-0 | #25, #33, #60, #70, #132, #7, #171-#186, #214 | `forge-github` 拡張 (git v0.6.0: PR read/mutation/merge + issue surface + pane links), `inbox-extensions` (inbox v0.5.0: pin/archive/order/search/links/transitions/watch-pr), `project-scripts`+`projects-multi-repo` (projects v0.4.0: runOnWorktreeCreate/runOnSettle/stopOnSettle triggers + repo↔worktree read association), `text-generation` (#186 JSON 耐性) | 実装完了・RC 検証済み (macOS/herdr 0.9.5, `rc-0-9-0-verification.md`, audit で O1 軽微指摘のみ)・リリース承認待ち。残差: 実 forge mutation 未実施 (契約テスト証跡)・#209/#211・Linux/Windows 未検証 — リリース済み v0.9.0 (tag `v0.9.0`, PR #217。公開前修正: #216/O2 + 0-8.0 propagation) |
+| release-0-10-0 | #221, #222, #224 | capability `mutation_commands` 告知統一 + tests Windows fixture 隔離 | 実装済み (release-0-10-0 tip が TUI train の base) |
+| release-0-11-0 | #228-#234 | `tui-first-class`: 全14 plugin の TUI 利用面 (foundation #229 → #230-#233 → RC #234) | 設計確定 (#229): ADR-0031/0032/0033 + `docs/contracts/tui-v1.md` + `docs/program/tui-coverage.json`。実装これから |
 | 上流待ち | #8, #9 | `attention-granularity`, `agent-view-namespacing` | upstream Issue 候補 |
 | 責務外 | — | `client-polish-misc`, `execution-runtime` | out-of-scope |
 | 後続検討 | #25 残差 | `forge-non-github` | GitHub 基盤 (#39) 後に Forge 別分解 |

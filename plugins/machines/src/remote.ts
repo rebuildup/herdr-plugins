@@ -43,7 +43,22 @@ export interface RunResult {
   timedOut: boolean;
 }
 
-export type HerdrRunner = (args: string[], options: { timeoutMs: number }) => Promise<RunResult>;
+/**
+ * Explicit local-herdr target parsed from `--socket PATH` / `--session
+ * NAME` CLI flags. The `herdr` CLI has no target flags of its own — the
+ * equivalent knobs are the `HERDR_SOCKET_PATH` / `HERDR_SESSION` env
+ * vars (upstream precedence `HERDR_SOCKET_PATH` > `HERDR_SESSION` >
+ * default), which `spawnHerdr` injects into each child.
+ */
+export interface HerdrTarget {
+  socketPath?: string;
+  session?: string;
+}
+
+export type HerdrRunner = (
+  args: string[],
+  options: { timeoutMs: number; target?: HerdrTarget | undefined },
+) => Promise<RunResult>;
 
 /** Ambient herdr vars that must never leak into remote CLI children. */
 const STRIPPED_ENV = new Set([
@@ -61,16 +76,35 @@ export function herdrBin(): string {
 }
 
 /**
+ * Environment for a spawned `herdr` CLI child: ambient `HERDR_*`
+ * context stripped (ADR-0020 rule 1), then explicit `--socket` /
+ * `--session` flags re-injected as `HERDR_SOCKET_PATH` / `HERDR_SESSION`
+ * — the flag > env > default resolution order. When both flags are
+ * given both vars are set and herdr's own precedence
+ * (`HERDR_SOCKET_PATH` > `HERDR_SESSION`) applies.
+ */
+export function herdrChildEnv(target?: HerdrTarget): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value === undefined || STRIPPED_ENV.has(key)) continue;
+    env[key] = value;
+  }
+  if (target?.socketPath !== undefined) {
+    env.HERDR_SOCKET_PATH = target.socketPath;
+  }
+  if (target?.session !== undefined) {
+    env.HERDR_SESSION = target.session;
+  }
+  return env;
+}
+
+/**
  * Spawn the local `herdr` CLI. Each remote call is a fresh process: the
  * `--machine` bridge lifetime is bound to the CLI invocation upstream.
  */
 export const spawnHerdr: HerdrRunner = (args, options) =>
   new Promise((resolve) => {
-    const env: Record<string, string> = {};
-    for (const [key, value] of Object.entries(process.env)) {
-      if (value === undefined || STRIPPED_ENV.has(key)) continue;
-      env[key] = value;
-    }
+    const env = herdrChildEnv(options.target);
     const child = spawn(herdrBin(), args, {
       env,
       stdio: ["ignore", "pipe", "pipe"],
@@ -143,9 +177,10 @@ async function runRemote(
   selector: string,
   cliArgs: string[],
   timeoutMs: number,
+  target?: HerdrTarget,
 ): Promise<unknown> {
   const args = ["--machine", selector, ...cliArgs];
-  const run = await runner(args, { timeoutMs });
+  const run = await runner(args, { timeoutMs, target });
   if (run.timedOut) {
     throw new RemoteError(
       `herdr --machine ${selector} ${cliArgs.join(" ")} timed out after ${timeoutMs}ms`,
@@ -186,9 +221,13 @@ export const DEFAULT_CALL_TIMEOUT_MS = 45_000;
  * RemoteError(`machine_list_failed`) on any failure — an inventory that
  * cannot enumerate must fail honestly, never return a partial guess.
  */
-export async function listMachines(runner: HerdrRunner = spawnHerdr): Promise<MachineEntry[]> {
+export async function listMachines(
+  runner: HerdrRunner = spawnHerdr,
+  target?: HerdrTarget,
+): Promise<MachineEntry[]> {
   const run = await runner(["machine", "list", "--json"], {
     timeoutMs: DEFAULT_CALL_TIMEOUT_MS,
+    target,
   });
   if (run.code !== 0) {
     throw new RemoteError(
@@ -349,6 +388,7 @@ async function probePluginSurface(
   runner: HerdrRunner,
   machine: MachineEntry,
   probe: MachineProbe,
+  target?: HerdrTarget,
 ): Promise<void> {
   try {
     const result = await runRemote(
@@ -356,6 +396,7 @@ async function probePluginSurface(
       machine.id,
       ["plugin", "list", "--json"],
       DEFAULT_CALL_TIMEOUT_MS,
+      target,
     );
     const record = asRecord(result);
     if (!Array.isArray(record.plugins)) {
@@ -379,9 +420,10 @@ async function probePluginSurface(
  */
 export async function probeMachineEntry(
   machine: MachineEntry,
-  deps: { runner?: HerdrRunner } = {},
+  deps: { runner?: HerdrRunner; target?: HerdrTarget | undefined } = {},
 ): Promise<MachineProbe> {
   const runner = deps.runner ?? spawnHerdr;
+  const target = deps.target;
   const probedAt = new Date().toISOString();
   if (!machine.enabled) {
     return probeShell(machine, "disabled", probedAt);
@@ -389,7 +431,13 @@ export async function probeMachineEntry(
 
   let result: unknown;
   try {
-    result = await runRemote(runner, machine.id, ["api", "snapshot"], DEFAULT_CALL_TIMEOUT_MS);
+    result = await runRemote(
+      runner,
+      machine.id,
+      ["api", "snapshot"],
+      DEFAULT_CALL_TIMEOUT_MS,
+      target,
+    );
   } catch (err) {
     return classifySnapshotError(machine, err);
   }
@@ -400,7 +448,7 @@ export async function probeMachineEntry(
   probe.server_version = typeof rawSnapshot.version === "string" ? rawSnapshot.version : null;
   probe.protocol = typeof rawSnapshot.protocol === "number" ? rawSnapshot.protocol : null;
 
-  await probePluginSurface(runner, machine, probe);
+  await probePluginSurface(runner, machine, probe, target);
   return probe;
 }
 
@@ -411,12 +459,13 @@ export async function probeMachineEntry(
  */
 export async function probeMachine(
   selector: string,
-  deps: { runner?: HerdrRunner; machines?: MachineEntry[] } = {},
+  deps: { runner?: HerdrRunner; machines?: MachineEntry[]; target?: HerdrTarget | undefined } = {},
 ): Promise<MachineProbe> {
   const runner = deps.runner ?? spawnHerdr;
-  const machines = deps.machines ?? (await listMachines(runner));
+  const target = deps.target;
+  const machines = deps.machines ?? (await listMachines(runner, target));
   const machine = resolveMachine(selector, machines);
-  return probeMachineEntry(machine, { runner });
+  return probeMachineEntry(machine, { runner, target });
 }
 
 /**
@@ -425,13 +474,14 @@ export async function probeMachine(
  * no correctness gain.
  */
 export async function probeAllMachines(
-  deps: { runner?: HerdrRunner; machines?: MachineEntry[] } = {},
+  deps: { runner?: HerdrRunner; machines?: MachineEntry[]; target?: HerdrTarget | undefined } = {},
 ): Promise<MachineProbe[]> {
   const runner = deps.runner ?? spawnHerdr;
-  const machines = deps.machines ?? (await listMachines(runner));
+  const target = deps.target;
+  const machines = deps.machines ?? (await listMachines(runner, target));
   const probes: MachineProbe[] = [];
   for (const machine of machines) {
-    probes.push(await probeMachineEntry(machine, { runner }));
+    probes.push(await probeMachineEntry(machine, { runner, target }));
   }
   return probes;
 }

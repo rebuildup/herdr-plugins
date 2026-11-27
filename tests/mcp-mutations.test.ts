@@ -432,7 +432,7 @@ describe("rebuildup.mcp mutation surface (T3, #139)", () => {
       expect(prompt).toBeDefined();
       expect(prompt?.params.text).toBe("run the tests");
       expect(prompt?.params.target).toBe("pane-1");
-      expect((prompt?.params.wait as { until?: string[] }).until).toEqual(["idle"]);
+      expect(((prompt?.params.wait ?? {}) as { until?: string[] }).until).toEqual(["idle"]);
     } finally {
       await client.close();
       await fake.close();

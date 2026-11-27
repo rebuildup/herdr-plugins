@@ -163,7 +163,7 @@ describe("inbox contract v1 (pin/archive/order)", () => {
     const list0 = await cli(["list"]);
     expect(list0.status).toBe(0);
     expect(list0.json?.contract).toBe("herdr-plugins.inbox/v1");
-    expect((list0.json?.counts as Record<string, number>).inbox).toBe(3);
+    expect(((list0.json?.counts ?? {}) as Record<string, number>).inbox).toBe(3);
 
     // Pin p2: stays in inbox, sorts first, counts.pinned = 1.
     const pin = await cli(["pin", "w1:p2"]);
@@ -175,7 +175,7 @@ describe("inbox contract v1 (pin/archive/order)", () => {
     const items1 = list1.json?.items as Array<Record<string, unknown>>;
     expect(items1[0]?.pane_id).toBe("w1:p2");
     expect(items1[0]?.pinned).toBe(true);
-    expect((list1.json?.counts as Record<string, number>).pinned).toBe(1);
+    expect(((list1.json?.counts ?? {}) as Record<string, number>).pinned).toBe(1);
 
     // Archive p3: hidden from default view, organize.kind = archived.
     const archive = await cli(["archive", "w1:p3"]);
@@ -186,8 +186,8 @@ describe("inbox contract v1 (pin/archive/order)", () => {
     const p3 = itemByPane(list2.json as Record<string, unknown>, "w1:p3");
     expect(p3?.in_inbox).toBe(false);
     expect(p3?.organize).toMatchObject({ kind: "archived" });
-    expect((list2.json?.counts as Record<string, number>).inbox).toBe(2);
-    expect((list2.json?.counts as Record<string, number>).archived).toBe(1);
+    expect(((list2.json?.counts ?? {}) as Record<string, number>).inbox).toBe(2);
+    expect(((list2.json?.counts ?? {}) as Record<string, number>).archived).toBe(1);
 
     // Unarchive returns it.
     const unarchive = await cli(["unarchive", "w1:p3"]);
@@ -203,7 +203,9 @@ describe("inbox contract v1 (pin/archive/order)", () => {
     expect(order.json?.order).toBe(0);
 
     const list4 = await cli(["list"]);
-    const visible = (list4.json?.items as Array<Record<string, unknown>>).filter((i) => i.in_inbox);
+    const visible = ((list4.json?.items ?? []) as Array<Record<string, unknown>>).filter(
+      (i) => i.in_inbox,
+    );
     // p2 pinned first; p1 ordered before p3.
     expect(visible.map((i) => i.pane_id)).toEqual(["w1:p2", "w1:p1", "w1:p3"]);
 
@@ -218,7 +220,7 @@ describe("inbox contract v1 (pin/archive/order)", () => {
     await cli(["restore", "w1:p2"]);
     await cli(["restore", "w1:p1"]);
     const list5 = await cli(["list"]);
-    expect((list5.json?.counts as Record<string, number>).pinned).toBe(0);
+    expect(((list5.json?.counts ?? {}) as Record<string, number>).pinned).toBe(0);
   });
 
   test("attention is never hidden by pin/archive/settle/snooze", async () => {
@@ -314,19 +316,19 @@ describe("inbox contract v1 (filters and tracker links)", () => {
 
   const cli = (args: string[]) => runCli([...args, "--socket", herdr.socketPath], env);
   const paneIds = (json: Record<string, unknown> | null) =>
-    (json?.items as Array<Record<string, unknown>>).map((i) => i.pane_id);
+    ((json?.items ?? []) as Array<Record<string, unknown>>).map((i) => i.pane_id);
 
   test("list filters: attention/organize/search/workspace, read-only", async () => {
     const all = await cli(["list"]);
     expect(all.status).toBe(0);
     expect(paneIds(all.json).sort()).toEqual(["w1:p1", "w1:p2", "w2:p9"]);
-    expect((all.json?.filters as Record<string, unknown>).attention).toBe(false);
+    expect(((all.json?.filters ?? {}) as Record<string, unknown>).attention).toBe(false);
 
     // Organize p2, then filter by kind.
     await cli(["settle", "w1:p2"]);
     const settled = await cli(["list", "--organize", "settled"]);
     expect(paneIds(settled.json)).toEqual(["w1:p2"]);
-    expect((settled.json?.counts as Record<string, number>).total).toBe(1);
+    expect(((settled.json?.counts ?? {}) as Record<string, number>).total).toBe(1);
 
     const none = await cli(["list", "--organize", "none"]);
     expect(paneIds(none.json).sort()).toEqual(["w1:p1", "w2:p9"]);
@@ -384,35 +386,35 @@ describe("inbox contract v1 (filters and tracker links)", () => {
     const link = await cli(["link", "w1:p1", "--pr", "owner/repo#42"]);
     expect(link.status).toBe(0);
     expect(link.json?.command).toBe("link");
-    expect((link.json?.links as unknown[]).length).toBe(1);
+    expect(((link.json?.links ?? []) as unknown[]).length).toBe(1);
 
     const linkIssue = await cli(["link", "w1:p1", "--issue", "owner/repo#7"]);
     expect(linkIssue.status).toBe(0);
-    expect((linkIssue.json?.links as unknown[]).length).toBe(2);
+    expect(((linkIssue.json?.links ?? []) as unknown[]).length).toBe(2);
 
     // list exposes links additively; counts.linked reflects them.
     const list = await cli(["list"]);
     const p1 = itemByPane(list.json as Record<string, unknown>, "w1:p1");
-    expect((p1?.links as Array<Record<string, unknown>>).map((l) => l.ref).sort()).toEqual([
+    expect(((p1?.links ?? []) as Array<Record<string, unknown>>).map((l) => l.ref).sort()).toEqual([
       "owner/repo#42",
       "owner/repo#7",
     ]);
-    expect((list.json?.counts as Record<string, number>).linked).toBe(1);
+    expect(((list.json?.counts ?? {}) as Record<string, number>).linked).toBe(1);
 
     // links command reads stored state.
     const links = await cli(["links", "w1:p1"]);
     expect(links.status).toBe(0);
-    expect((links.json?.links as unknown[]).length).toBe(2);
+    expect(((links.json?.links ?? []) as unknown[]).length).toBe(2);
 
     // Re-link same ref is idempotent (re-validation), not a duplicate.
     const relink = await cli(["link", "w1:p1", "--pr", "owner/repo#42"]);
-    expect((relink.json?.links as unknown[]).length).toBe(2);
+    expect(((relink.json?.links ?? []) as unknown[]).length).toBe(2);
 
     // unlink removes exactly the matching ref.
     const unlink = await cli(["unlink", "w1:p1", "--issue", "owner/repo#7"]);
     expect(unlink.status).toBe(0);
     expect((unlink.json?.removed as Record<string, unknown>)?.ref).toBe("owner/repo#7");
-    expect((unlink.json?.links as unknown[]).length).toBe(1);
+    expect(((unlink.json?.links ?? []) as unknown[]).length).toBe(1);
 
     // Honest errors: unknown pane, missing link, bad ref, ambiguous kind.
     const noPane = await cli(["link", "w9:p9", "--pr", "owner/repo#1"]);
@@ -435,8 +437,8 @@ describe("inbox contract v1 (filters and tracker links)", () => {
       "--verify",
     ]);
     expect(verified.status).toBe(0);
-    expect((verified.json?.warnings as string[]).length).toBeGreaterThan(0);
-    expect((verified.json?.links as unknown[]).length).toBe(1);
+    expect(((verified.json?.warnings ?? []) as string[]).length).toBeGreaterThan(0);
+    expect(((verified.json?.links ?? []) as unknown[]).length).toBe(1);
     await cli(["unlink", "w1:p2", "--pr", "definitely-not-a-real-owner-zzz/repo#1"]);
   });
 
@@ -462,7 +464,7 @@ describe("inbox contract v1 (filters and tracker links)", () => {
     // as the explicit re-validation path after staleness.
     const relink = await cli(["link", "w1:p1", "--pr", "owner/repo#42"]);
     expect(relink.status).toBe(0);
-    expect((relink.json?.links as unknown[]).length).toBe(1);
+    expect(((relink.json?.links ?? []) as unknown[]).length).toBe(1);
     await cli(["unlink", "w1:p1", "--pr", "owner/repo#42"]);
 
     // Restore clears organize state but keeps declared links.
@@ -470,7 +472,7 @@ describe("inbox contract v1 (filters and tracker links)", () => {
     await cli(["settle", "w1:p2"]);
     await cli(["restore", "w1:p2"]);
     const linksAfter = await cli(["links", "w1:p2"]);
-    expect((linksAfter.json?.links as unknown[]).length).toBe(1);
+    expect(((linksAfter.json?.links ?? []) as unknown[]).length).toBe(1);
     await cli(["unlink", "w1:p2", "--issue", "owner/repo#9"]);
   });
 
@@ -522,16 +524,21 @@ process.exit(0);
       installStub(ghBin, { name: "gh", posix: GH_VERIFY_POSIX, windows: GH_VERIFY_TS });
 
       // Ambient poison vars that ghChildEnv must strip before spawn.
-      const verifyEnv: Record<string, string> = {
-        ...env,
-        PATH: `${ghBin}${path.delimiter}${envValue(env, "PATH") ?? ""}`,
-        GH_DEBUG: "api",
-        GH_REPO: "evil/repo",
-        GH_FORCE_TTY: "1",
-        GIT_DIR: "/tmp/poison-git-dir",
-        GIT_CONFIG_COUNT: "1",
-        GIT_CONFIG_PARAMETERS: "'core.sshCommand=evil'",
-      };
+      // Windows env keys are case-insensitive: `env` may carry "Path"
+      // while the literal below adds "PATH" — a duplicate-key env block
+      // lets the real gh win over the stub. Drop case variants first
+      // (issue #266).
+      const verifyEnv: Record<string, string> = { ...env };
+      for (const key of Object.keys(verifyEnv)) {
+        if (key !== "PATH" && key.toLowerCase() === "path") delete verifyEnv[key];
+      }
+      verifyEnv.PATH = `${ghBin}${path.delimiter}${envValue(env, "PATH") ?? ""}`;
+      verifyEnv.GH_DEBUG = "api";
+      verifyEnv.GH_REPO = "evil/repo";
+      verifyEnv.GH_FORCE_TTY = "1";
+      verifyEnv.GIT_DIR = "/tmp/poison-git-dir";
+      verifyEnv.GIT_CONFIG_COUNT = "1";
+      verifyEnv.GIT_CONFIG_PARAMETERS = "'core.sshCommand=evil'";
       const runVerify = (extra: Record<string, string>) =>
         runCli(
           ["link", "w1:p1", "--pr", "owner/repo#216", "--verify", "--socket", herdr.socketPath],
@@ -544,7 +551,7 @@ process.exit(0);
       const ok = await runVerify({});
       expect(ok.status).toBe(0);
       expect(ok.json?.warnings).toEqual([]);
-      expect((ok.json?.links as unknown[]).length).toBeGreaterThan(0);
+      expect(((ok.json?.links ?? []) as unknown[]).length).toBeGreaterThan(0);
 
       // Failing gh: its stderr carries a credential marker that must
       // never reach warnings[] (or anywhere in the JSON payload).
@@ -556,7 +563,7 @@ process.exit(0);
       expect(JSON.stringify(bad.json)).not.toContain("credential-marker");
       expect(JSON.stringify(bad.json)).not.toContain("env-leak-marker");
       // The link is still recorded — verification never blocks.
-      expect((bad.json?.links as unknown[]).length).toBeGreaterThan(0);
+      expect(((bad.json?.links ?? []) as unknown[]).length).toBeGreaterThan(0);
 
       await cli(["unlink", "w1:p1", "--pr", "owner/repo#216"]);
     } finally {

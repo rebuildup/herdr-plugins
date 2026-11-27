@@ -1,0 +1,5 @@
+# Force LF line endings on checkout for every platform. The repo is
+# TypeScript/JSON/TOML-only (no CRLF-dependent scripts); without this,
+# Windows clones with core.autocrlf=true produce CRLF working trees that
+# fail `bun run lint` (biome formatter expects LF).
+* text=auto eol=lf

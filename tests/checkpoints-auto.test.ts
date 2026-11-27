@@ -43,6 +43,10 @@ function git(cwd: string, args: string[]): string {
 function initRepo(): string {
   const dir = realpathSync(tempDir());
   git(dir, ["init", "-b", "main"]);
+  // Pin LF checkout semantics: a developer/CI gitconfig with
+  // core.autocrlf=true (the Windows default) would rewrite worktree
+  // bytes to CRLF and break the byte-exact restore assertions (#266).
+  git(dir, ["config", "core.autocrlf", "false"]);
   git(dir, ["config", "user.email", "test@example.com"]);
   git(dir, ["config", "user.name", "Test"]);
   writeFileSync(path.join(dir, "a.txt"), "one\n");
@@ -554,6 +558,49 @@ describe("checkpoints auto-capture", () => {
     expect(Date.now() - started).toBeLessThan(10_000);
     // No snapshot → no mark recorded, no state corruption.
     expect(existsSync(stateFile())).toBe(false);
+  });
+
+  t("--no-drain skips the lazy pending-capture drain on reads (#242 TUI)", () => {
+    useStateDir();
+    // Seed a pending mark directly: unreachable session means a normal
+    // `list` reports session_unreachable and leaves the mark pending.
+    const key = sessionKeyFor({ socketPath: DEAD_SOCKET });
+    writeFileSync(
+      stateFile(),
+      `${JSON.stringify(
+        {
+          version: 1,
+          checkpoints: {},
+          auto: {
+            [key]: {
+              "w1:p1": {
+                last_status: "idle",
+                pending: {
+                  status: "idle",
+                  seq: 1,
+                  agent_session: null,
+                  recorded_at: new Date().toISOString(),
+                },
+              },
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    // Control: a normal read drains (attempts to) and reports it.
+    const drained = runCli(["list"]);
+    expect(drained.status).toBe(0);
+    const autoReport = drained.json?.auto_captures as Record<string, unknown> | undefined;
+    expect(autoReport?.session_unreachable).toBe(true);
+
+    // --no-drain: no drain attempt, no auto_captures field, mark intact.
+    const nodrain = runCli(["list", "--no-drain"]);
+    expect(nodrain.status).toBe(0);
+    expect(nodrain.json?.auto_captures).toBeUndefined();
+    expect(autoEntriesFor(DEAD_SOCKET)["w1:p1"]?.pending).toBeDefined();
   });
 });
 

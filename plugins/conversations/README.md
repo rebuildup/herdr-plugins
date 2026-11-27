@@ -81,3 +81,30 @@ bun run src/cli.ts show <event-id|tool:ID|turn:N> [--pane PANE] [--session-id ID
 
 Full contract: `docs/contracts/conversations-v1.md`.
 Spec: `docs/specs/conversations.md`. Design: ADR-0012.
+
+## Interactive TUI
+
+A read-mostly browser for the indexed transcripts, per
+`docs/contracts/tui-v1.md` (ADR-0031/0032/0033):
+
+```bash
+herdr plugin pane open --plugin rebuildup.conversations --entrypoint main --placement tab
+# or via the action:
+herdr plugin action invoke rebuildup.conversations.open
+```
+
+Opening performs reads only (`capability` + `sessions`). Keys:
+
+| key | action |
+| --- | --- |
+| `↑↓/jk`, `pgup/pgdn` | move / page |
+| `/` | filter sessions |
+| `enter` | session history (paged events) |
+| `s` | search all indexed sessions |
+| `i` | reindex — gated on `capability.mutation_commands`, confirm dialog required |
+| `r` | reload sessions |
+| `?`/`h`, `esc`/`q`, `ctrl+c` | help / back / cancel-exit (reserved) |
+
+The `open` action places the UI in a `tab` via `plugin.pane.open`
+(`HERDR_BIN_PATH`) and returns immediately; it never blocks on the UI.
+Non-TTY invocations print the CLI equivalent and exit.

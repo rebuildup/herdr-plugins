@@ -20,7 +20,7 @@ import {
   updateState,
 } from "../plugins/projects/src/state";
 import { installStub } from "./helpers/stub-bin";
-import { joinPathEnv, pathEnvValue, testEnv } from "./helpers/test-env";
+import { joinPathEnv, normalizePath, pathEnvValue, testEnv } from "./helpers/test-env";
 
 const dirs: string[] = [];
 const savedStateDir = process.env.HERDR_PLUGIN_STATE_DIR;
@@ -164,9 +164,12 @@ describe("discoverRepos", () => {
 
     const { repos, skipped } = await discoverRepos([repoA, repoB, notGit, repoA], state);
     expect(repos).toHaveLength(2);
-    const byRoot = new Map(repos.map((r) => [r.root, r]));
-    expect(byRoot.get(repoA)?.registered_project_id).toBe("existing");
-    expect(byRoot.get(repoB)?.registered_project_id).toBeNull();
+    // `root` comes from `git rev-parse --show-toplevel` (forward slashes on
+    // Windows) while initRepo returns realpathSync (backslashes) — compare
+    // canonicalized (#266).
+    const byRoot = new Map(repos.map((r) => [normalizePath(r.root), r]));
+    expect(byRoot.get(normalizePath(repoA))?.registered_project_id).toBe("existing");
+    expect(byRoot.get(normalizePath(repoB))?.registered_project_id).toBeNull();
     expect(skipped).toEqual([{ cwd: notGit, reason: "not_a_repo" }]);
   });
 });
@@ -214,7 +217,9 @@ function runCli(args: string[]): CliResult {
       HERDR_PLUGIN_STATE_DIR: process.env.HERDR_PLUGIN_STATE_DIR,
       HERDR_PLUGIN_CONFIG_DIR: process.env.HERDR_PLUGIN_CONFIG_DIR,
     }),
-    timeout: 15_000,
+    // 30s: `repos list` runs live per-repo git probes; on Windows each
+    // spawned CLI/git call is far slower than POSIX (#266).
+    timeout: 30_000,
   });
   let json: Record<string, unknown> | null = null;
   let error: Record<string, unknown> | null = null;
@@ -262,7 +267,7 @@ describe("cli mutations", () => {
     expect(list.map((p) => p.id)).toContain(project.id);
     const show = expectOk(runCli(["show", project.id])).project as Project;
     expect(show.title).toBe(project.title);
-  });
+  }, 60_000);
 
   test("register rejects duplicate repo root and duplicate explicit id", () => {
     useStateDir();
@@ -274,7 +279,7 @@ describe("cli mutations", () => {
     // A nonexistent path surfaces as a structured git error, not a crash.
     const missing = runCli(["register", repoA.replace(/[^/]+$/, "other")]);
     expect(missing.status).toBe(1);
-  });
+  }, 60_000);
 
   test("update title/pin/archive and repo add/remove", () => {
     useStateDir();
@@ -298,7 +303,7 @@ describe("cli mutations", () => {
     const other = expectOk(runCli(["register", repoB, "--id", "other"])).project as Project;
     expect(other.id).toBe("other");
     expectErr(runCli(["update", id, "--repo-add", repoB]), "repo_already_registered");
-  });
+  }, 60_000);
 
   test("archive hides from list unless --all; unarchive restores", () => {
     useStateDir();
@@ -319,7 +324,7 @@ describe("cli mutations", () => {
     expectOk(runCli(["unarchive", id]));
     expect(expectOk(runCli(["list"])).projects as Project[]).toHaveLength(1);
     expectErr(runCli(["pin", "nope"]), "project_not_found");
-  });
+  }, 60_000);
 
   test("settings set/get/unset with allow-list enforcement", () => {
     useStateDir();
@@ -345,7 +350,7 @@ describe("cli mutations", () => {
     const after = expectOk(runCli(["settings", "get", id, "defaultProjectScripts"]));
     expect(after.value).toBeNull();
     expect(SETTINGS_ALLOW_LIST.has("display.title")).toBe(true);
-  });
+  }, 60_000);
 
   test("register rejects non-git path and invalid id", () => {
     useStateDir();
@@ -353,7 +358,7 @@ describe("cli mutations", () => {
     expectErr(runCli(["register", notGit]), "not_a_repo");
     const repo = initRepo();
     expect(runCli(["register", repo, "--id", "Bad ID!"]).status).toBe(2);
-  });
+  }, 60_000);
 });
 
 // --- repos membership / listing (#51) --------------------------------------
@@ -406,7 +411,7 @@ describe("repos add/remove/list", () => {
     // Missing --path / project is a usage error (exit 2).
     expect(runCli(["repos", "add", id]).status).toBe(2);
     expect(runCli(["repos", "list"]).status).toBe(2);
-  });
+  }, 60_000);
 
   test("repos add rejects non-git paths and cross-project ownership", () => {
     useStateDir();
@@ -419,7 +424,7 @@ describe("repos add/remove/list", () => {
     expectErr(runCli(["repos", "add", idA, "--path", repoB]), "repo_already_registered");
     expectErr(runCli(["repos", "add", "ghost", "--path", repoA]), "project_not_found");
     expect(idB).toBe("b");
-  });
+  }, 60_000);
 
   test("unreachable member repo is skipped, never fabricated", () => {
     useStateDir();
@@ -436,7 +441,7 @@ describe("repos add/remove/list", () => {
     expect(repos[0]?.has_submodules).toBeNull();
     expect(skipped).toHaveLength(1);
     expect((skipped[0] as { root: string }).root).toBe(root);
-  });
+  }, 60_000);
 });
 
 describe("repository identity grouping (#51)", () => {
@@ -457,7 +462,7 @@ describe("repository identity grouping (#51)", () => {
       "github.com/Octo/Widgets",
       "github.com/Octo/Widgets",
     ]);
-  });
+  }, 60_000);
 
   test("linked worktree checkout joins the same project with shared identity", () => {
     useStateDir();
@@ -477,7 +482,7 @@ describe("repository identity grouping (#51)", () => {
     const { repos } = reposList(id);
     const wtEntry = repos.find((r) => r.root === realpathSync(wt));
     expect(wtEntry?.branch).toBe("feature");
-  });
+  }, 60_000);
 
   test("same-name repos and non-git folders stay isolated", () => {
     useStateDir();
@@ -511,7 +516,7 @@ describe("repository identity grouping (#51)", () => {
     expect(reposList(idB).repos).toHaveLength(1);
     const { repos: reposA } = reposList(idA);
     expect(reposA[0]?.remote).toBeNull(); // no remote: identity falls back to root
-  });
+  }, 60_000);
 });
 
 describe("submodule detection", () => {
@@ -528,7 +533,7 @@ describe("submodule detection", () => {
 
     const plain = await inspectRepo(realpathSync(initRepo()));
     expect(plain.has_submodules).toBe(false);
-  });
+  }, 60_000);
 
   test("inspectRepo reports has_submodules null when the probe fails", async () => {
     const repo = initRepo();
@@ -564,5 +569,5 @@ if (args[0] === "submodule") {
       if (savedPath === undefined) delete process.env.PATH;
       else process.env.PATH = savedPath;
     }
-  });
+  }, 60_000);
 });

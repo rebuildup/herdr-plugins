@@ -4,6 +4,11 @@ One Markdown document per plugin contract. Contracts are versioned;
 breaking changes require a new contract id (`/v2`), additive fields
 and commands extend v1 in place.
 
+Cross-plugin surface contracts that are not tied to a single plugin's
+data live here too: `tui-v1.md` (`herdr-plugins.tui/v1`) is the shared
+interactive-terminal-surface contract for program #228 (ADRs
+0031–0033).
+
 ## Capability advertisement policy
 
 Every CLI plugin's `capability` document advertises its command

@@ -231,7 +231,7 @@ async function fakeHerdr(opts: {
             }
             pane.input = String(message.params?.text ?? "");
             inputs.push(pane.input);
-            const token = /__HERDR_DONE_(\S+?)__=\$\?/.exec(pane.input)?.[1];
+            const token = /__HERDR_DONE_(\S+?)__/.exec(pane.input)?.[1];
             if (token !== undefined) {
               pane.output = `${pane.input}\nfake script output\n__HERDR_DONE_${token}__=0\n`;
             }
@@ -443,7 +443,7 @@ describe("settle triggers: runOnSettle / stopOnSettle (#182)", () => {
     try {
       const reg = await runProjects(fx, ["register", repo]);
       expect(reg.status).toBe(0);
-      const projectId = (reg.json?.project as { id: string }).id;
+      const projectId = ((reg.json?.project ?? {}) as { id: string }).id;
 
       const settle = await runInbox(fx, ["settle", "w1:p1"]);
       expect(settle.status).toBe(0);
@@ -617,7 +617,7 @@ describe("settle triggers: runOnSettle / stopOnSettle (#182)", () => {
     try {
       const reg = await runProjects(fx, ["register", repo]);
       expect(reg.status).toBe(0);
-      const projectId = (reg.json?.project as { id: string }).id;
+      const projectId = ((reg.json?.project ?? {}) as { id: string }).id;
 
       // Craft three running run records directly (deterministic; no
       // marker wait). Same worktree+flag → stopped; other worktree →
