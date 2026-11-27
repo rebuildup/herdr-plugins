@@ -91,13 +91,21 @@ sessions were never touched):
   `pane.closed` envelopes exited 0 against the real socket.
 - `inbox tui` non-TTY fallback printed the plain list; PTY behavior
   covered by §5.
+- `herdr plugin install rebuildup/hoxay-plugins/plugins/inbox --ref 291`
+  — managed GitHub install resolved branch `291` → `c8155a0`; the
+  installed `bin/inbox` ran `capability`/`list` against the np291
+  session correctly.
+- Generation switching / rollback: uninstall + `--ref
+  0680de0ea169e65f7edb888949d1c2844eefc5a1` installed the earlier
+  native generation (three generation dirs retained under
+  `github-installations/`), its binary read the same `state.json`
+  fine, and reinstalling `--ref 291` moved forward again —
+  `plugin update rebuildup.inbox` then reported "already up to date".
 - `herdr plugin disable`/`enable rebuildup.inbox` toggled cleanly;
   invocations fail with `plugin_disabled` while disabled (independent
   lifecycle per AGENTS.md §4).
 
-Not exercised live: `plugin install`/`update` generations from GitHub
-(requires the branch to be pushed; `plugin link` covers the same
-manifest/argv surface), `watch-pr` against a real forge (covered by
+Not exercised live: `watch-pr` against a real forge (covered by
 contract tests with a stub `gh`), interactive TUI keys (PTY probe +
 contract tests only — same evidence level as the TS implementation had).
 
