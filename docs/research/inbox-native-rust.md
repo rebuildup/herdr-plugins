@@ -137,6 +137,12 @@ Notes:
   stall), which is why that one-line-class fix matters beyond the
   probe: any terminal that does not answer `ESC[6n` would have eaten a
   flat ~2 s on every launch.
+- Interactive key handling was exercised once via `tui-probe.py
+  --advance-*`: Enter at ~230 ms opened the item detail screen (PTY
+  output grew 1056 → 5440 bytes, clean exit). Full keymap coverage and
+  the screenshot/video + independent visual review required by the
+  acceptance criteria remain for human acceptance — this is why the PR
+  stays Draft.
 - The Rust TUI still draws every loop iteration (100 ms poll); output
   volume is small (≈1 KB/run in the probe) but a dirty-check is a
   possible follow-up, not a regression vs the TS renderer's behavior.
