@@ -17,9 +17,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use hoxay_herdr_client::commands::{
-    self, CallOptions, CommandError,
-};
+use hoxay_herdr_client::commands::{self, CallOptions, CommandError};
 use hoxay_herdr_client::dirs::plugin_dirs;
 use hoxay_herdr_client::snapshot::{PaneInfo, SessionSnapshot};
 use hoxay_herdr_client::target::{
@@ -29,22 +27,20 @@ use hoxay_herdr_client::target::{
 use serde_json::{json, Value};
 
 use crate::model::{
-    self, apply_inbox_filters, archive_pane, build_inbox, compute_order_ranks, link_pane,
-    pin_pane, prune_state, resolve_state, restore_pane, settle_pane,
-    snooze_pane, to_public_link, unarchive_pane, unlink_pane, unpin_pane, upsert_entry,
-    InboxFilters, InboxItem, OrderPlacement,
+    self, apply_inbox_filters, archive_pane, build_inbox, compute_order_ranks, link_pane, pin_pane,
+    prune_state, resolve_state, restore_pane, settle_pane, snooze_pane, to_public_link,
+    unarchive_pane, unlink_pane, unpin_pane, upsert_entry, InboxFilters, InboxItem, OrderPlacement,
 };
 use crate::pluginroot::{
-    gh_child_env, resolve_plugin_root, run_plugin_cli, PluginCliCallOptions,
-    PluginRootResolution,
+    gh_child_env, resolve_plugin_root, run_plugin_cli, PluginCliCallOptions, PluginRootResolution,
 };
 use crate::state::{
     self, load_state, remove_watch_link, session_entries, session_watch_read, update_state,
     InboxEntry, LinkKind, LinkWatch, PaneLink, PLUGIN_ID,
 };
 use crate::transitions::{
-    append_cleared_transitions, append_organize_transition, append_transition,
-    transition_context, TransitionContext, MAX_TRANSITIONS_PER_SESSION,
+    append_cleared_transitions, append_organize_transition, append_transition, transition_context,
+    TransitionContext, MAX_TRANSITIONS_PER_SESSION,
 };
 use crate::watchpr::{
     build_observation, collect_watch_targets, diff_observation, poll_backoff_ms,
@@ -131,7 +127,11 @@ pub fn parse_args(argv: &[String]) -> CliOptions {
             options.socket_path = Some(v.to_string());
             i += 1;
         } else if arg == "--timeout" {
-            options.timeout_ms = Some(parse_global_timeout(&take_global_value(&args, i, "--timeout")));
+            options.timeout_ms = Some(parse_global_timeout(&take_global_value(
+                &args,
+                i,
+                "--timeout",
+            )));
             i += 2;
         } else if let Some(v) = arg.strip_prefix("--timeout=") {
             options.timeout_ms = Some(parse_global_timeout(v));
@@ -169,7 +169,10 @@ impl CliOptions {
 // ---------------------------------------------------------------------------
 
 fn emit(payload: &Value) {
-    println!("{}", serde_json::to_string_pretty(payload).unwrap_or_default());
+    println!(
+        "{}",
+        serde_json::to_string_pretty(payload).unwrap_or_default()
+    );
 }
 
 fn emit_line(payload: &Value) {
@@ -360,7 +363,10 @@ fn validate_flags(args: &[String], spec: &HashMap<String, FlagKind>) -> Result<(
         };
         if *kind == FlagKind::Boolean {
             if eq.is_some() {
-                return Err(RunError::usage(format!("option {} does not take a value", name)));
+                return Err(RunError::usage(format!(
+                    "option {} does not take a value",
+                    name
+                )));
             }
             i += 1;
             continue;
@@ -387,10 +393,7 @@ fn validate_flags(args: &[String], spec: &HashMap<String, FlagKind>) -> Result<(
 }
 
 fn flags_spec(pairs: &[(&str, FlagKind)]) -> HashMap<String, FlagKind> {
-    pairs
-        .iter()
-        .map(|(k, v)| (k.to_string(), *v))
-        .collect()
+    pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
 }
 
 /// Positional args, skipping flag values. Everything after `--` counts.
@@ -455,7 +458,10 @@ struct PaneSelection {
 /// Resolve the target pane. An explicit positional wins; otherwise the
 /// ambient identity bundle is used and kept for the post-snapshot
 /// consistency check.
-fn resolve_pane_selection(args: &[String], value_flags: &[&str]) -> Result<PaneSelection, RunError> {
+fn resolve_pane_selection(
+    args: &[String],
+    value_flags: &[&str],
+) -> Result<PaneSelection, RunError> {
     let positional = positionals(args, value_flags).into_iter().next();
     if let Some(p) = positional {
         if !p.is_empty() {
@@ -518,7 +524,10 @@ pub fn parse_until_spec(spec: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>,
     if let Some(dt) = model::parse_instant(&normalized) {
         return Ok(dt);
     }
-    Err(RunError::usage(format!("cannot parse snooze deadline: {}", spec)))
+    Err(RunError::usage(format!(
+        "cannot parse snooze deadline: {}",
+        spec
+    )))
 }
 
 fn is_bare_duration(spec: &str) -> bool {
@@ -574,24 +583,33 @@ fn project_metadata(
     let mut tokens: BTreeMap<String, Option<String>> = BTreeMap::new();
     if let Some(snoozed) = entry.and_then(|e| e.snoozed.as_ref()) {
         tokens.insert("inbox_state".to_string(), Some("snoozed".to_string()));
-        tokens.insert("inbox_snoozed_until".to_string(), Some(snoozed.until.clone()));
+        tokens.insert(
+            "inbox_snoozed_until".to_string(),
+            Some(snoozed.until.clone()),
+        );
         tokens.insert(
             "inbox_pinned".to_string(),
-            entry.and_then(|e| e.pinned.as_ref()).map(|_| "true".to_string()),
+            entry
+                .and_then(|e| e.pinned.as_ref())
+                .map(|_| "true".to_string()),
         );
     } else if entry.and_then(|e| e.settled.as_ref()).is_some() {
         tokens.insert("inbox_state".to_string(), Some("settled".to_string()));
         tokens.insert("inbox_snoozed_until".to_string(), None);
         tokens.insert(
             "inbox_pinned".to_string(),
-            entry.and_then(|e| e.pinned.as_ref()).map(|_| "true".to_string()),
+            entry
+                .and_then(|e| e.pinned.as_ref())
+                .map(|_| "true".to_string()),
         );
     } else if entry.and_then(|e| e.archived.as_ref()).is_some() {
         tokens.insert("inbox_state".to_string(), Some("archived".to_string()));
         tokens.insert("inbox_snoozed_until".to_string(), None);
         tokens.insert(
             "inbox_pinned".to_string(),
-            entry.and_then(|e| e.pinned.as_ref()).map(|_| "true".to_string()),
+            entry
+                .and_then(|e| e.pinned.as_ref())
+                .map(|_| "true".to_string()),
         );
     } else {
         tokens.insert("inbox_state".to_string(), None);
@@ -741,7 +759,12 @@ pub fn cmd_organize(options: &mut CliOptions, kind: OrganizeCommand) -> Result<V
         HashMap::new()
     };
     validate_flags(&options.args, &spec)?;
-    assert_max_positionals(&options.args, value_flags, 1, &format!("{} <pane_id>", kind.as_str()))?;
+    assert_max_positionals(
+        &options.args,
+        value_flags,
+        1,
+        &format!("{} <pane_id>", kind.as_str()),
+    )?;
     let selection = resolve_pane_selection(&options.args, value_flags)?;
     let pane_id = selection.pane_id.clone();
     let now = Utc::now();
@@ -755,8 +778,8 @@ pub fn cmd_organize(options: &mut CliOptions, kind: OrganizeCommand) -> Result<V
     // Resolve the snooze deadline before taking the state lock.
     let mut until: Option<DateTime<Utc>> = None;
     if kind == OrganizeCommand::Snooze {
-        let until_spec = flag_value(&options.args, "--until")
-            .or_else(|| flag_value(&options.args, "--for"));
+        let until_spec =
+            flag_value(&options.args, "--until").or_else(|| flag_value(&options.args, "--for"));
         if let Some(spec) = until_spec {
             until = Some(parse_until_spec(&spec, now)?);
         } else {
@@ -774,12 +797,7 @@ pub fn cmd_organize(options: &mut CliOptions, kind: OrganizeCommand) -> Result<V
 
     let mut warnings: Vec<String> = Vec::new();
     let session_key = session_key_for(&options.target_options()).map_err(RunError::Target)?;
-    let ctx = transition_context(
-        Some(pane.clone()),
-        agent.clone(),
-        None,
-        now,
-    );
+    let ctx = transition_context(Some(pane.clone()), agent.clone(), None, now);
 
     // Transition kind to append after the organize mutation (the
     // session-entries borrow must end before `state` can be borrowed
@@ -804,7 +822,7 @@ pub fn cmd_organize(options: &mut CliOptions, kind: OrganizeCommand) -> Result<V
                         entries,
                         &pane,
                         agent.as_ref(),
-                        until.clone().expect("snooze until pre-resolved"),
+                        until.expect("snooze until pre-resolved"),
                         now,
                     );
                     (entries.get(&pane_id).cloned(), PendingTransition::Snoozed)
@@ -813,13 +831,16 @@ pub fn cmd_organize(options: &mut CliOptions, kind: OrganizeCommand) -> Result<V
                     // Record `restored` only when the command actually removed
                     // organize state — a no-op restore is not a transition.
                     let before = entries.get(&pane_id).cloned();
-                    let had_state = before.as_ref().map(|b| {
-                        b.settled.is_some()
-                            || b.snoozed.is_some()
-                            || b.archived.is_some()
-                            || b.pinned.is_some()
-                            || b.order.is_some()
-                    }).unwrap_or(false);
+                    let had_state = before
+                        .as_ref()
+                        .map(|b| {
+                            b.settled.is_some()
+                                || b.snoozed.is_some()
+                                || b.archived.is_some()
+                                || b.pinned.is_some()
+                                || b.order.is_some()
+                        })
+                        .unwrap_or(false);
                     restore_pane(entries, &pane_id);
                     let pending = if had_state {
                         PendingTransition::Restored(
@@ -887,10 +908,10 @@ pub fn cmd_organize(options: &mut CliOptions, kind: OrganizeCommand) -> Result<V
             Some(json!({"kind": "snoozed", "since": snoozed.at, "until": snoozed.until}))
         } else if let Some(settled) = &e.settled {
             Some(json!({"kind": "settled", "since": settled.at}))
-        } else if let Some(archived) = &e.archived {
-            Some(json!({"kind": "archived", "since": archived.at}))
         } else {
-            None
+            e.archived
+                .as_ref()
+                .map(|archived| json!({"kind": "archived", "since": archived.at}))
         }
     });
     Ok(json!({
@@ -961,7 +982,12 @@ fn reconcile_once(options: &CliOptions) -> Result<ReconcileResult, RunError> {
             }
             let resolved = resolve_state(entries, agents, now);
             let cleared = resolved.0;
-            let pruned = prune_state(entries, &live_pane_ids, now, &model::PruneOptions::default());
+            let pruned = prune_state(
+                entries,
+                &live_pane_ids,
+                now,
+                &model::PruneOptions::default(),
+            );
 
             // Organize-transition log: record hide-kind clears caused by
             // expiry/generation resolution and retention pruning.
@@ -976,7 +1002,10 @@ fn reconcile_once(options: &CliOptions) -> Result<ReconcileResult, RunError> {
                 if cm.field == model::ClearedMarkField::Pinned {
                     continue;
                 }
-                cleared_by_pane.entry(cm.pane_id.clone()).or_default().push(cm);
+                cleared_by_pane
+                    .entry(cm.pane_id.clone())
+                    .or_default()
+                    .push(cm);
             }
             let mut cleared_jobs: Vec<ClearedJob> = Vec::new();
             for (pane_id, marks) in &cleared_by_pane {
@@ -993,11 +1022,15 @@ fn reconcile_once(options: &CliOptions) -> Result<ReconcileResult, RunError> {
                     workspace_id: workspace_before.get(pane_id).cloned().flatten(),
                     at: at.clone(),
                 };
-                cleared_jobs.push(ClearedJob { pane_id: pane_id.clone(), infos, ctx });
+                cleared_jobs.push(ClearedJob {
+                    pane_id: pane_id.clone(),
+                    infos,
+                    ctx,
+                });
             }
             let mut pruned_jobs: Vec<PrunedJob> = Vec::new();
             for pane_id in &pruned {
-                if hide_kind_before.get(pane_id).copied().unwrap_or(false) != true {
+                if !hide_kind_before.get(pane_id).copied().unwrap_or(false) {
                     continue;
                 }
                 let ctx = TransitionContext {
@@ -1006,7 +1039,10 @@ fn reconcile_once(options: &CliOptions) -> Result<ReconcileResult, RunError> {
                     workspace_id: workspace_before.get(pane_id).cloned().flatten(),
                     at: at.clone(),
                 };
-                pruned_jobs.push(PrunedJob { pane_id: pane_id.clone(), ctx });
+                pruned_jobs.push(PrunedJob {
+                    pane_id: pane_id.clone(),
+                    ctx,
+                });
             }
             // A pane can lose one mark while keeping others; project the
             // post-resolution entry, not a blanket clear.
@@ -1026,14 +1062,28 @@ fn reconcile_once(options: &CliOptions) -> Result<ReconcileResult, RunError> {
                 })
                 .map(|(pid, e)| (pid.clone(), e.clone()))
                 .collect();
-            (cleared, pruned, cleared_entries, organized, cleared_jobs, pruned_jobs)
+            (
+                cleared,
+                pruned,
+                cleared_entries,
+                organized,
+                cleared_jobs,
+                pruned_jobs,
+            )
         };
         // Phase 2: append organize transitions now that `entries` is free.
         for job in &cleared_jobs {
             append_cleared_transitions(state, &session_key, &job.pane_id, &job.infos, &job.ctx);
         }
         for job in &pruned_jobs {
-            append_transition(state, &session_key, "cleared", &job.pane_id, &job.ctx, Some("pruned"));
+            append_transition(
+                state,
+                &session_key,
+                "cleared",
+                &job.pane_id,
+                &job.ctx,
+                Some("pruned"),
+            );
         }
         Mutation {
             cleared,
@@ -1072,7 +1122,9 @@ fn spawn_snooze_wake(options: &CliOptions, until: DateTime<Utc>) -> Option<Strin
         Err(err) => return Some(format!("snooze wake scheduler failed: {}", err)),
     };
     let mut cmd = Command::new(exe);
-    cmd.arg("_wake").arg("--until").arg(model::iso_millis(until));
+    cmd.arg("_wake")
+        .arg("--until")
+        .arg(model::iso_millis(until));
     if let Some(socket) = &options.socket_path {
         cmd.arg("--socket").arg(socket);
     }
@@ -1110,7 +1162,12 @@ fn cmd_wake(options: &mut CliOptions) {
         &options.args,
         &flags_spec(&[("--until", FlagKind::Value)]),
     ));
-    must(assert_max_positionals(&options.args, &["--until"], 0, "_wake"));
+    must(assert_max_positionals(
+        &options.args,
+        &["--until"],
+        0,
+        "_wake",
+    ));
     let until_spec = flag_value(&options.args, "--until");
     let Some(spec) = until_spec else {
         fail("_wake requires --until <iso8601>", 2);
@@ -1199,7 +1256,11 @@ pub fn cmd_order(options: &mut CliOptions) -> Result<Value, RunError> {
     }
     let state = load_state()?;
     let session_key = session_key_for(&options.target_options()).map_err(RunError::Target)?;
-    let mut entries = state.sessions.get(&session_key).cloned().unwrap_or_default();
+    let mut entries = state
+        .sessions
+        .get(&session_key)
+        .cloned()
+        .unwrap_or_default();
     resolve_state(&mut entries, &snapshot.agents, now);
     let items = build_inbox(&snapshot.panes, &snapshot.agents, &mut entries, now);
 
@@ -1220,8 +1281,7 @@ pub fn cmd_order(options: &mut CliOptions) -> Result<Value, RunError> {
         })
         .cloned()
         .collect();
-    let ranks = compute_order_ranks(&siblings, &pane_id, &placement)
-        .map_err(RunError::usage)?;
+    let ranks = compute_order_ranks(&siblings, &pane_id, &placement).map_err(RunError::usage)?;
 
     let pane_by_id: HashMap<String, PaneInfo> = snapshot
         .panes
@@ -1270,7 +1330,10 @@ pub fn parse_tracker_ref(spec: &str) -> Result<(String, i64), RunError> {
             spec
         )));
     };
-    let repo = caps.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
+    let repo = caps
+        .get(1)
+        .map(|m| m.as_str().to_string())
+        .unwrap_or_default();
     let number: i64 = caps
         .get(2)
         .and_then(|m| m.as_str().parse().ok())
@@ -1358,7 +1421,11 @@ fn verify_tracker_ref(kind: &str, repo: &str, number: i64) -> Option<String> {
 
 fn link_views(links: Option<&Vec<PaneLink>>) -> Vec<Value> {
     links
-        .map(|ls| ls.iter().map(|l| serde_json::to_value(to_public_link(l)).unwrap_or(Value::Null)).collect())
+        .map(|ls| {
+            ls.iter()
+                .map(|l| serde_json::to_value(to_public_link(l)).unwrap_or(Value::Null))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -1429,10 +1496,7 @@ pub fn cmd_link(options: &mut CliOptions) -> Result<Value, RunError> {
 /// Remove one declared link; the pane must still exist in the snapshot.
 pub fn cmd_unlink(options: &mut CliOptions) -> Result<Value, RunError> {
     options.mutation = true;
-    let unlink_flags = flags_spec(&[
-        ("--pr", FlagKind::Value),
-        ("--issue", FlagKind::Value),
-    ]);
+    let unlink_flags = flags_spec(&[("--pr", FlagKind::Value), ("--issue", FlagKind::Value)]);
     let unlink_value_flags = ["--pr", "--issue"];
     validate_flags(&options.args, &unlink_flags)?;
     assert_max_positionals(&options.args, &unlink_value_flags, 1, "unlink <pane_id>")?;
@@ -1496,7 +1560,11 @@ pub fn cmd_links(options: &CliOptions) -> Result<Value, RunError> {
     }
     let state = load_state()?;
     let session_key = session_key_for(&options.target_options()).map_err(RunError::Target)?;
-    let mut entries = state.sessions.get(&session_key).cloned().unwrap_or_default();
+    let mut entries = state
+        .sessions
+        .get(&session_key)
+        .cloned()
+        .unwrap_or_default();
     resolve_state(&mut entries, &snapshot.agents, now);
     let Some(entry) = entries.get(&pane_id) else {
         return Err(RunError::other(format!(
@@ -1526,22 +1594,25 @@ fn cmd_watch(options: &mut CliOptions) {
         &options.args,
         &flags_spec(&[("--interval", FlagKind::Value)]),
     ));
-    must(assert_max_positionals(&options.args, &["--interval"], 0, "watch"));
+    must(assert_max_positionals(
+        &options.args,
+        &["--interval"],
+        0,
+        "watch",
+    ));
     let interval_raw = flag_value(&options.args, "--interval");
     // Mirrors cli.ts: an explicit but unparseable/non-positive value is a
     // usage error; only an absent flag defaults to 60s.
     let interval_sec = match &interval_raw {
         Some(raw) => match raw.parse::<f64>() {
             Ok(v) if v.is_finite() && v > 0.0 => v,
-            _ => {
-                fail(
-                    &format!(
-                        "invalid --interval: {} (expected a positive number of seconds)",
-                        raw
-                    ),
-                    2,
-                )
-            }
+            _ => fail(
+                &format!(
+                    "invalid --interval: {} (expected a positive number of seconds)",
+                    raw
+                ),
+                2,
+            ),
         },
         None => 60.0,
     };
@@ -1571,9 +1642,9 @@ fn cmd_watch(options: &mut CliOptions) {
         ])
         .expect("signal hook");
         std::thread::spawn(move || {
-            for _ in signals.forever() {
+            // Blocks until the first SIGINT/SIGTERM, then trips the flag.
+            if signals.forever().next().is_some() {
                 flag.store(true, std::sync::atomic::Ordering::Relaxed);
-                break;
             }
         });
     }
@@ -1583,22 +1654,16 @@ fn cmd_watch(options: &mut CliOptions) {
     // interval ticker, and signals — the Rust equivalent of TS
     // `for await (const event of subscription.events)` + setInterval.
     let subscription = std::sync::Arc::new(subscription);
-    let (event_tx, event_rx) =
-        std::sync::mpsc::channel::<hoxay_herdr_client::socket::HerdrEvent>();
+    let (event_tx, event_rx) = std::sync::mpsc::channel::<hoxay_herdr_client::socket::HerdrEvent>();
     {
         let sub = subscription.clone();
         std::thread::spawn(move || {
             // recv() yields Ok envelopes; any Err (closed/io/rpc error
             // frame) is terminal upstream — the TS iterator ends the
             // for-await loop the same way, so we end the channel too.
-            loop {
-                match sub.recv() {
-                    Some(Ok(event)) => {
-                        if event_tx.send(event).is_err() {
-                            break;
-                        }
-                    }
-                    _ => break,
+            while let Some(Ok(event)) = sub.recv() {
+                if event_tx.send(event).is_err() {
+                    break;
                 }
             }
         });
@@ -1848,19 +1913,17 @@ fn watch_pr_tick(
     let snapshot = commands::session_snapshot(&options.call_options())?;
     let agents = &snapshot.agents;
     let panes = &snapshot.panes;
-    let live_pane_ids: BTreeSet<String> =
-        panes.iter().map(|p| p.pane_id.clone()).collect();
+    let live_pane_ids: BTreeSet<String> = panes.iter().map(|p| p.pane_id.clone()).collect();
 
     let state0 = load_state()?;
-    let mut entries0 = state0.sessions.get(session_key).cloned().unwrap_or_default();
+    let mut entries0 = state0
+        .sessions
+        .get(session_key)
+        .cloned()
+        .unwrap_or_default();
     resolve_state(&mut entries0, agents, now);
     let session_watch = session_watch_read(&state0, session_key);
-    let scan = collect_watch_targets(
-        &entries0,
-        session_watch,
-        &live_pane_ids,
-        pane_filter,
-    );
+    let scan = collect_watch_targets(&entries0, session_watch, &live_pane_ids, pane_filter);
 
     let mut outcomes: Vec<PollOutcome> = Vec::new();
     for target in &scan.targets {
@@ -1872,11 +1935,7 @@ fn watch_pr_tick(
         {
             continue;
         }
-        if let Some(next) = target
-            .baseline
-            .as_ref()
-            .and_then(|b| b.next_poll_at)
-        {
+        if let Some(next) = target.baseline.as_ref().and_then(|b| b.next_poll_at) {
             if next > now_ms {
                 continue; // failure backoff — deferred, not polled
             }
@@ -1933,7 +1992,9 @@ fn watch_pr_tick(
         }
         {
             let watch = state.watch.get_or_insert_with(BTreeMap::new);
-            watch.entry(session_key.to_string()).or_insert_with(BTreeMap::new);
+            watch
+                .entry(session_key.to_string())
+                .or_insert_with(BTreeMap::new);
         }
 
         for outcome in outcomes.iter_mut() {
@@ -1953,18 +2014,23 @@ fn watch_pr_tick(
             if !outcome.ok {
                 record.consecutive_failures += 1;
                 record.last_error = Some(
-                    outcome.error.clone().unwrap_or_else(|| "unknown poll error".to_string()),
+                    outcome
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "unknown poll error".to_string()),
                 );
-                record.next_poll_at = Some(
-                    now_ms + poll_backoff_ms(interval_ms, record.consecutive_failures),
-                );
+                record.next_poll_at =
+                    Some(now_ms + poll_backoff_ms(interval_ms, record.consecutive_failures));
                 outcome.record_failures = record.consecutive_failures;
                 outcome.record_next_poll_at = record.next_poll_at;
                 outcome.record_last_checked_at = record.last_checked_at.clone();
                 continue;
             }
             let prev = record.observation.clone();
-            let obs = outcome.observation.clone().expect("ok outcome has observation");
+            let obs = outcome
+                .observation
+                .clone()
+                .expect("ok outcome has observation");
             let diff = diff_observation(prev.as_ref(), &obs);
             outcome.baseline = prev.is_none();
             record.observation = Some(obs);
@@ -2005,18 +2071,21 @@ fn watch_pr_tick(
                         entry.updated_at = now_iso.clone();
                     }
                 }
-                attention.entry(pane_id.clone()).or_default().push(AttentionRecord {
-                    ref_: ref_.clone(),
-                    triggers: diff
-                        .triggers
-                        .iter()
-                        .map(|t| t.as_str().to_string())
-                        .collect(),
-                    new_failing_checks: diff.new_failing_checks.clone(),
-                    new_review_count: diff.new_review_count,
-                    new_comment_count: diff.new_comment_count,
-                    cleared,
-                });
+                attention
+                    .entry(pane_id.clone())
+                    .or_default()
+                    .push(AttentionRecord {
+                        ref_: ref_.clone(),
+                        triggers: diff
+                            .triggers
+                            .iter()
+                            .map(|t| t.as_str().to_string())
+                            .collect(),
+                        new_failing_checks: diff.new_failing_checks.clone(),
+                        new_review_count: diff.new_review_count,
+                        new_comment_count: diff.new_comment_count,
+                        cleared,
+                    });
             }
         }
         (outcomes, attention)
@@ -2025,10 +2094,7 @@ fn watch_pr_tick(
     // Metadata projection + event emission after the commit.
     let fresh = load_state()?;
     for (pane_id, records) in &attention {
-        let entry = fresh
-            .sessions
-            .get(session_key)
-            .and_then(|m| m.get(pane_id));
+        let entry = fresh.sessions.get(session_key).and_then(|m| m.get(pane_id));
         let pane_warnings = project_metadata(pane_id, entry, options);
         let mut all_triggers: Vec<String> = Vec::new();
         for r in records {
@@ -2219,8 +2285,8 @@ fn cmd_watch_pr(options: &mut CliOptions) {
         .next();
     let git_root_flag = flag_value(&options.args, "--git-root");
 
-    let session_key = session_key_for(&options.target_options())
-        .unwrap_or_else(|e| fail_target(&e));
+    let session_key =
+        session_key_for(&options.target_options()).unwrap_or_else(|e| fail_target(&e));
     let config = load_config();
     let explicit_root = git_root_flag.or(config.git_plugin_root);
     let git = match resolve_plugin_root(GIT_PLUGIN_ID, explicit_root.as_deref()) {
@@ -2258,9 +2324,9 @@ fn cmd_watch_pr(options: &mut CliOptions) {
         ])
         .expect("signal hook");
         std::thread::spawn(move || {
-            for _ in signals.forever() {
+            // Blocks until the first SIGINT/SIGTERM, then trips the flag.
+            if signals.forever().next().is_some() {
                 flag.store(true, std::sync::atomic::Ordering::Relaxed);
-                break;
             }
         });
     }
@@ -2268,7 +2334,13 @@ fn cmd_watch_pr(options: &mut CliOptions) {
     // Every loop exit assigns `stop_reason` before breaking.
     let stop_reason: Option<String>;
     loop {
-        match watch_pr_tick(options, &session_key, interval_ms, pane_filter.as_deref(), &git) {
+        match watch_pr_tick(
+            options,
+            &session_key,
+            interval_ms,
+            pane_filter.as_deref(),
+            &git,
+        ) {
             Ok(reason) => {
                 if once {
                     stop_reason = Some(reason.unwrap_or_else(|| "once".to_string()));
@@ -2324,23 +2396,27 @@ fn cmd_watch_pr(options: &mut CliOptions) {
 pub fn cmd_transitions(options: &CliOptions) -> Result<Value, RunError> {
     must(validate_flags(
         &options.args,
-        &flags_spec(&[
-            ("--after", FlagKind::Value),
-            ("--limit", FlagKind::Value),
-        ]),
+        &flags_spec(&[("--after", FlagKind::Value), ("--limit", FlagKind::Value)]),
     ));
-    must(assert_max_positionals(&options.args, &["--after", "--limit"], 0, "transitions"));
+    must(assert_max_positionals(
+        &options.args,
+        &["--after", "--limit"],
+        0,
+        "transitions",
+    ));
     let now = Utc::now();
     let snapshot = snapshot_or_err(options)?;
     let state = load_state()?;
     let session_key = session_key_for(&options.target_options()).map_err(RunError::Target)?;
-    let mut entries = state.sessions.get(&session_key).cloned().unwrap_or_default();
+    let mut entries = state
+        .sessions
+        .get(&session_key)
+        .cloned()
+        .unwrap_or_default();
     resolve_state(&mut entries, &snapshot.agents, now);
 
     let log = state.transitions.as_ref().and_then(|t| t.get(&session_key));
-    let items: &[crate::state::InboxTransition] = log
-        .map(|l| l.items.as_slice())
-        .unwrap_or(&[]);
+    let items: &[crate::state::InboxTransition] = log.map(|l| l.items.as_slice()).unwrap_or(&[]);
     let head_seq = log.map(|l| l.seq).unwrap_or(0);
     let oldest_seq = items.first().map(|t| t.seq);
 
@@ -2348,14 +2424,16 @@ pub fn cmd_transitions(options: &CliOptions) -> Result<Value, RunError> {
         Some(raw) => match raw.parse::<i64>() {
             Ok(v) if v >= 0 => Some(v),
             _ => {
-                return Err(RunError::usage("--after must be a non-negative integer seq"));
+                return Err(RunError::usage(
+                    "--after must be a non-negative integer seq",
+                ));
             }
         },
         None => None,
     };
     let limit: usize = match flag_value(&options.args, "--limit") {
         Some(raw) => match raw.parse::<usize>() {
-            Ok(v) if v >= 1 && v <= MAX_TRANSITIONS_PER_SESSION => v,
+            Ok(v) if (1..=MAX_TRANSITIONS_PER_SESSION).contains(&v) => v,
             _ => {
                 return Err(RunError::usage(format!(
                     "--limit must be an integer between 1 and {}",
@@ -2369,11 +2447,7 @@ pub fn cmd_transitions(options: &CliOptions) -> Result<Value, RunError> {
     // `--after` is exclusive. Without it the newest page is returned.
     let page: Vec<&crate::state::InboxTransition> = match after {
         None => items.iter().rev().take(limit).rev().collect(),
-        Some(after) => items
-            .iter()
-            .filter(|t| t.seq > after)
-            .take(limit)
-            .collect(),
+        Some(after) => items.iter().filter(|t| t.seq > after).take(limit).collect(),
     };
     // Preserve original order (oldest→newest) for the newest-page slice.
     let page_values: Vec<Value> = match after {

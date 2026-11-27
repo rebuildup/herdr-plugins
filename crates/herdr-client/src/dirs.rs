@@ -17,7 +17,10 @@ pub fn herdr_config_dir() -> PathBuf {
             return Path::new(&app_data).join("herdr");
         }
         if let Some(profile) = env_nonempty("USERPROFILE") {
-            return Path::new(&profile).join("AppData").join("Roaming").join("herdr");
+            return Path::new(&profile)
+                .join("AppData")
+                .join("Roaming")
+                .join("herdr");
         }
     }
     if let Some(home) = env_nonempty("HOME") {
@@ -40,7 +43,10 @@ pub fn herdr_state_dir() -> PathBuf {
             return Path::new(&local).join("herdr");
         }
         if let Some(profile) = env_nonempty("USERPROFILE") {
-            return Path::new(&profile).join("AppData").join("Local").join("herdr");
+            return Path::new(&profile)
+                .join("AppData")
+                .join("Local")
+                .join("herdr");
         }
     }
     if let Some(home) = env_nonempty("HOME") {
@@ -72,11 +78,24 @@ pub fn plugin_dirs(
     let component = plugin_path_component(plugin_id);
     let config = config_dir
         .map(PathBuf::from)
-        .or_else(|| std::env::var("HERDR_PLUGIN_CONFIG_DIR").ok().map(PathBuf::from))
-        .unwrap_or_else(|| herdr_config_dir().join("plugins").join("config").join(&component));
+        .or_else(|| {
+            std::env::var("HERDR_PLUGIN_CONFIG_DIR")
+                .ok()
+                .map(PathBuf::from)
+        })
+        .unwrap_or_else(|| {
+            herdr_config_dir()
+                .join("plugins")
+                .join("config")
+                .join(&component)
+        });
     let state = state_dir
         .map(PathBuf::from)
-        .or_else(|| std::env::var("HERDR_PLUGIN_STATE_DIR").ok().map(PathBuf::from))
+        .or_else(|| {
+            std::env::var("HERDR_PLUGIN_STATE_DIR")
+                .ok()
+                .map(PathBuf::from)
+        })
         .unwrap_or_else(|| herdr_state_dir().join("plugins").join(&component));
     PluginDirs {
         config_dir: config,
@@ -87,7 +106,11 @@ pub fn plugin_dirs(
 pub fn env_nonempty(name: &str) -> Option<String> {
     std::env::var(name).ok().and_then(|v| {
         let t = v.trim().to_string();
-        if t.is_empty() { None } else { Some(t) }
+        if t.is_empty() {
+            None
+        } else {
+            Some(t)
+        }
     })
 }
 
@@ -125,7 +148,10 @@ pub fn plugin_path_component(value: &str) -> String {
     if component.chars().count() > MAX_CHARS {
         let hash = Sha256::digest(value.as_bytes());
         let hash_hex: String = hash.iter().take(6).map(|b| format!("{:02x}", b)).collect();
-        let prefix: String = component.chars().take(MAX_CHARS - hash_hex.len() - 1).collect();
+        let prefix: String = component
+            .chars()
+            .take(MAX_CHARS - hash_hex.len() - 1)
+            .collect();
         return format!("{}-{}", prefix, hash_hex);
     }
     component

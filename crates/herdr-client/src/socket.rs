@@ -108,7 +108,9 @@ impl Conn {
         let endpoint = socket_endpoint(socket_path);
         #[cfg(unix)]
         {
-            Ok(Conn::Unix(std::os::unix::net::UnixStream::connect(&endpoint)?))
+            Ok(Conn::Unix(std::os::unix::net::UnixStream::connect(
+                &endpoint,
+            )?))
         }
         #[cfg(windows)]
         {
@@ -385,9 +387,8 @@ pub fn subscribe(
 
     let mut buffered: Vec<HerdrEvent> = Vec::new();
     #[allow(unused_assignments)]
-    let mut started: Result<Value, ClientError> = Err(ClientError::Closed(
-        "subscription ended before ack".into(),
-    ));
+    let mut started: Result<Value, ClientError> =
+        Err(ClientError::Closed("subscription ended before ack".into()));
     let mut raw = String::new();
     loop {
         raw.clear();

@@ -98,11 +98,7 @@ pub fn sanitize_display(text: &str) -> String {
             i += 1;
             continue;
         }
-        if (cp < 0x20 && cp != 0x09)
-            || (0x7f..0xa0).contains(&cp)
-            || cp == 0x2028
-            || cp == 0x2029
-        {
+        if (cp < 0x20 && cp != 0x09) || (0x7f..0xa0).contains(&cp) || cp == 0x2028 || cp == 0x2029 {
             out.push('\u{FFFD}');
             i += 1;
             continue;
@@ -111,7 +107,8 @@ pub fn sanitize_display(text: &str) -> String {
             || (0x2066..=0x2069).contains(&cp) // bidi isolates
             || cp == 0x200e // LRM
             || cp == 0x200f // RLM
-            || cp == 0x061c // Arabic letter mark
+            || cp == 0x061c
+        // Arabic letter mark
         {
             i += 1;
             continue;
@@ -129,7 +126,11 @@ fn display_cells(s: &str) -> usize {
     let mut w = 0usize;
     for ch in s.chars() {
         let cp = ch as u32;
-        w += if cp >= 0x1100 && (cp <= 0x115f || cp >= 0x2e80) { 2 } else { 1 };
+        w += if cp >= 0x1100 && (cp <= 0x115f || cp >= 0x2e80) {
+            2
+        } else {
+            1
+        };
     }
     w
 }
@@ -152,7 +153,7 @@ fn consume_escape(chars: &[char], start: usize) -> usize {
             if (0x40..=0x7e).contains(&c) {
                 break;
             }
-            if c < 0x20 || c > 0x3f {
+            if !(0x20..=0x3f).contains(&c) {
                 break; // malformed → stop
             }
         }
@@ -301,7 +302,10 @@ mod tests {
     #[test]
     fn strips_csi_and_osc() {
         assert_eq!(sanitize_display("a\u{1b}[31mred\u{1b}[0m b"), "ared b");
-        assert_eq!(sanitize_display("x\u{1b}]8;;http://e\u{7}l\u{1b}]8;;\u{7}y"), "xly");
+        assert_eq!(
+            sanitize_display("x\u{1b}]8;;http://e\u{7}l\u{1b}]8;;\u{7}y"),
+            "xly"
+        );
         assert_eq!(sanitize_display("c1\u{9b}31mZ"), "c1Z");
     }
 

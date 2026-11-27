@@ -18,9 +18,12 @@ import { envValue, herdrSocketEndpoint, testEnv } from "./helpers/test-env";
  * usage errors, the fake-socket command flows (organize verbs, filters,
  * tracker links, stale-generation guards, gh env sanitization), the
  * capability document incl. additive `command_metadata` (#263), and the
- * non-TTY `tui` fallback. Pure-function unit coverage lives in the Rust
- * crates (`cargo test`); TS↔Rust output parity is evidenced by the diff
- * harness documented in docs/research/inbox-native-rust.md.
+ * non-TTY `tui` fallback, and TS↔Rust state compatibility (a state.json
+ * written by the retired TS implementation is honored verbatim). Rust
+ * unit coverage lives in crates/tui (safety helpers); the wider pure-
+ * function surface is exercised end-to-end here. TS↔Rust output parity
+ * is evidenced by the diff harness documented in
+ * docs/research/inbox-native-rust.md.
  */
 
 const INBOX_BIN = inboxBinary();

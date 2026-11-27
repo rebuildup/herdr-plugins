@@ -43,10 +43,9 @@ use serde_json::Value;
 use hoxay_tui::safety::{bound_text, sanitize_display};
 
 use crate::tui_model::{
-    self, cli_error_message, item_badges, item_detail_lines, item_title,
-    next_scope, order_move_target, parse_link_spec, parse_list_output,
-    scope_label, stale_check, validate_snooze_spec, visible_items, InboxScope,
-    ListPayload, OrderDir, StaleVerdict, TuiItem,
+    self, cli_error_message, item_badges, item_detail_lines, item_title, next_scope,
+    order_move_target, parse_link_spec, parse_list_output, scope_label, stale_check,
+    validate_snooze_spec, visible_items, InboxScope, ListPayload, OrderDir, StaleVerdict, TuiItem,
 };
 
 const PLUGIN_ID: &str = "rebuildup.inbox";
@@ -72,7 +71,11 @@ fn capture_context() -> PinnedContext {
     let origin_json = std::env::var("HERDR_TUI_CONTEXT_JSON")
         .ok()
         .filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("HERDR_PLUGIN_CONTEXT_JSON").ok().filter(|s| !s.is_empty()));
+        .or_else(|| {
+            std::env::var("HERDR_PLUGIN_CONTEXT_JSON")
+                .ok()
+                .filter(|s| !s.is_empty())
+        });
     let mut workspace_id = None;
     let mut focused_pane_id = None;
     if let Some(raw) = &origin_json {
@@ -204,11 +207,23 @@ enum PromptKind {
 
 enum Screen {
     Main,
-    Detail { title: String, lines: Vec<String> },
-    Prompt { kind: PromptKind, draft: String, placeholder: String, label: String },
-    Confirm { mutation: PendingMutation },
+    Detail {
+        title: String,
+        lines: Vec<String>,
+    },
+    Prompt {
+        kind: PromptKind,
+        draft: String,
+        placeholder: String,
+        label: String,
+    },
+    Confirm {
+        mutation: PendingMutation,
+    },
     Help,
-    Transitions { lines: Vec<String> },
+    Transitions {
+        lines: Vec<String>,
+    },
 }
 
 struct App {
@@ -288,7 +303,11 @@ impl App {
                     bits.push(format!("{} inbox", c.inbox));
                     bits.push(format!("{} attention", c.attention));
                 }
-                self.status = if bits.is_empty() { String::new() } else { bits.join(" · ") };
+                self.status = if bits.is_empty() {
+                    String::new()
+                } else {
+                    bits.join(" · ")
+                };
             }
         }
     }
@@ -421,9 +440,7 @@ impl App {
             }
         }
         // 2. Explicit confirmation with the exact target (contract item 5).
-        let mut target_lines = vec![
-            format!("pane: {}", item.pane_id),
-        ];
+        let mut target_lines = vec![format!("pane: {}", item.pane_id)];
         if let Some(t) = &item.title {
             target_lines.push(format!("title: {}", t));
         }
@@ -453,7 +470,14 @@ impl App {
         let _ = pane_id;
     }
 
-    fn mutate_organize(&mut self, command: &str, item: &TuiItem, title: &str, consequence: &str, danger: bool) {
+    fn mutate_organize(
+        &mut self,
+        command: &str,
+        item: &TuiItem,
+        title: &str,
+        consequence: &str,
+        danger: bool,
+    ) {
         let args = vec![command.to_string(), item.pane_id.clone()];
         self.build_mutation(
             item,
@@ -467,7 +491,10 @@ impl App {
     }
 
     fn run_confirmed(&mut self, mutation: PendingMutation) {
-        self.status = format!("running: {}…", mutation.args.first().map(|s| s.as_str()).unwrap_or("?"));
+        self.status = format!(
+            "running: {}…",
+            mutation.args.first().map(|s| s.as_str()).unwrap_or("?")
+        );
         let result = run_domain(&mutation.args);
         self.screen = Screen::Main;
         if result.status != 0 {
@@ -482,12 +509,21 @@ impl App {
         if let Ok(doc) = serde_json::from_str::<Value>(&result.stdout) {
             if let Some(w) = doc.get("warnings").and_then(|v| v.as_array()) {
                 if !w.is_empty() {
-                    warning_note = format!(" ({} warning{})", w.len(), if w.len() == 1 { "" } else { "s" });
+                    warning_note = format!(
+                        " ({} warning{})",
+                        w.len(),
+                        if w.len() == 1 { "" } else { "s" }
+                    );
                 }
             }
             // Session-scoped reconcile reports a count summary.
             if mutation.args == ["reconcile"] {
-                let count = |k: &str| doc.get(k).and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+                let count = |k: &str| {
+                    doc.get(k)
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.len())
+                        .unwrap_or(0)
+                };
                 summary_override = Some(format!(
                     "reconcile: cleared={} pruned={} projected={}",
                     count("cleared"),
@@ -513,14 +549,21 @@ impl App {
         match order_move_target(&fresh_items, &item.pane_id, dir) {
             tui_model::OrderMove::Err(e) => {
                 self.status = e;
-                return;
             }
             tui_model::OrderMove::Ok { flag, ref_pane_id } => {
-                let Some(shown) = fresh_items.iter().find(|i| i.pane_id == item.pane_id).cloned() else {
-                    self.status = format!("stale_pane: {} is no longer in the session", item.pane_id);
+                let Some(shown) = fresh_items
+                    .iter()
+                    .find(|i| i.pane_id == item.pane_id)
+                    .cloned()
+                else {
+                    self.status =
+                        format!("stale_pane: {} is no longer in the session", item.pane_id);
                     return;
                 };
-                let dir_name = match dir { OrderDir::Up => "up", OrderDir::Down => "down" };
+                let dir_name = match dir {
+                    OrderDir::Up => "up",
+                    OrderDir::Down => "down",
+                };
                 self.build_mutation(
                     &shown,
                     &format!("Move pane {}?", dir_name),
@@ -538,17 +581,18 @@ impl App {
 
     fn prompt_submit(&mut self) {
         let screen = std::mem::replace(&mut self.screen, Screen::Main);
-        let Screen::Prompt { kind, draft, .. } = screen else { return };
+        let Screen::Prompt { kind, draft, .. } = screen else {
+            return;
+        };
         match kind {
-            PromptKind::Snooze { pane_id } => {
-                match validate_snooze_spec(&draft) {
-                    tui_model::SnoozeSpec::Err(e) => {
-                        self.status = format!("invalid snooze spec: {}", e);
-                    }
-                    tui_model::SnoozeSpec::Ok(spec) => {
-                        if let Some(item) = self.items.iter().find(|i| i.pane_id == pane_id).cloned() {
-                            let ok_message = format!("snoozed {} until {}", pane_id, spec);
-                            self.build_mutation(
+            PromptKind::Snooze { pane_id } => match validate_snooze_spec(&draft) {
+                tui_model::SnoozeSpec::Err(e) => {
+                    self.status = format!("invalid snooze spec: {}", e);
+                }
+                tui_model::SnoozeSpec::Ok(spec) => {
+                    if let Some(item) = self.items.iter().find(|i| i.pane_id == pane_id).cloned() {
+                        let ok_message = format!("snoozed {} until {}", pane_id, spec);
+                        self.build_mutation(
                                 &item,
                                 "Snooze pane?",
                                 &format!("Hides the pane until {}, then it returns automatically. Reversible via restore.", spec),
@@ -556,10 +600,9 @@ impl App {
                                 vec!["snooze".to_string(), pane_id, "--until".to_string(), spec],
                                 ok_message,
                             );
-                        }
                     }
                 }
-            }
+            },
             PromptKind::Link { pane_id } => {
                 if draft.trim().is_empty() {
                     self.status = "cancelled".to_string();
@@ -570,7 +613,9 @@ impl App {
                         self.status = format!("invalid link: {}", e);
                     }
                     tui_model::LinkSpec::Ok { kind, flag, ref_ } => {
-                        if let Some(item) = self.items.iter().find(|i| i.pane_id == pane_id).cloned() {
+                        if let Some(item) =
+                            self.items.iter().find(|i| i.pane_id == pane_id).cloned()
+                        {
                             let ok_message = format!("linked {} → {}", ref_, pane_id);
                             self.build_mutation(
                                 &item,
@@ -607,7 +652,11 @@ impl App {
                                 "issue" => "issue",
                                 _ => "pr",
                             },
-                            flag: if existing.kind == "issue" { "--issue" } else { "--pr" },
+                            flag: if existing.kind == "issue" {
+                                "--issue"
+                            } else {
+                                "--pr"
+                            },
                             ref_: existing.ref_.clone(),
                         };
                     }
@@ -618,7 +667,9 @@ impl App {
                     }
                     tui_model::LinkSpec::Ok { kind, flag, ref_ } => {
                         let _ = hints;
-                        if let Some(item) = self.items.iter().find(|i| i.pane_id == pane_id).cloned() {
+                        if let Some(item) =
+                            self.items.iter().find(|i| i.pane_id == pane_id).cloned()
+                        {
                             let ok_message = format!("unlinked {} from {}", ref_, pane_id);
                             self.build_mutation(
                                 &item,
@@ -640,7 +691,11 @@ impl App {
 
     fn show_transitions(&mut self) {
         self.status = "reading transitions…".to_string();
-        let result = run_domain(&["transitions".to_string(), "--limit".to_string(), "50".to_string()]);
+        let result = run_domain(&[
+            "transitions".to_string(),
+            "--limit".to_string(),
+            "50".to_string(),
+        ]);
         if result.status != 0 {
             self.status = format!(
                 "transitions failed: {}",
@@ -651,23 +706,53 @@ impl App {
         let mut lines: Vec<String> = Vec::new();
         match serde_json::from_str::<Value>(&result.stdout) {
             Ok(doc) => {
-                let head = doc.get("head_seq").map(|v| v.to_string()).unwrap_or_else(|| "?".to_string());
-                let oldest = doc.get("oldest_seq").map(|v| v.to_string()).unwrap_or_else(|| "-".to_string());
-                let dropped = doc.get("dropped").map(|v| v.to_string()).unwrap_or_else(|| "0".to_string());
-                lines.push(format!("head_seq={} oldest={} dropped={}", head, oldest, dropped));
+                let head = doc
+                    .get("head_seq")
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "?".to_string());
+                let oldest = doc
+                    .get("oldest_seq")
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "-".to_string());
+                let dropped = doc
+                    .get("dropped")
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "0".to_string());
+                lines.push(format!(
+                    "head_seq={} oldest={} dropped={}",
+                    head, oldest, dropped
+                ));
                 lines.push(String::new());
-                let items = doc.get("transitions").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                let items = doc
+                    .get("transitions")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
                 if items.is_empty() {
                     lines.push("(no transitions recorded)".to_string());
                 }
                 for t in &items {
-                    let seq = t.get("seq").map(|v| v.to_string()).unwrap_or_else(|| "?".to_string());
+                    let seq = t
+                        .get("seq")
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "?".to_string());
                     let kind = t.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
                     let pane = t.get("pane_id").and_then(|v| v.as_str()).unwrap_or("?");
                     let at = t.get("at").and_then(|v| v.as_str()).unwrap_or("?");
-                    let cause = t.get("cause").and_then(|v| v.as_str()).map(|c| format!(" ({})", c)).unwrap_or_default();
-                    let ws = t.get("workspace_id").and_then(|v| v.as_str()).map(|w| format!(" ws={}", w)).unwrap_or_default();
-                    lines.push(format!("#{} {} {} @ {}{}{}", seq, kind, pane, at, cause, ws));
+                    let cause = t
+                        .get("cause")
+                        .and_then(|v| v.as_str())
+                        .map(|c| format!(" ({})", c))
+                        .unwrap_or_default();
+                    let ws = t
+                        .get("workspace_id")
+                        .and_then(|v| v.as_str())
+                        .map(|w| format!(" ws={}", w))
+                        .unwrap_or_default();
+                    lines.push(format!(
+                        "#{} {} {} @ {}{}{}",
+                        seq, kind, pane, at, cause, ws
+                    ));
                 }
             }
             Err(_) => lines.push("could not parse transitions output".to_string()),
@@ -737,7 +822,9 @@ impl App {
     }
 
     fn handle_prompt_key(&mut self, key: KeyEvent) -> bool {
-        let Screen::Prompt { draft, .. } = &mut self.screen else { return true };
+        let Screen::Prompt { draft, .. } = &mut self.screen else {
+            return true;
+        };
         match key.code {
             KeyCode::Esc => {
                 self.screen = Screen::Main;
@@ -800,10 +887,14 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => move_by(self, -1),
             KeyCode::Down | KeyCode::Char('j') => move_by(self, 1),
             KeyCode::PageUp => {
-                for _ in 0..10 { move_by(self, -1); }
+                for _ in 0..10 {
+                    move_by(self, -1);
+                }
             }
             KeyCode::PageDown => {
-                for _ in 0..10 { move_by(self, 1); }
+                for _ in 0..10 {
+                    move_by(self, 1);
+                }
             }
             KeyCode::Home => self.cursor = 0,
             KeyCode::End => self.cursor = list_len.saturating_sub(1),
@@ -851,7 +942,11 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
     let area = frame.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Min(1), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
         .split(area);
 
     // Header — session label and query are untrusted/env-derived.
@@ -864,7 +959,11 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
         _ => String::new(),
     };
     let query = sanitize_display(&app.query);
-    let query_part = if query.is_empty() { String::new() } else { format!(" · /{}", query) };
+    let query_part = if query.is_empty() {
+        String::new()
+    } else {
+        format!(" · /{}", query)
+    };
     let header = format!(
         " Inbox — {} · scope:{}{} {}",
         sess,
@@ -884,28 +983,43 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
             let text = lines.join("\n"); // lines already sanitized in tui_model
             frame.render_widget(
                 Paragraph::new(text)
-                    .block(Block::default().borders(Borders::ALL).title(sanitize_display(title)))
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(sanitize_display(title)),
+                    )
                     .wrap(Wrap { trim: false }),
                 chunks[1],
             );
         }
-        Screen::Prompt { kind: _, draft, placeholder, label } => {
+        Screen::Prompt {
+            kind: _,
+            draft,
+            placeholder,
+            label,
+        } => {
             let mut lines = vec![
-                Line::from(sanitize_display(label)).style(Style::default().add_modifier(Modifier::BOLD)),
+                Line::from(sanitize_display(label))
+                    .style(Style::default().add_modifier(Modifier::BOLD)),
                 Line::from(format!("> {}█", sanitize_display(draft))),
                 Line::from(Span::styled(
-                    format!("(enter submit · esc cancel · placeholder: {})", sanitize_display(placeholder)),
+                    format!(
+                        "(enter submit · esc cancel · placeholder: {})",
+                        sanitize_display(placeholder)
+                    ),
                     Style::default().add_modifier(Modifier::DIM),
                 )),
             ];
-            if let Screen::Prompt { kind, .. } = &app.screen {
-                if let PromptKind::Unlink { hints, .. } = kind {
-                    if !hints.is_empty() {
-                        lines.push(Line::from(Span::styled(
-                            format!("existing links: {}", sanitize_display(&hints.join(", "))),
-                            Style::default().add_modifier(Modifier::DIM),
-                        )));
-                    }
+            if let Screen::Prompt {
+                kind: PromptKind::Unlink { hints, .. },
+                ..
+            } = &app.screen
+            {
+                if !hints.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        format!("existing links: {}", sanitize_display(&hints.join(", "))),
+                        Style::default().add_modifier(Modifier::DIM),
+                    )));
                 }
             }
             frame.render_widget(
@@ -915,7 +1029,8 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
         }
         Screen::Confirm { mutation } => {
             let mut text = vec![
-                Line::from(sanitize_display(&mutation.title)).style(Style::default().add_modifier(Modifier::BOLD)),
+                Line::from(sanitize_display(&mutation.title))
+                    .style(Style::default().add_modifier(Modifier::BOLD)),
                 Line::from(""),
             ];
             for l in &mutation.target_lines {
@@ -930,19 +1045,35 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
             let _ = danger_style(mutation.danger);
             frame.render_widget(
                 Clear,
-                Rect { x: chunks[1].x + chunks[1].width / 4, y: chunks[1].y + chunks[1].height / 4, width: chunks[1].width / 2, height: chunks[1].height / 2 },
+                Rect {
+                    x: chunks[1].x + chunks[1].width / 4,
+                    y: chunks[1].y + chunks[1].height / 4,
+                    width: chunks[1].width / 2,
+                    height: chunks[1].height / 2,
+                },
             );
             frame.render_widget(
                 Paragraph::new(text).block(Block::default().borders(Borders::ALL).title("confirm")),
-                Rect { x: chunks[1].x + chunks[1].width / 4, y: chunks[1].y + chunks[1].height / 4, width: chunks[1].width / 2, height: chunks[1].height / 2 },
+                Rect {
+                    x: chunks[1].x + chunks[1].width / 4,
+                    y: chunks[1].y + chunks[1].height / 4,
+                    width: chunks[1].width / 2,
+                    height: chunks[1].height / 2,
+                },
             );
         }
         Screen::Help => {
             let mut text: Vec<Line> = Vec::new();
-            text.push(Line::from("Inbox TUI keymap").style(Style::default().add_modifier(Modifier::BOLD)));
+            text.push(
+                Line::from("Inbox TUI keymap").style(Style::default().add_modifier(Modifier::BOLD)),
+            );
             text.push(Line::from(""));
             for kb in tui_model::INBOX_TUI_KEYMAP {
-                text.push(Line::from(format!("  {:<18} {}", kb.keys.join("/"), kb.description)));
+                text.push(Line::from(format!(
+                    "  {:<18} {}",
+                    kb.keys.join("/"),
+                    kb.description
+                )));
             }
             text.push(Line::from(""));
             text.push(Line::from("Mutations go through the inbox CLI contract — the TUI never writes organize state directly."));
@@ -960,7 +1091,11 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
                 .collect();
             frame.render_widget(
                 Paragraph::new(safe.join("\n"))
-                    .block(Block::default().borders(Borders::ALL).title("Organize-transition log (read-only)"))
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title("Organize-transition log (read-only)"),
+                    )
                     .wrap(Wrap { trim: false }),
                 chunks[1],
             );
@@ -970,7 +1105,10 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
     // Footer — status embeds pane ids/specs; the filter draft is raw
     // user input. Both are sanitized before display.
     let hint = if app.filter_mode {
-        format!(" filter: /{}█ — enter apply · esc cancel", sanitize_display(&app.filter_draft))
+        format!(
+            " filter: /{}█ — enter apply · esc cancel",
+            sanitize_display(&app.filter_draft)
+        )
     } else {
         format!(" {} · ? help · q quit", sanitize_display(&app.status))
     };
@@ -995,7 +1133,12 @@ fn render_main(app: &mut App, frame: &mut ratatui::Frame, area: Rect) {
         }
         ViewState::Error(e) => {
             let text = vec![
-                Line::from(Span::styled("  error: ", Style::default().add_modifier(Modifier::BOLD).fg(ratatui::style::Color::Red))),
+                Line::from(Span::styled(
+                    "  error: ",
+                    Style::default()
+                        .add_modifier(Modifier::BOLD)
+                        .fg(ratatui::style::Color::Red),
+                )),
                 Line::from(format!("  {}", e)),
                 Line::from("  R — retry · q — quit"),
             ];
@@ -1009,10 +1152,16 @@ fn render_main(app: &mut App, frame: &mut ratatui::Frame, area: Rect) {
                 } else {
                     "  no items match the current scope/filter"
                 };
-                frame.render_widget(Paragraph::new(vec![
-                    Line::from(Span::styled("  (empty)", Style::default().add_modifier(Modifier::DIM))),
-                    Line::from(msg),
-                ]), area);
+                frame.render_widget(
+                    Paragraph::new(vec![
+                        Line::from(Span::styled(
+                            "  (empty)",
+                            Style::default().add_modifier(Modifier::DIM),
+                        )),
+                        Line::from(msg),
+                    ]),
+                    area,
+                );
                 return;
             }
             // Scroll window: reserve 1 line for the position indicator.
@@ -1030,7 +1179,11 @@ fn render_main(app: &mut App, frame: &mut ratatui::Frame, area: Rect) {
                 let item = &list[app.scroll_top + i];
                 let is_sel = app.scroll_top + i == app.cursor;
                 let badges = item_badges(item);
-                let badge_text = if badges.is_empty() { String::new() } else { format!("[{}] ", badges) };
+                let badge_text = if badges.is_empty() {
+                    String::new()
+                } else {
+                    format!("[{}] ", badges)
+                };
                 let title = item_title(item);
                 let status_text = item
                     .agent_status
@@ -1044,7 +1197,11 @@ fn render_main(app: &mut App, frame: &mut ratatui::Frame, area: Rect) {
                 };
                 let pane_label = sanitize_display(&item.pane_id);
                 let prefix = if is_sel { "❯ " } else { "  " };
-                let sel_style = if is_sel { Style::default().add_modifier(Modifier::BOLD) } else { Style::default() };
+                let sel_style = if is_sel {
+                    Style::default().add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
                 let used = prefix.chars().count()
                     + badge_text.chars().count()
                     + title.chars().count()
@@ -1098,7 +1255,12 @@ pub fn plain_list(payload: &ListPayload) -> Vec<String> {
     lines.push(format!(
         "inbox — session={} total={} inbox={} attention={} organized={} pinned={} archived={}",
         session_label,
-        counts.total, counts.inbox, counts.attention, counts.organized, counts.pinned, counts.archived
+        counts.total,
+        counts.inbox,
+        counts.attention,
+        counts.organized,
+        counts.pinned,
+        counts.archived
     ));
     for item in payload.items.iter().flatten() {
         let badges = item_badges(item);
@@ -1107,18 +1269,35 @@ pub fn plain_list(payload: &ListPayload) -> Vec<String> {
             .as_ref()
             .map(|s| sanitize_display(&format!(" [{}]", s)))
             .unwrap_or_default();
-        let hidden = if item.in_inbox { String::new() } else { " (hidden)".to_string() };
+        let hidden = if item.in_inbox {
+            String::new()
+        } else {
+            " (hidden)".to_string()
+        };
         let title = sanitize_display(item.title.as_deref().unwrap_or(""));
-        let badge_part = if badges.is_empty() { String::new() } else { format!(" <{}>", badges) };
+        let badge_part = if badges.is_empty() {
+            String::new()
+        } else {
+            format!(" <{}>", badges)
+        };
         let links_part = if item.links.is_empty() {
             String::new()
         } else {
-            let refs: Vec<String> = item.links.iter().map(|l| sanitize_display(&l.ref_)).collect();
+            let refs: Vec<String> = item
+                .links
+                .iter()
+                .map(|l| sanitize_display(&l.ref_))
+                .collect();
             format!(" links={}", refs.join(","))
         };
         lines.push(format!(
             "  {}{}{} {}{}{}",
-            sanitize_display(&item.pane_id), status, hidden, title, badge_part, links_part
+            sanitize_display(&item.pane_id),
+            status,
+            hidden,
+            title,
+            badge_part,
+            links_part
         ));
     }
     lines.push("interactive UI requires a TTY; use the CLI for scripting.".to_string());
@@ -1128,7 +1307,11 @@ pub fn plain_list(payload: &ListPayload) -> Vec<String> {
 fn plain_mode() -> i32 {
     match run_list() {
         ListOutcome::Err(e) => {
-            let _ = writeln!(io::stderr(), "{}", serde_json::json!({"ok": false, "error": e}));
+            let _ = writeln!(
+                io::stderr(),
+                "{}",
+                serde_json::json!({"ok": false, "error": e})
+            );
             1
         }
         ListOutcome::Ok { payload } => {
@@ -1153,7 +1336,11 @@ fn run_open_action() -> i32 {
     let origin_json = std::env::var("HERDR_PLUGIN_CONTEXT_JSON").unwrap_or_default();
     let workspace_id = serde_json::from_str::<Value>(&origin_json)
         .ok()
-        .and_then(|v| v.get("workspace_id").and_then(|w| w.as_str()).map(|s| s.to_string()));
+        .and_then(|v| {
+            v.get("workspace_id")
+                .and_then(|w| w.as_str())
+                .map(|s| s.to_string())
+        });
 
     let mut argv: Vec<String> = vec![
         "plugin".into(),
@@ -1257,17 +1444,18 @@ fn tui_main(args: &[String]) -> i32 {
             return 1;
         }
     };
-    let _ = terminal.clear();
+    // NOTE: no terminal.clear() here — ratatui-core's clear() queries the
+    // cursor position (ESC[6n) and blocks ~2s on terminals that never
+    // answer DSR (dumb PTYs, minimal emulators). EnterAlternateScreen
+    // already gives a blank screen, and the first draw repaints fully.
 
     let result = (|| -> io::Result<()> {
         loop {
             terminal.draw(|frame| render(&mut app, frame))?;
             if event::poll(Duration::from_millis(100))? {
                 if let Event::Key(key) = event::read()? {
-                    if key.kind == event::KeyEventKind::Press {
-                        if !app.handle_key(key) {
-                            break;
-                        }
+                    if key.kind == event::KeyEventKind::Press && !app.handle_key(key) {
+                        break;
                     }
                 }
             }
@@ -1279,11 +1467,7 @@ fn tui_main(args: &[String]) -> i32 {
     })();
 
     let _ = terminal.show_cursor();
-    crossterm::execute!(
-        io::stdout(),
-        crossterm::terminal::LeaveAlternateScreen
-    )
-    .ok();
+    crossterm::execute!(io::stdout(), crossterm::terminal::LeaveAlternateScreen).ok();
     crossterm::terminal::disable_raw_mode().ok();
 
     match result {

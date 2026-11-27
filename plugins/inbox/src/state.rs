@@ -211,11 +211,17 @@ pub struct InboxState {
     pub sessions: BTreeMap<String, BTreeMap<String, InboxEntry>>,
     /// `watch-pr` baselines: sessionKey → pane_id → link ref → LinkWatch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub watch: Option<BTreeMap<String, BTreeMap<String, BTreeMap<String, LinkWatch>>>>,
+    pub watch: Option<WatchBaselines>,
     /// Organize-transition log per session key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transitions: Option<BTreeMap<String, TransitionLog>>,
 }
+
+/// watch-pr baselines: sessionKey → pane_id → link ref → LinkWatch.
+pub type WatchBaselines = BTreeMap<String, BTreeMap<String, BTreeMap<String, LinkWatch>>>;
+
+/// Per-session watch map: pane_id → link ref → LinkWatch.
+pub type SessionWatchMap = BTreeMap<String, BTreeMap<String, LinkWatch>>;
 
 pub fn empty_state() -> InboxState {
     InboxState {
@@ -231,26 +237,20 @@ pub fn session_entries<'a>(
     state: &'a mut InboxState,
     session_key: &str,
 ) -> &'a mut BTreeMap<String, InboxEntry> {
-    state
-        .sessions
-        .entry(session_key.to_string())
-        .or_insert_with(BTreeMap::new)
+    state.sessions.entry(session_key.to_string()).or_default()
 }
 
 /// Watch baselines for one session, created on demand for writes.
-pub fn session_watch<'a>(
-    state: &'a mut InboxState,
-    session_key: &str,
-) -> &'a mut BTreeMap<String, BTreeMap<String, LinkWatch>> {
+pub fn session_watch<'a>(state: &'a mut InboxState, session_key: &str) -> &'a mut SessionWatchMap {
     let watch = state.watch.get_or_insert_with(BTreeMap::new);
-    watch.entry(session_key.to_string()).or_insert_with(BTreeMap::new)
+    watch.entry(session_key.to_string()).or_default()
 }
 
 /// Read-only watch baselines for one session.
 pub fn session_watch_read<'a>(
     state: &'a InboxState,
     session_key: &str,
-) -> Option<&'a BTreeMap<String, BTreeMap<String, LinkWatch>>> {
+) -> Option<&'a SessionWatchMap> {
     state.watch.as_ref().and_then(|w| w.get(session_key))
 }
 
@@ -313,40 +313,54 @@ pub fn load_state() -> Result<InboxState, String> {
     // The transition log is append-only audit data: keep entries that
     // look well-formed, drop malformed ones individually.
     let mut transitions: BTreeMap<String, TransitionLog> = BTreeMap::new();
-    if let Some(transitions_raw) = parsed.get("transitions").filter(|v| v.is_object()) {
-        if let Value::Object(map) = transitions_raw {
-            for (key, log_value) in map {
-                let seq_ok = log_value.get("seq").map(|v| v.is_number()).unwrap_or(false);
-                let items_ok = log_value
-                    .get("items")
-                    .map(|v| v.is_array())
-                    .unwrap_or(false);
-                if !seq_ok || !items_ok {
-                    continue;
-                }
-                // Per-item filter mirroring the TS loadState: keep only
-                // entries with numeric seq, string kind, string pane_id.
-                let mut items: Vec<InboxTransition> = Vec::new();
-                if let Some(Value::Array(raw_items)) = log_value.get("items") {
-                    for item_value in raw_items {
-                        let well_formed = item_value.get("seq").map(|v| v.is_number()).unwrap_or(false)
-                            && item_value.get("kind").map(|v| v.is_string()).unwrap_or(false)
-                            && item_value.get("pane_id").map(|v| v.is_string()).unwrap_or(false);
-                        if !well_formed {
-                            continue;
-                        }
-                        if let Ok(t) = serde_json::from_value::<InboxTransition>(item_value.clone()) {
-                            items.push(t);
-                        }
+    if let Some(Value::Object(map)) = parsed.get("transitions") {
+        for (key, log_value) in map {
+            let seq_ok = log_value.get("seq").map(|v| v.is_number()).unwrap_or(false);
+            let items_ok = log_value
+                .get("items")
+                .map(|v| v.is_array())
+                .unwrap_or(false);
+            if !seq_ok || !items_ok {
+                continue;
+            }
+            // Per-item filter mirroring the TS loadState: keep only
+            // entries with numeric seq, string kind, string pane_id.
+            let mut items: Vec<InboxTransition> = Vec::new();
+            if let Some(Value::Array(raw_items)) = log_value.get("items") {
+                for item_value in raw_items {
+                    let well_formed = item_value
+                        .get("seq")
+                        .map(|v| v.is_number())
+                        .unwrap_or(false)
+                        && item_value
+                            .get("kind")
+                            .map(|v| v.is_string())
+                            .unwrap_or(false)
+                        && item_value
+                            .get("pane_id")
+                            .map(|v| v.is_string())
+                            .unwrap_or(false);
+                    if !well_formed {
+                        continue;
+                    }
+                    if let Ok(t) = serde_json::from_value::<InboxTransition>(item_value.clone()) {
+                        items.push(t);
                     }
                 }
-                let seq = log_value.get("seq").and_then(|v| v.as_i64()).unwrap_or(0);
-                let dropped = log_value.get("dropped").and_then(|v| v.as_i64()).unwrap_or(0);
-                transitions.insert(
-                    key.clone(),
-                    TransitionLog { seq, dropped, items },
-                );
             }
+            let seq = log_value.get("seq").and_then(|v| v.as_i64()).unwrap_or(0);
+            let dropped = log_value
+                .get("dropped")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            transitions.insert(
+                key.clone(),
+                TransitionLog {
+                    seq,
+                    dropped,
+                    items,
+                },
+            );
         }
     }
 
@@ -361,7 +375,7 @@ pub fn load_state() -> Result<InboxState, String> {
     Ok(state)
 }
 
-fn acquire_lock() -> Result<Box<dyn FnOnce() -> () + Send>, String> {
+fn acquire_lock() -> Result<Box<dyn FnOnce() + Send>, String> {
     let file = lock_path();
     if let Some(parent) = file.parent() {
         fs::create_dir_all(parent)
@@ -370,7 +384,11 @@ fn acquire_lock() -> Result<Box<dyn FnOnce() -> () + Send>, String> {
     let deadline = now_millis() + LOCK_TIMEOUT_MS;
     loop {
         // O_EXCL create — mirrors `open(file, "wx")`.
-        match fs::OpenOptions::new().write(true).create_new(true).open(&file) {
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&file)
+        {
             Ok(mut handle) => {
                 let body = serde_json::json!({
                     "pid": std::process::id(),
@@ -429,11 +447,12 @@ where
         let mut tmp = path.clone().into_os_string();
         tmp.push(format!(".tmp-{}", std::process::id()));
         let tmp_path = PathBuf::from(tmp);
-        let body = format!("{}\n", serde_json::to_string_pretty(&state).unwrap_or_default());
-        fs::write(&tmp_path, body)
-            .map_err(|e| format!("cannot write state tmp file: {}", e))?;
-        fs::rename(&tmp_path, &path)
-            .map_err(|e| format!("cannot commit state file: {}", e))?;
+        let body = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&state).unwrap_or_default()
+        );
+        fs::write(&tmp_path, body).map_err(|e| format!("cannot write state tmp file: {}", e))?;
+        fs::rename(&tmp_path, &path).map_err(|e| format!("cannot commit state file: {}", e))?;
         Ok(out)
     })();
     release();

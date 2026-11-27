@@ -30,7 +30,10 @@ fn parse_envelope(raw: &str) -> Option<EventEnvelope> {
     let parsed: Value = serde_json::from_str(raw).ok()?;
     let data = parsed.get("data");
     Some(EventEnvelope {
-        event: parsed.get("event").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        event: parsed
+            .get("event")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         pane_id: data
             .and_then(|d| d.get("pane_id"))
             .and_then(|v| v.as_str())
@@ -68,8 +71,7 @@ fn session_key_or_exit() -> String {
         mutation: true,
         ..Default::default()
     };
-    hoxay_herdr_client::target::session_key_for(&opts)
-        .unwrap_or_else(|e| fail_target(&e))
+    hoxay_herdr_client::target::session_key_for(&opts).unwrap_or_else(|e| fail_target(&e))
 }
 
 struct AgentStatusOutcome {
@@ -135,8 +137,7 @@ fn run_hook() -> Result<(), String> {
                     Some("pane_closed"),
                 );
             }
-        })
-        .map_err(|e| e)?;
+        })?;
         return Ok(());
     }
 
@@ -155,9 +156,7 @@ fn run_hook() -> Result<(), String> {
         // resolve, reinsert only when organize state survives).
         let (workspace_id, pinned, organize_kind, organize_until, hide_clears) = {
             let entries = session_entries(state, &session_key);
-            let Some(mut entry) = entries.remove(&pane_id) else {
-                return None;
-            };
+            let mut entry = entries.remove(&pane_id)?;
             let workspace_id = entry.workspace_id.clone();
             let result = resolve_entry(&mut entry, agent.as_ref(), now);
             entry.updated_at = model::iso_millis(now);
@@ -205,8 +204,7 @@ fn run_hook() -> Result<(), String> {
             organize_until,
             pinned,
         })
-    })
-    .map_err(|e| e)?;
+    })?;
 
     let Some(outcome) = outcome else {
         return Ok(());
@@ -218,7 +216,11 @@ fn run_hook() -> Result<(), String> {
     tokens.insert("inbox_snoozed_until".to_string(), outcome.organize_until);
     tokens.insert(
         "inbox_pinned".to_string(),
-        if outcome.pinned { Some("true".to_string()) } else { None },
+        if outcome.pinned {
+            Some("true".to_string())
+        } else {
+            None
+        },
     );
     if let Err(err) = commands::report_pane_metadata(&pane_id, &tokens, &hook_call_options()) {
         eprintln!(

@@ -12,17 +12,15 @@
 //!   status that requires user attention stays in the inbox regardless
 //!   of marks.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, TimeZone, Utc};
 use hoxay_herdr_client::snapshot::{AgentInfo, PaneInfo};
 
 use serde::Serialize;
 
-use crate::state::{
-    AgentSessionRef, GenerationMark, InboxEntry, LinkKind, PaneLink, SnoozedMark,
-};
+use crate::state::{AgentSessionRef, GenerationMark, InboxEntry, LinkKind, PaneLink, SnoozedMark};
 
 pub type OrganizeKind = &'static str; // "settled" | "snoozed" | "archived"
 
@@ -93,11 +91,12 @@ pub const ATTENTION_STATUSES: &[&str] = &["blocked"];
 
 pub fn agent_session_ref(agent: Option<&AgentInfo>) -> Option<AgentSessionRef> {
     let session = agent?.agent_session.as_ref()?;
-    let mut ref_ = AgentSessionRef::default();
     // TS copies any string-typed field verbatim (empty strings included).
-    ref_.agent = session.agent.clone();
-    ref_.kind = session.kind.clone();
-    ref_.value = session.value.clone();
+    let ref_ = AgentSessionRef {
+        agent: session.agent.clone(),
+        kind: session.kind.clone(),
+        value: session.value.clone(),
+    };
     if ref_.agent.is_some() || ref_.kind.is_some() || ref_.value.is_some() {
         Some(ref_)
     } else {
@@ -207,14 +206,14 @@ fn mark_clear_cause(
 /// matches or the recorded seq regresses. Forward seq advances never
 /// expire a link.
 fn link_stale(link: &PaneLink, agent: Option<&AgentInfo>) -> bool {
-    if !same_agent_session(link.agent_session.as_ref(), agent_session_ref(agent).as_ref()) {
+    if !same_agent_session(
+        link.agent_session.as_ref(),
+        agent_session_ref(agent).as_ref(),
+    ) {
         return true;
     }
     let seq = current_seq(agent);
-    if seq >= 0 && link.seq >= 0 && seq < link.seq {
-        return true;
-    }
-    false
+    seq >= 0 && link.seq >= 0 && seq < link.seq
 }
 
 /// True while the entry carries any organize state worth retaining.
@@ -273,7 +272,11 @@ pub fn resolve_entry(
 
     // Order matches TS: snoozed, settled, archived, pinned.
     let snoozed_until = entry.snoozed.as_ref().map(|m| m.until.clone());
-    clear_mark!(ClearedMarkField::Snoozed, entry.snoozed, snoozed_until.as_deref());
+    clear_mark!(
+        ClearedMarkField::Snoozed,
+        entry.snoozed,
+        snoozed_until.as_deref()
+    );
     clear_mark!(ClearedMarkField::Settled, entry.settled, None);
     clear_mark!(ClearedMarkField::Archived, entry.archived, None);
     clear_mark!(ClearedMarkField::Pinned, entry.pinned, None);
@@ -401,7 +404,7 @@ pub fn settle_pane(
     pane: &PaneInfo,
     agent: Option<&AgentInfo>,
     now: DateTime<Utc>,
-) -> () {
+) {
     let now_iso = iso_millis(now);
     let entry = upsert_entry(entries, pane, &now_iso);
     entry.settled = Some(generation_mark(agent, now));
@@ -464,7 +467,11 @@ fn drop_if_empty(entries: &mut BTreeMap<String, InboxEntry>, pane_id: &str) {
     }
 }
 
-pub fn unpin_pane(entries: &mut BTreeMap<String, InboxEntry>, pane_id: &str, now: DateTime<Utc>) -> bool {
+pub fn unpin_pane(
+    entries: &mut BTreeMap<String, InboxEntry>,
+    pane_id: &str,
+    now: DateTime<Utc>,
+) -> bool {
     let Some(entry) = entries.get_mut(pane_id) else {
         return false;
     };
@@ -523,9 +530,10 @@ pub fn link_pane(
         agent_session,
     };
     let links = entry.links.get_or_insert_with(Vec::new);
-    if let Some(existing) = links.iter_mut().find(|l| {
-        l.kind == record.kind && l.repo == record.repo && l.number == record.number
-    }) {
+    if let Some(existing) = links
+        .iter_mut()
+        .find(|l| l.kind == record.kind && l.repo == record.repo && l.number == record.number)
+    {
         *existing = record;
     } else {
         links.push(record);
@@ -543,9 +551,9 @@ pub fn unlink_pane(
 ) -> Option<PaneLink> {
     let entry = entries.get_mut(pane_id)?;
     let links = entry.links.as_mut()?;
-    let index = links.iter().position(|l| {
-        l.kind == kind && l.repo == repo && l.number == number
-    })?;
+    let index = links
+        .iter()
+        .position(|l| l.kind == kind && l.repo == repo && l.number == number)?;
     let removed = links.remove(index);
     entry.updated_at = iso_millis(now);
     if links.is_empty() {
@@ -599,7 +607,10 @@ pub fn compute_order_ranks(
     placement: &OrderPlacement,
 ) -> Result<BTreeMap<String, i64>, String> {
     let Some(moved_idx) = siblings.iter().position(|i| i.pane_id == moved_pane_id) else {
-        return Err(format!("pane is not in the inbox order group: {}", moved_pane_id));
+        return Err(format!(
+            "pane is not in the inbox order group: {}",
+            moved_pane_id
+        ));
     };
     let moved = &siblings[moved_idx];
     let rest: Vec<&InboxItem> = siblings
@@ -643,6 +654,7 @@ pub fn compute_order_ranks(
     Ok(ranks)
 }
 
+#[derive(Default)]
 pub struct PruneOptions {
     /// Entries for panes absent from the snapshot are dropped after this
     /// age. Default 24h.
@@ -650,15 +662,6 @@ pub struct PruneOptions {
     /// Hard cap on stored entries; oldest `updated_at` dropped first.
     /// Default 500.
     pub max_entries: Option<usize>,
-}
-
-impl Default for PruneOptions {
-    fn default() -> Self {
-        PruneOptions {
-            absent_retention_ms: None,
-            max_entries: None,
-        }
-    }
 }
 
 /// Bound state growth: drop organize entries whose pane has been absent
@@ -741,7 +744,10 @@ pub fn apply_inbox_filters(items: &[InboxItem], filters: &InboxFilters) -> Vec<I
                 let matches = if org == "none" {
                     item.organize.is_none()
                 } else {
-                    item.organize.as_ref().map(|o| o.kind == org.as_str()).unwrap_or(false)
+                    item.organize
+                        .as_ref()
+                        .map(|o| o.kind == org.as_str())
+                        .unwrap_or(false)
                 };
                 if !matches {
                     return false;
@@ -871,10 +877,18 @@ pub fn build_inbox(
     // rank, then pane id.
     items.sort_by(|a, b| {
         if a.pinned != b.pinned {
-            return if a.pinned { Ordering::Less } else { Ordering::Greater };
+            return if a.pinned {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            };
         }
         if a.attention != b.attention {
-            return if a.attention { Ordering::Less } else { Ordering::Greater };
+            return if a.attention {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            };
         }
         let ao = a.order.unwrap_or(i64::MAX);
         let bo = b.order.unwrap_or(i64::MAX);
@@ -919,9 +933,10 @@ pub fn parse_instant(s: &str) -> Option<DateTime<Utc>> {
             return Some(Utc.from_utc_datetime(&naive));
         }
         if let Ok(date) = chrono::NaiveDate::parse_from_str(s, fmt) {
-            return date.and_hms_opt(0, 0, 0).map(|dt| Utc.from_utc_datetime(&dt));
+            return date
+                .and_hms_opt(0, 0, 0)
+                .map(|dt| Utc.from_utc_datetime(&dt));
         }
     }
     None
 }
-

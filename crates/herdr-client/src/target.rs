@@ -96,7 +96,8 @@ pub struct ResolveTargetOptions {
 }
 
 /// Mirrors herdr's `validate_name` (src/session.rs): ASCII alnum + `.` `_` `-`.
-const SESSION_NAME_PATTERN: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-";
+const SESSION_NAME_PATTERN: &[u8] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-";
 
 /// Mirrors herdr's `validate_name` (src/session.rs): ASCII alnum + `.` `_` `-`.
 pub fn is_valid_session_name(name: &str) -> bool {
@@ -111,7 +112,10 @@ pub fn is_valid_session_name(name: &str) -> bool {
 
 /// Default session socket: `<herdr config dir>/herdr.sock`.
 pub fn default_socket_path() -> String {
-    Path::new(&herdr_config_dir()).join("herdr.sock").to_string_lossy().into_owned()
+    Path::new(&herdr_config_dir())
+        .join("herdr.sock")
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Named-session socket: `<herdr config dir>/sessions/<name>/herdr.sock`.
@@ -338,7 +342,9 @@ fn env_nonempty_opt(value: Option<&str>) -> Option<String> {
 
 /// Resolve which herdr socket to talk to. Kept for callers that only
 /// need the path; prefer `resolve_target` when source/session matters.
-pub fn resolve_socket_path(options: &ResolveTargetOptions) -> Result<String, TargetResolutionError> {
+pub fn resolve_socket_path(
+    options: &ResolveTargetOptions,
+) -> Result<String, TargetResolutionError> {
     Ok(resolve_target(options)?.socket_path)
 }
 

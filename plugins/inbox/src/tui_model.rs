@@ -131,7 +131,12 @@ pub fn parse_list_output(stdout: &str) -> CliJsonResult {
     if parsed.get("ok").and_then(|v| v.as_bool()) == Some(false) {
         let msg = parsed
             .get("error")
-            .and_then(|e| e.get("message").and_then(|m| m.as_str()).map(|s| s.to_string()).or_else(|| e.as_str().map(|s| s.to_string())))
+            .and_then(|e| {
+                e.get("message")
+                    .and_then(|m| m.as_str())
+                    .map(|s| s.to_string())
+                    .or_else(|| e.as_str().map(|s| s.to_string()))
+            })
             .unwrap_or_else(|| "unknown error".to_string());
         return CliJsonResult::Err(msg);
     }
@@ -149,7 +154,11 @@ pub fn parse_list_output(stdout: &str) -> CliJsonResult {
 pub fn cli_error_message(status: i32, stdout: &str, stderr: &str) -> String {
     let text = {
         let t = stderr.trim();
-        if t.is_empty() { stdout.trim() } else { t }
+        if t.is_empty() {
+            stdout.trim()
+        } else {
+            t
+        }
     };
     if !text.is_empty() {
         if let Ok(parsed) = serde_json::from_str::<Value>(text) {
@@ -170,12 +179,7 @@ pub fn cli_error_message(status: i32, stdout: &str, stderr: &str) -> String {
 // --- Display formatting -----------------------------------------------------------
 
 fn organize_label(kind: &str) -> &str {
-    match kind {
-        "settled" => "settled",
-        "snoozed" => "snoozed",
-        "archived" => "archived",
-        other => other,
-    }
+    kind
 }
 
 /// Short badge string for one inbox item (pin / attention / organize / links).
@@ -221,11 +225,19 @@ pub fn item_title(item: &TuiItem) -> String {
 /// (title, cwd, pane_id) plus link refs and workspace for convenience.
 pub fn item_search_text(item: &TuiItem) -> String {
     let mut fields: Vec<String> = Vec::new();
-    if let Some(t) = &item.title { fields.push(t.clone()); }
-    if let Some(c) = &item.cwd { fields.push(c.clone()); }
+    if let Some(t) = &item.title {
+        fields.push(t.clone());
+    }
+    if let Some(c) = &item.cwd {
+        fields.push(c.clone());
+    }
     fields.push(item.pane_id.clone());
-    if let Some(w) = &item.workspace_id { fields.push(w.clone()); }
-    if let Some(s) = &item.agent_status { fields.push(s.clone()); }
+    if let Some(w) = &item.workspace_id {
+        fields.push(w.clone());
+    }
+    if let Some(s) = &item.agent_status {
+        fields.push(s.clone());
+    }
     for l in &item.links {
         fields.push(l.ref_.clone());
     }
@@ -264,11 +276,7 @@ pub fn next_scope(scope: InboxScope) -> InboxScope {
 }
 
 /// Apply scope + free-text query. Case-insensitive AND over terms.
-pub fn visible_items(
-    items: &[TuiItem],
-    scope: InboxScope,
-    query: &str,
-) -> Vec<TuiItem> {
+pub fn visible_items(items: &[TuiItem], scope: InboxScope, query: &str) -> Vec<TuiItem> {
     let mut out: Vec<TuiItem> = match scope {
         InboxScope::Inbox => items.iter().filter(|i| i.in_inbox).cloned().collect(),
         InboxScope::Hidden => items.iter().filter(|i| !i.in_inbox).cloned().collect(),
@@ -291,38 +299,68 @@ pub fn visible_items(
 pub fn item_detail_lines(item: &TuiItem, generated_at: Option<&str>) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     lines.push(format!("pane:      {}", item.pane_id));
-    if let Some(w) = &item.workspace_id { lines.push(format!("workspace: {}", w)); }
-    if let Some(t) = &item.tab_id { lines.push(format!("tab:       {}", t)); }
-    if let Some(t) = &item.title { lines.push(format!("title:     {}", t)); }
-    if let Some(c) = &item.cwd { lines.push(format!("cwd:       {}", c)); }
-    if let Some(s) = &item.agent_status { lines.push(format!("agent:     {}", s)); }
+    if let Some(w) = &item.workspace_id {
+        lines.push(format!("workspace: {}", w));
+    }
+    if let Some(t) = &item.tab_id {
+        lines.push(format!("tab:       {}", t));
+    }
+    if let Some(t) = &item.title {
+        lines.push(format!("title:     {}", t));
+    }
+    if let Some(c) = &item.cwd {
+        lines.push(format!("cwd:       {}", c));
+    }
+    if let Some(s) = &item.agent_status {
+        lines.push(format!("agent:     {}", s));
+    }
     if let Some(seq) = item.state_change_seq {
         lines.push(format!("seq:       {}", seq));
     }
     if let Some(sess) = &item.agent_session {
-        let parts: Vec<&str> = [sess.agent.as_deref(), sess.kind.as_deref(), sess.value.as_deref()]
-            .into_iter()
-            .flatten()
-            .filter(|s| !s.is_empty())
-            .collect();
+        let parts: Vec<&str> = [
+            sess.agent.as_deref(),
+            sess.kind.as_deref(),
+            sess.value.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|s| !s.is_empty())
+        .collect();
         if !parts.is_empty() {
             lines.push(format!("session:  {}", parts.join("/")));
         }
     }
-    lines.push(format!("pinned:    {}", if item.pinned { "yes" } else { "no" }));
+    lines.push(format!(
+        "pinned:    {}",
+        if item.pinned { "yes" } else { "no" }
+    ));
     if let Some(order) = item.order {
         lines.push(format!("order:     {}", order));
     }
-    lines.push(format!("attention: {}", if item.attention { "yes" } else { "no" }));
-    lines.push(format!("inbox:     {}", if item.in_inbox { "visible" } else { "hidden" }));
+    lines.push(format!(
+        "attention: {}",
+        if item.attention { "yes" } else { "no" }
+    ));
+    lines.push(format!(
+        "inbox:     {}",
+        if item.in_inbox { "visible" } else { "hidden" }
+    ));
     if let Some(o) = &item.organize {
-        let until = o.until.as_deref().map(|u| format!(" until {}", u)).unwrap_or_default();
+        let until = o
+            .until
+            .as_deref()
+            .map(|u| format!(" until {}", u))
+            .unwrap_or_default();
         lines.push(format!("organize: {} since {}{}", o.kind, o.since, until));
     }
     if !item.links.is_empty() {
         lines.push("links:".to_string());
         for link in &item.links {
-            lines.push(format!("  {}  {}  (declared {})", link.kind, link.ref_, link.at));
+            lines.push(format!(
+                "  {}  {}  (declared {})",
+                link.kind, link.ref_, link.at
+            ));
         }
     } else {
         lines.push("links:     none".to_string());
@@ -363,7 +401,9 @@ fn session_ref_key(s: Option<&AgentSessionRef>) -> String {
 /// silently retargets.
 pub fn stale_check(before: Option<&TuiItem>, after: Option<&TuiItem>) -> StaleVerdict {
     let Some(before) = before else {
-        return StaleVerdict::Gone { reason: "no item was selected".to_string() };
+        return StaleVerdict::Gone {
+            reason: "no item was selected".to_string(),
+        };
     };
     let Some(after) = after else {
         return StaleVerdict::Gone {
@@ -385,8 +425,14 @@ pub fn stale_check(before: Option<&TuiItem>, after: Option<&TuiItem>) -> StaleVe
             reason: format!(
                 "state_change_seq advanced for {} ({} → {})",
                 before.pane_id,
-                before.state_change_seq.map(|s| s.to_string()).unwrap_or_else(|| "?".to_string()),
-                after.state_change_seq.map(|s| s.to_string()).unwrap_or_else(|| "?".to_string()),
+                before
+                    .state_change_seq
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "?".to_string()),
+                after
+                    .state_change_seq
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "?".to_string()),
             ),
         };
     }
@@ -395,21 +441,25 @@ pub fn stale_check(before: Option<&TuiItem>, after: Option<&TuiItem>) -> StaleVe
 
 // --- Input parsers (mirror CLI validation; CLI re-validates anyway) -----------------
 
-use std::sync::LazyLock;
 use regex::Regex;
+use std::sync::LazyLock;
 
 static TRACKER_REF_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^([A-Za-z0-9][A-Za-z0-9_.-]*(?:/[A-Za-z0-9][A-Za-z0-9_.-]*)+)#([1-9][0-9]*)$").unwrap()
+    Regex::new(r"^([A-Za-z0-9][A-Za-z0-9_.-]*(?:/[A-Za-z0-9][A-Za-z0-9_.-]*)+)#([1-9][0-9]*)$")
+        .unwrap()
 });
 static LINK_SPEC_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^(pr|pull|issue|bug)\s*[: ]\s*(\S+)$").unwrap());
 static SNOOZE_SPEC_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(?:\+?\d+[mhd]|\d{4}-\d{2}-\d{2}[T ].*)$").unwrap());
-static ISO_PREFIX_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^\d{4}-").unwrap());
+static ISO_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\d{4}-").unwrap());
 
 pub enum LinkSpec {
-    Ok { kind: &'static str, flag: &'static str, ref_: String },
+    Ok {
+        kind: &'static str,
+        flag: &'static str,
+        ref_: String,
+    },
     Err(String),
 }
 
@@ -423,7 +473,11 @@ pub fn parse_link_spec(input: &str) -> LinkSpec {
         );
     };
     let word = m[1].to_lowercase();
-    let kind: &'static str = if word == "issue" || word == "bug" { "issue" } else { "pr" };
+    let kind: &'static str = if word == "issue" || word == "bug" {
+        "issue"
+    } else {
+        "pr"
+    };
     let ref_ = m[2].to_string();
     if !TRACKER_REF_RE.is_match(&ref_) {
         return LinkSpec::Err(format!("invalid tracker ref: {}", ref_));
@@ -472,17 +526,16 @@ pub fn validate_snooze_spec(input: &str) -> SnoozeSpec {
 // --- Order placement ---------------------------------------------------------------
 
 pub enum OrderMove {
-    Ok { flag: &'static str, ref_pane_id: String },
+    Ok {
+        flag: &'static str,
+        ref_pane_id: String,
+    },
     Err(String),
 }
 
 /// Compute the `order` placement for moving `paneId` one step up or down
 /// inside its display group.
-pub fn order_move_target(
-    items: &[TuiItem],
-    pane_id: &str,
-    dir: OrderDir,
-) -> OrderMove {
+pub fn order_move_target(items: &[TuiItem], pane_id: &str, dir: OrderDir) -> OrderMove {
     let moved = items.iter().find(|i| i.pane_id == pane_id && i.in_inbox);
     let Some(moved) = moved else {
         return OrderMove::Err(format!(
@@ -492,11 +545,12 @@ pub fn order_move_target(
     };
     let siblings: Vec<&TuiItem> = items
         .iter()
-        .filter(|i| {
-            i.in_inbox && i.attention == moved.attention && i.pinned == moved.pinned
-        })
+        .filter(|i| i.in_inbox && i.attention == moved.attention && i.pinned == moved.pinned)
         .collect();
-    let idx = siblings.iter().position(|i| i.pane_id == pane_id).unwrap_or(0);
+    let idx = siblings
+        .iter()
+        .position(|i| i.pane_id == pane_id)
+        .unwrap_or(0);
     let target_idx = match dir {
         OrderDir::Up => idx as i64 - 1,
         OrderDir::Down => idx as i64 + 1,
@@ -504,11 +558,17 @@ pub fn order_move_target(
     let Some(target) = siblings.get(target_idx as usize) else {
         return OrderMove::Err(format!(
             "already at the {} of its group",
-            match dir { OrderDir::Up => "top", OrderDir::Down => "bottom" }
+            match dir {
+                OrderDir::Up => "top",
+                OrderDir::Down => "bottom",
+            }
         ));
     };
     OrderMove::Ok {
-        flag: match dir { OrderDir::Up => "--before", OrderDir::Down => "--after" },
+        flag: match dir {
+            OrderDir::Up => "--before",
+            OrderDir::Down => "--after",
+        },
         ref_pane_id: target.pane_id.clone(),
     }
 }
@@ -528,21 +588,72 @@ pub struct KeyBinding {
 
 /// Single source for dispatch docs + `?` help. Mirrors INBOX_TUI_KEYMAP.
 pub const INBOX_TUI_KEYMAP: &[KeyBinding] = &[
-    KeyBinding { keys: &["↑", "k", "↓", "j"], description: "move selection" },
-    KeyBinding { keys: &["pgup", "pgdn"], description: "page" },
-    KeyBinding { keys: &["home", "end"], description: "first / last" },
-    KeyBinding { keys: &["/"], description: "filter (text search)" },
-    KeyBinding { keys: &["f"], description: "cycle scope: inbox → all → hidden → attention" },
-    KeyBinding { keys: &["R"], description: "refresh list (read-only)" },
-    KeyBinding { keys: &["enter"], description: "item detail" },
-    KeyBinding { keys: &["s"], description: "settle pane (confirm)" },
-    KeyBinding { keys: &["n"], description: "snooze pane (confirm)" },
-    KeyBinding { keys: &["r"], description: "restore pane (confirm)" },
-    KeyBinding { keys: &["p"], description: "pin / unpin (confirm)" },
-    KeyBinding { keys: &["a"], description: "archive / unarchive (confirm)" },
-    KeyBinding { keys: &["[", "]"], description: "move up / down in order group (confirm)" },
-    KeyBinding { keys: &["l"], description: "link PR/Issue (confirm)" },
-    KeyBinding { keys: &["u"], description: "unlink PR/Issue (confirm)" },
-    KeyBinding { keys: &["t"], description: "organize-transition log (read-only)" },
-    KeyBinding { keys: &["c"], description: "run reconcile now (explicit, confirm)" },
+    KeyBinding {
+        keys: &["↑", "k", "↓", "j"],
+        description: "move selection",
+    },
+    KeyBinding {
+        keys: &["pgup", "pgdn"],
+        description: "page",
+    },
+    KeyBinding {
+        keys: &["home", "end"],
+        description: "first / last",
+    },
+    KeyBinding {
+        keys: &["/"],
+        description: "filter (text search)",
+    },
+    KeyBinding {
+        keys: &["f"],
+        description: "cycle scope: inbox → all → hidden → attention",
+    },
+    KeyBinding {
+        keys: &["R"],
+        description: "refresh list (read-only)",
+    },
+    KeyBinding {
+        keys: &["enter"],
+        description: "item detail",
+    },
+    KeyBinding {
+        keys: &["s"],
+        description: "settle pane (confirm)",
+    },
+    KeyBinding {
+        keys: &["n"],
+        description: "snooze pane (confirm)",
+    },
+    KeyBinding {
+        keys: &["r"],
+        description: "restore pane (confirm)",
+    },
+    KeyBinding {
+        keys: &["p"],
+        description: "pin / unpin (confirm)",
+    },
+    KeyBinding {
+        keys: &["a"],
+        description: "archive / unarchive (confirm)",
+    },
+    KeyBinding {
+        keys: &["[", "]"],
+        description: "move up / down in order group (confirm)",
+    },
+    KeyBinding {
+        keys: &["l"],
+        description: "link PR/Issue (confirm)",
+    },
+    KeyBinding {
+        keys: &["u"],
+        description: "unlink PR/Issue (confirm)",
+    },
+    KeyBinding {
+        keys: &["t"],
+        description: "organize-transition log (read-only)",
+    },
+    KeyBinding {
+        keys: &["c"],
+        description: "run reconcile now (explicit, confirm)",
+    },
 ];

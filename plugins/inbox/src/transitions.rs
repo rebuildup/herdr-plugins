@@ -26,10 +26,18 @@ pub struct TransitionContext {
     pub at: String,
 }
 
-fn context_fields(
-    pane_id: &str,
-    ctx: &TransitionContext,
-) -> (Option<String>, Option<String>, Option<String>, Option<String>, Option<i64>, Option<AgentSessionRef>) {
+/// Fields captured alongside a transition: workspace, cwd, agent_status,
+/// state_change_seq, agent_session fingerprint.
+type ContextFields = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+    Option<AgentSessionRef>,
+);
+
+fn context_fields(pane_id: &str, ctx: &TransitionContext) -> ContextFields {
     let agent = ctx.agent.as_ref();
     let workspace_id = ctx
         .pane

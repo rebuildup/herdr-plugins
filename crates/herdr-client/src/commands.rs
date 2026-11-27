@@ -214,10 +214,7 @@ pub fn report_pane_metadata_as(
 }
 
 /// Publish a plugin view into herdr's single Agent View slot.
-pub fn set_agent_view(
-    view: Value,
-    options: &CallOptions,
-) -> Result<Value, CommandError> {
+pub fn set_agent_view(view: Value, options: &CallOptions) -> Result<Value, CommandError> {
     let socket = options.socket_for()?;
     request(
         &socket,
@@ -268,13 +265,8 @@ pub fn show_notification(
 
 /// Subscribe to pane agent status changes
 /// (`events.subscribe` with `pane.agent_status_changed`).
-pub fn subscribe_agent_events(
-    options: &CallOptions,
-) -> Result<Subscription, CommandError> {
-    subscribe_agent_events_with(
-        options,
-        vec![json!({"type": "pane.agent_status_changed"})],
-    )
+pub fn subscribe_agent_events(options: &CallOptions) -> Result<Subscription, CommandError> {
+    subscribe_agent_events_with(options, vec![json!({"type": "pane.agent_status_changed"})])
 }
 
 /// Subscribe with an explicit subscription list

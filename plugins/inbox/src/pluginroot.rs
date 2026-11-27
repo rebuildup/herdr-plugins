@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use hoxay_herdr_client::dirs::{plugin_dirs, env_nonempty};
+use hoxay_herdr_client::dirs::{env_nonempty, plugin_dirs};
 use serde_json::Value;
 
 // ---------------------------------------------------------------------------
@@ -142,10 +142,7 @@ fn discover_via_herdr(plugin_id: &str) -> Option<String> {
 
 /// Resolve a sibling plugin's root. Never fails hard — failures are
 /// reported structurally so callers can degrade to warnings.
-pub fn resolve_plugin_root(
-    plugin_id: &str,
-    explicit: Option<&str>,
-) -> PluginRootResolution {
+pub fn resolve_plugin_root(plugin_id: &str, explicit: Option<&str>) -> PluginRootResolution {
     if let Some(explicit) = explicit {
         if !explicit.is_empty() {
             let candidate = PathBuf::from(explicit);
@@ -156,7 +153,10 @@ pub fn resolve_plugin_root(
                 };
             }
             return PluginRootResolution::Err {
-                error: format!("plugin root {} is not a {plugin_id} plugin", candidate.display()),
+                error: format!(
+                    "plugin root {} is not a {plugin_id} plugin",
+                    candidate.display()
+                ),
             };
         }
     }
@@ -338,7 +338,10 @@ pub fn run_plugin_cli(
                 if std::time::Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(format!("plugin CLI timed out after {}ms", timeout.as_millis()));
+                    return Err(format!(
+                        "plugin CLI timed out after {}ms",
+                        timeout.as_millis()
+                    ));
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
@@ -390,27 +393,61 @@ pub fn run_plugin_cli(
 /// Exact `GIT_*` names removed from the inherited environment (verbatim
 /// port of STRIPPED_ENV_VARS).
 const STRIPPED_GIT_ENV_VARS: &[&str] = &[
-    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_IMPLICIT_WORK_TREE",
-    "GIT_INDEX_FILE", "GIT_INDEX_VERSION", "GIT_OBJECT_DIRECTORY",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_PREFIX",
-    "GIT_QUARANTINE_PATH", "GIT_SHALLOW_FILE", "GIT_GRAFT_FILE",
-    "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-    "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
-    "GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS",
-    "GIT_ICASE_PATHSPECS", "GIT_NO_REPLACE_OBJECTS", "GIT_NO_LAZY_FETCH",
-    "GIT_DEFAULT_HASH", "GIT_DEFAULT_REF_FORMAT", "GIT_REFERENCE_BACKEND",
-    "GIT_ATTR_SOURCE", "GIT_ATTR_NOSYSTEM",
-    "GIT_EXEC_PATH", "GIT_EXTERNAL_DIFF", "GIT_EXTERNAL_DIFF_TRUST_EXIT_CODE",
-    "GIT_DIFF_OPTS", "GIT_DIFF_PATH_COUNTER", "GIT_DIFF_PATH_TOTAL",
-    "GIT_EDITOR", "GIT_SEQUENCE_EDITOR", "GIT_PAGER", "GIT_TEMPLATE_DIR",
-    "GIT_REFLOG_ACTION", "GIT_REF_PARANOIA", "GIT_COMMIT_GRAPH_PARANOIA",
-    "GIT_PROTOCOL", "GIT_PROTOCOL_FROM_USER",
-    "GIT_REDIRECT_STDIN", "GIT_REDIRECT_STDOUT", "GIT_REDIRECT_STDERR",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_INDEX_VERSION",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_PREFIX",
+    "GIT_QUARANTINE_PATH",
+    "GIT_SHALLOW_FILE",
+    "GIT_GRAFT_FILE",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_LITERAL_PATHSPECS",
+    "GIT_GLOB_PATHSPECS",
+    "GIT_NOGLOB_PATHSPECS",
+    "GIT_ICASE_PATHSPECS",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_NO_LAZY_FETCH",
+    "GIT_DEFAULT_HASH",
+    "GIT_DEFAULT_REF_FORMAT",
+    "GIT_REFERENCE_BACKEND",
+    "GIT_ATTR_SOURCE",
+    "GIT_ATTR_NOSYSTEM",
+    "GIT_EXEC_PATH",
+    "GIT_EXTERNAL_DIFF",
+    "GIT_EXTERNAL_DIFF_TRUST_EXIT_CODE",
+    "GIT_DIFF_OPTS",
+    "GIT_DIFF_PATH_COUNTER",
+    "GIT_DIFF_PATH_TOTAL",
+    "GIT_EDITOR",
+    "GIT_SEQUENCE_EDITOR",
+    "GIT_PAGER",
+    "GIT_TEMPLATE_DIR",
+    "GIT_REFLOG_ACTION",
+    "GIT_REF_PARANOIA",
+    "GIT_COMMIT_GRAPH_PARANOIA",
+    "GIT_PROTOCOL",
+    "GIT_PROTOCOL_FROM_USER",
+    "GIT_REDIRECT_STDIN",
+    "GIT_REDIRECT_STDOUT",
+    "GIT_REDIRECT_STDERR",
     "GIT_CURL_VERBOSE",
 ];
 
 const STRIPPED_ENV_PREFIXES: &[&str] = &[
-    "GIT_TRACE", "GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_", "GIT_TEST_",
+    "GIT_TRACE",
+    "GIT_CONFIG_KEY_",
+    "GIT_CONFIG_VALUE_",
+    "GIT_TEST_",
 ];
 
 const STRIPPED_GH_ENV_VARS: &[&str] = &["GH_REPO", "GH_DEBUG", "GH_FORCE_TTY", "GH_PAGER"];

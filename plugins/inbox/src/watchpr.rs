@@ -15,7 +15,8 @@ use serde_json::Value;
 
 use crate::model::resolve_entry;
 use crate::state::{
-    InboxEntry, LinkWatch, LinkWatchObservation, PaneLink, WatchTerminal,
+    InboxEntry, LinkWatch, LinkWatchObservation, PaneLink, SessionWatchMap, WatchBaselines,
+    WatchTerminal,
 };
 
 // ---------------------------------------------------------------------------
@@ -23,13 +24,20 @@ use crate::state::{
 // ---------------------------------------------------------------------------
 
 fn as_string(value: Option<&Value>) -> Option<String> {
-    value.and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string())
+    value
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
 }
 
 fn login_of(value: Option<&Value>) -> Option<String> {
     let v = value?;
     if let Some(s) = v.as_str() {
-        return if s.is_empty() { None } else { Some(s.to_string()) };
+        return if s.is_empty() {
+            None
+        } else {
+            Some(s.to_string())
+        };
     }
     as_string(v.get("login"))
 }
@@ -83,7 +91,9 @@ pub fn build_observation(
                 "{}|{}|{}",
                 reviewer.as_deref().unwrap_or("?"),
                 as_string(entry.get("state")).as_deref().unwrap_or("?"),
-                as_string(entry.get("submittedAt")).as_deref().unwrap_or("?"),
+                as_string(entry.get("submittedAt"))
+                    .as_deref()
+                    .unwrap_or("?"),
             ));
         }
     }
@@ -98,7 +108,11 @@ pub fn build_observation(
                 }
                 if let Some(id) = entry.get("id") {
                     if id.is_number() || id.is_string() {
-                        comment_keys.push(id.as_str().map(|s| s.to_string()).unwrap_or_else(|| id.to_string()));
+                        comment_keys.push(
+                            id.as_str()
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| id.to_string()),
+                        );
                     }
                 }
             }
@@ -291,7 +305,7 @@ pub struct WatchTargetScan {
 /// links are filtered. Only `kind === "pr"` links are watched.
 pub fn collect_watch_targets(
     entries: &BTreeMap<String, InboxEntry>,
-    watch_session: Option<&BTreeMap<String, BTreeMap<String, LinkWatch>>>,
+    watch_session: Option<&SessionWatchMap>,
     live_pane_ids: &BTreeSet<String>,
     pane_filter: Option<&str>,
 ) -> WatchTargetScan {
@@ -318,7 +332,11 @@ pub fn collect_watch_targets(
         let pane_watch = watch_session.and_then(|w| w.get(pane_id));
         for link in pr_links {
             let baseline = pane_watch.and_then(|pw| pw.get(&link.ref_)).cloned();
-            if baseline.as_ref().and_then(|b| b.terminal.as_ref()).is_some() {
+            if baseline
+                .as_ref()
+                .and_then(|b| b.terminal.as_ref())
+                .is_some()
+            {
                 scan.terminal_count += 1;
             }
             scan.targets.push(WatchTarget {
@@ -339,7 +357,7 @@ pub fn collect_watch_targets(
 /// `watch` is `&mut state.watch` passed separately so callers can hold
 /// the session-entries borrow at the same time (disjoint fields).
 pub fn prune_watch_session(
-    watch: &mut Option<BTreeMap<String, BTreeMap<String, BTreeMap<String, LinkWatch>>>>,
+    watch: &mut Option<WatchBaselines>,
     session_key: &str,
     entries: &mut BTreeMap<String, InboxEntry>,
     agents: &BTreeMap<String, AgentInfo>,
@@ -372,13 +390,7 @@ pub fn prune_watch_session(
                     live_links = entry
                         .links
                         .as_ref()
-                        .map(|links| {
-                            links
-                                .iter()
-                                .filter(|l| l.kind == "pr")
-                                .cloned()
-                                .collect()
-                        })
+                        .map(|links| links.iter().filter(|l| l.kind == "pr").cloned().collect())
                         .unwrap_or_default();
                 }
             }
