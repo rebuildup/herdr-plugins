@@ -245,3 +245,90 @@ were taken live from
 None found. Every surface rendered, navigated, confirmed/cancelled, and
 returned focus correctly over a plain SSH session with no GUI and no
 herdr-t3 involvement.
+
+## RC defect-fix round (#273, merged via PR #274)
+
+Post-RC real-device verification at `release-0-11-0` @ `bcec8fb`
+(11 plugins installed, all resolving that SHA) surfaced two TUI defects,
+filed as #273 and fixed on branch `273` → merged as `1ea7c40`:
+
+- **checkpoints plan preview hid the real deletion count**:
+  `formatPlanPayload` treated the contract's numeric
+  `untracked_to_delete` as an array, so the restore-plan detail always
+  rendered `untracked files to delete: 0` while the CLI JSON correctly
+  returned `untracked_to_delete: 1`. Fixed to render the count; test
+  fixture corrected to the contract shape.
+- **conversations/usage stale "loading…" frame**: `EventListView.refresh`
+  and `ReportView.reload` updated state after `await` without
+  `app.invalidate()`, leaving the loading frame until the next keypress.
+  This is the observed root cause behind the macOS "usage report shows
+  loading… for an extended period" note above (follow-up #3) and the
+  prime suspect for #267's measured latency. Fixed on both success and
+  error/early-return paths; fake `TuiApp` stubs updated.
+
+## Second-round e2e verification (#234 gaps, `verifyrc` / `verifyrc-mac` / `verifywin`)
+
+Depth verification demanded by the #234差戻し, using isolated sessions
+and fixture/loopback providers only (no real credentials or billing).
+
+### WSL2 (`device-wsl`, session `verifyrc`, plugins @ `bcec8fb`; conversations/usage re-verified @ `1ea7c40`)
+
+| plugin | surface exercised | result |
+| --- | --- | --- |
+| rebuildup.checkpoints | capture → detail → **plan** → restore full flow, incl. pre-restore checkpoint `mwyl0rbh-c30a5d28`; plan defect D5 found (see #273) | PASS (defect found→fixed) |
+| rebuildup.projects | fixture repo `t3.json` scripts: `hello` run success, `slow`/`verylong` runs observed via runs/results surfaces | PASS |
+| rebuildup.conversations | pane open → honest empty-state render → `i` index key → close | PASS |
+| rebuildup.usage | pane open → nav → quota view; **stale "loading…" reproduced @ `bcec8fb`, fixed @ `1ea7c40`** — quota now renders providers/credential status without keypress | PASS after fix |
+| rebuildup.automations | `create` (interval schedule, pane destination) → `run-now` → `runs` readback → `delete`; run honestly recorded `failed/destination_unavailable` (`agent_not_found` — no live agent in isolated session, per contract) | PASS (honest-failure path; agent-delivery success path env-blocked, same as controls) |
+
+### macOS (`verifyrc-mac`, isolated XDG dirs)
+
+| plugin | surface exercised | result |
+| --- | --- | --- |
+| rebuildup.secrets | `resolve` metadata-only + `run` env injection verified via marker file (`MODELSCOPE_API_KEY` via infisical → `PRESENT`) | PASS (upgrades prior render-only) |
+| rebuildup.textgen | `generate` end-to-end via loopback OpenAI-compatible stub provider (`127.0.0.1:8399`, `api:` provider kind): task `pr_content` returned ok title/body | PASS (upgrades prior render-only) |
+| rebuildup.controls | `start` flow driven to pane/kind selection; agent launch blocked by environment artifact — isolated `XDG_CONFIG_HOME` hid mise config so the `claude` binary could not resolve (not a plugin defect; pane/kind/argv construction verified up to provider resolution) | PARTIAL — env-blocked, recorded honestly |
+
+### Windows 11 (`device-windows`, session `verifywin`, inbox @ `bcec8fb`)
+
+Real plugin pane lifecycle measured (previously only install/typecheck/
+lint + unit tests): workspace → `plugin pane open` → pane `w1:p3` →
+`pane read` rendered Inbox (`inbox 2/2`, keybar) → `send-text '?'`
+opened Keys help overlay → `send-text 's'` settle → confirm → state.json
+readback `settled` → `plugin pane close`. Headless `herdr server` works
+on Windows (ConPTY bundled); all pane ops function without a TUI client.
+
+Windows-specific findings (environment-level, not plugin defects):
+
+- **mise trust prompt blocks plugin child processes**: PATH resolves
+  `bun` → mise shim → "config files not trusted" error/prompt under
+  non-interactive and pane contexts; `pane.closed` event hooks and
+  startup `reconcile` fail exit 1. Workaround: prepend real
+  `~/.bun/bin` to PATH. Candidate follow-up: document bun prerequisite
+  as non-shim binary or herdr/plugin env sanitization.
+- `pane send-keys` rejects printable characters (`invalid_key`);
+  literal input requires `pane send-text` — noted for verification
+  scripts and docs.
+
+### Remaining honest gaps
+
+- controls agent-start **success** path (real agent spawn) and
+  automations agent-delivery **success** path: env-blocked on all hosts
+  (no agent CLI resolvable inside isolated XDG env; no billing allowed).
+  Both were verified to the launch/delivery boundary with honest
+  failure recording.
+- projects mutation TUI on macOS specifically: covered on WSL
+  (register + scripts run/stop); macOS render-level only.
+- #267 usage latency: root-cause fix landed (#274); dedicated
+  measurement can be a follow-up per #234 allowance.
+
+### Updated verdict inputs
+
+All #234差戻し items now have real-device evidence or an explicitly
+recorded env-blocked boundary: WSL/SSH e2e (checkpoints plan/restore,
+projects scripts, conversations, usage, automations, plus prior git
+spot-check), macOS fixture verification (secrets inject, textgen
+generate, controls to launch boundary), Windows real pane
+launch/input/exit measurement, and ledger/doc accuracy (this section +
+`tui-coverage.md` RC block describe actual verification depth, including
+the defects found and fixed).
