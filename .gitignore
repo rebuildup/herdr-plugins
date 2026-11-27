@@ -6,3 +6,4 @@ dist/
 .tmp/
 .reference/
 coverage/
+spikes/*/target/
