@@ -171,7 +171,6 @@ async function genConversations(out: string, totalEvents: number, sessionCount: 
   const perSession = Math.floor(totalEvents / sessionCount);
   const sessions: Record<string, unknown> = {};
   const baseTime = Date.parse("2026-10-01T00:00:00Z");
-  const DAY = 86_400_000;
 
   for (let s = 0; s < sessionCount; s++) {
     const provider = providers[s] as string;
@@ -180,7 +179,6 @@ async function genConversations(out: string, totalEvents: number, sessionCount: 
     const paneId = `w1:p${(s % 20) + 1}`;
     const transcriptPath = path.join(transcriptsDir, `${key.replace(/:/g, "-")}.jsonl`);
     const lines: string[] = [];
-    let eventCount = 0;
     let turnCount = 0;
     let firstAt: string | null = null;
     let lastAt: string | null = null;
@@ -200,7 +198,6 @@ async function genConversations(out: string, totalEvents: number, sessionCount: 
       const push = (ev: Record<string, unknown>) => {
         lines.push(JSON.stringify(ev));
         produced += 1;
-        eventCount += 1;
         if (firstAt === null) firstAt = iso;
         lastAt = iso;
       };
@@ -235,7 +232,10 @@ async function genConversations(out: string, totalEvents: number, sessionCount: 
             turn_index: turn,
             tool_use_id: tid,
             tool_name: toolName,
-            tool_input: { file_path: `src/module-${int(0, 40)}/file-${int(0, 99)}.ts`, command: term },
+            tool_input: {
+              file_path: `src/module-${int(0, 40)}/file-${int(0, 99)}.ts`,
+              command: term,
+            },
           });
           push({
             event_id: `${tid}-tr`,
@@ -314,8 +314,7 @@ async function genGitRepo(repoDir: string, files: number, modified: number, untr
   const { mkdirSync, rmSync, writeFileSync } = await import("node:fs");
   rmSync(repoDir, { recursive: true, force: true });
   mkdirSync(repoDir, { recursive: true });
-  const git = (args: string[]) =>
-    execFileSync("git", args, { cwd: repoDir, stdio: "pipe" });
+  const git = (args: string[]) => execFileSync("git", args, { cwd: repoDir, stdio: "pipe" });
 
   git(["init", "-b", "main"]);
   git(["config", "user.email", "perf@example.com"]);

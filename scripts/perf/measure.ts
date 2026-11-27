@@ -112,7 +112,7 @@ function runOnce(cmd: string[], timeoutMs: number, rss: boolean): Promise<RunRes
       clearTimeout(timer);
       const ms = performance.now() - start;
       let rssKb: number | null = null;
-      let cpuMs: number | null = null;
+      const cpuMs: number | null = null;
       if (rss) {
         // macOS `/usr/bin/time -l` prints "  <bytes>  maximum resident set
         // size" (value before label, bytes); Linux time -v differs.
