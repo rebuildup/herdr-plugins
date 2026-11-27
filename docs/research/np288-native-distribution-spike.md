@@ -94,9 +94,9 @@ HERDR_CONFIG_PATH=/tmp/np288/config.toml`)
 | disable | `plugin disable rebuildup.np288-dist` | `enabled:false`; `action invoke` → `{"error":{"code":"plugin_disabled"}}` |
 | enable | `plugin enable rebuildup.np288-dist` | `enabled:true` restored |
 | offline link | `plugin link /tmp/np288-link` (local copy, renamed id) + `action invoke` + `plugin unlink` | link registers with `source.kind:"local"`, no clone/build; invoke succeeded (plugin-log-5, v0.1.1); unlink `removed:true`. Fully offline-capable dev path |
-
-Not yet exercised live (queued for the update step below): `plugin
-update` pulling a moved branch ref.
+| update (moved branch) | docs commit pushed → `plugin update rebuildup.np288-dist --yes` | refetched `requested_ref="288"` → `resolved_commit=72b046b`; new generation `80355-0`; **three generations coexisted** (`76079-0`, `23268-0`, `80355-0`); running server's next `action invoke` (plugin-log-6) resolved `HERDR_PLUGIN_ROOT=…/80355-0/…` — live-update-while-running confirmed |
+| uninstall | `plugin uninstall rebuildup.np288-dist` | registry emptied (`plugins.json` → `[]`); subsequent invoke → `plugin_action_not_found`; config/state dirs preserved per docs; install files retained for running processes |
+| teardown | `herdr --session np288-spike server stop` + `rm -rf /tmp/np288*` | isolated session/socket/state fully removed; user sessions untouched |
 
 ## 5. Distribution candidates
 
@@ -137,8 +137,9 @@ single-arch-verified.
 
 Remaining verification before Wave-1 reliance:
 
-1. `plugin update` pulling a moved branch ref (queued below — executed
-   after the docs commit lands on `288`).
+1. ~~`plugin update` pulling a moved branch ref~~ — **done**: branch
+   `288` advanced `4fe67b2 → 72b046b`, update produced generation
+   `80355-0` and the live server's next invocation used it.
 2. Linux x86_64/arm64 and Windows builds: compile, manifest
    `platforms`, launcher dispatch, `PATHEXT`/`.cmd` handling — all
    unverified.
