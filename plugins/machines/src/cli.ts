@@ -13,6 +13,11 @@
  *   `plugin list` (plugin surface, honest `unsupported` fallback).
  *   Results are recorded to plugin state as last-known metadata.
  *
+ * Every command accepts the shared target flags `--socket PATH` and
+ * `--session NAME` selecting the LOCAL herdr instance (forwarded to
+ * spawned `herdr` CLI children as HERDR_SOCKET_PATH / HERDR_SESSION —
+ * the herdr CLI has no target flags of its own).
+ *
  * Machine lifecycle (add/remove/enable/disable/reconnect) is never
  * reimplemented — mutations go through the herdr CLI. No credential
  * handling: SSH auth is OpenSSH-owned.
@@ -31,7 +36,14 @@ import {
   PLUGIN_VERSION,
   PROBE_STATES,
 } from "./model";
-import { listMachines, probeAllMachines, probeMachine, RemoteError } from "./remote";
+import {
+  type HerdrTarget,
+  listMachines,
+  probeAllMachines,
+  probeMachine,
+  RemoteError,
+  spawnHerdr,
+} from "./remote";
 import { loadState, recordProbe, stateFilePath } from "./state";
 
 function emit(payload: unknown): void {
@@ -53,13 +65,52 @@ function now(): string {
   return new Date().toISOString();
 }
 
-function positional(args: string[]): string[] {
-  const out: string[] = [];
-  for (const arg of args) {
-    if (arg.startsWith("--")) continue;
-    out.push(arg);
+/**
+ * Parsed command arguments. `--socket PATH` / `--session NAME` are the
+ * shared plugin target flags (contract: explicit flag > ambient env >
+ * default); they select the LOCAL herdr instance whose saved machines
+ * are listed/probed — unrelated to the remote `session` field on each
+ * MachineEntry. Unknown arguments are usage errors (exit 2).
+ */
+interface ParsedArgs {
+  target: HerdrTarget;
+  positionals: string[];
+  all: boolean;
+}
+
+function parseArgs(args: string[], opts: { allowAll?: boolean } = {}): ParsedArgs {
+  const parsed: ParsedArgs = { target: {}, positionals: [], all: false };
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i] as string;
+    if (arg === "--socket" || arg === "--session") {
+      const value = args[i + 1];
+      if (value === undefined || value.startsWith("--")) {
+        fail(`option ${arg} requires a value`, 2);
+      }
+      i += 1;
+      if (arg === "--socket") parsed.target.socketPath = value;
+      else parsed.target.session = value;
+    } else if (arg === "--all" && opts.allowAll === true) {
+      parsed.all = true;
+    } else if (arg === "--help" || arg === "-h") {
+      cmdHelp();
+      process.exit(0);
+    } else if (!arg.startsWith("-")) {
+      parsed.positionals.push(arg);
+    } else {
+      fail(`unknown argument: ${arg}`, 2);
+    }
   }
-  return out;
+  return parsed;
+}
+
+/** Target flags only; any leftover positional is a usage error. */
+function parseTargetOnly(args: string[]): HerdrTarget {
+  const parsed = parseArgs(args);
+  if (parsed.positionals.length > 0) {
+    fail(`unexpected argument: ${parsed.positionals[0]}`, 2);
+  }
+  return parsed.target;
 }
 
 function cmdCapability(): void {
@@ -83,6 +134,7 @@ function cmdCapability(): void {
       "probe performs remote `api snapshot` (reachability, server_version, protocol) then remote `plugin list --json` (plugin surface). Disabled machines report state=disabled without any SSH attempt; unreachable/bridge-less remotes report unreachable/unsupported_remote — success is never assumed.",
       "plugin_surface=unsupported means the remote answered api snapshot but `plugin list` failed or returned no usable result (older herdr without the plugin.list API method); upstream gap candidate recorded in ADR-0028.",
       "list merges live `herdr machine list --json` with last-known probe metadata (state.probes); it never probes live — run `probe` to refresh.",
+      "Global flags --socket PATH / --session NAME select the local herdr target; the herdr CLI has no target flags, so they are forwarded to spawned children as HERDR_SOCKET_PATH / HERDR_SESSION (explicit flag beats ambient env).",
     ],
     generated_at: now(),
   });
@@ -94,13 +146,13 @@ function cmdHelp(): void {
     plugin: PLUGIN_ID,
     version: PLUGIN_VERSION,
     usage:
-      "bun run src/cli.ts <capability|help|list|probe> — " +
+      "bun run src/cli.ts <capability|help|list|probe> [--socket PATH] [--session NAME] — " +
       "list [saved machines + last probe]; probe <machine-id|label|--all>",
   });
 }
 
-async function cmdList(): Promise<void> {
-  const machines = await listMachines();
+async function cmdList(target: HerdrTarget): Promise<void> {
+  const machines = await listMachines(spawnHerdr, target);
   const state = await loadState();
   const items = machines.map((machine) => ({
     machine,
@@ -117,20 +169,20 @@ async function cmdList(): Promise<void> {
 }
 
 async function cmdProbe(args: string[]): Promise<void> {
-  const pos = positional(args);
-  const all = args.includes("--all");
-  if (all && pos.length > 0) {
+  const parsed = parseArgs(args, { allowAll: true });
+  const pos = parsed.positionals;
+  if (parsed.all && pos.length > 0) {
     fail("probe accepts either <selector> or --all, not both", 2);
   }
-  if (!all && pos.length !== 1) {
+  if (!parsed.all && pos.length !== 1) {
     fail("probe requires exactly one <machine-id|label> or --all", 2);
   }
 
   let probes: MachineProbe[];
-  if (all) {
-    probes = await probeAllMachines();
+  if (parsed.all) {
+    probes = await probeAllMachines({ target: parsed.target });
   } else {
-    probes = [await probeMachine(pos[0] as string)];
+    probes = [await probeMachine(pos[0] as string, { target: parsed.target })];
   }
 
   // Persist last-known probe metadata (lock + atomic rename).
@@ -152,6 +204,7 @@ async function main(): Promise<void> {
   const [command = "help", ...args] = process.argv.slice(2);
   switch (command) {
     case "capability":
+      parseTargetOnly(args);
       cmdCapability();
       return;
     case "help":
@@ -160,10 +213,7 @@ async function main(): Promise<void> {
       cmdHelp();
       return;
     case "list":
-      if (args.length > 0 && args[0] !== "--help") {
-        fail(`unexpected argument: ${args[0]}`, 2);
-      }
-      await cmdList();
+      await cmdList(parseTargetOnly(args));
       return;
     case "probe":
       await cmdProbe(args);

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { MachineEntry } from "../plugins/machines/src/model";
 import {
+  herdrChildEnv,
   listMachines,
   probeAllMachines,
   probeMachine,
@@ -16,6 +17,17 @@ import { loadState, recordProbe, stateFilePath } from "../plugins/machines/src/s
 
 const dirs: string[] = [];
 const savedStateDir = process.env.HERDR_PLUGIN_STATE_DIR;
+const savedHerdrEnv: Record<string, string | undefined> = {};
+for (const key of [
+  "HERDR_SOCKET_PATH",
+  "HERDR_SESSION",
+  "HERDR_PANE_ID",
+  "HERDR_WORKSPACE_ID",
+  "HERDR_TAB_ID",
+  "HERDR_CLIENT_SOCKET_PATH",
+]) {
+  savedHerdrEnv[key] = process.env[key];
+}
 
 function tempDir(): string {
   const dir = mkdtempSync(path.join(tmpdir(), "machines-test-"));
@@ -27,6 +39,10 @@ afterAll(() => {
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
   if (savedStateDir === undefined) delete process.env.HERDR_PLUGIN_STATE_DIR;
   else process.env.HERDR_PLUGIN_STATE_DIR = savedStateDir;
+  for (const [key, value] of Object.entries(savedHerdrEnv)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
 });
 
 // --- fixtures -------------------------------------------------------------------
@@ -399,5 +415,43 @@ describe("state", () => {
     await recordProbe(second);
     const state = await loadState();
     expect(state.probes.m1?.probed_at).toBe("2999-01-01T00:00:00.000Z");
+  });
+});
+
+// --- herdrChildEnv (target flag -> child env) --------------------------------------
+
+describe("herdrChildEnv", () => {
+  test("strips ambient HERDR_* context and injects explicit target flags", () => {
+    process.env.HERDR_SOCKET_PATH = "/ambient/sock";
+    process.env.HERDR_SESSION = "ambient-session";
+    process.env.HERDR_PANE_ID = "w1:p1";
+    process.env.HERDR_CLIENT_SOCKET_PATH = "/ambient/client.sock";
+
+    const env = herdrChildEnv({ socketPath: "/flag/sock", session: "flag-session" });
+    expect(env.HERDR_SOCKET_PATH).toBe("/flag/sock");
+    expect(env.HERDR_SESSION).toBe("flag-session");
+    expect(env.HERDR_PANE_ID).toBeUndefined();
+    expect(env.HERDR_CLIENT_SOCKET_PATH).toBeUndefined();
+
+    // No flags: ambient target vars stay stripped (ADR-0020 rule 1).
+    const bare = herdrChildEnv();
+    expect(bare.HERDR_SOCKET_PATH).toBeUndefined();
+    expect(bare.HERDR_SESSION).toBeUndefined();
+    expect(bare.HERDR_PANE_ID).toBeUndefined();
+
+    delete process.env.HERDR_SOCKET_PATH;
+    delete process.env.HERDR_SESSION;
+    delete process.env.HERDR_PANE_ID;
+    delete process.env.HERDR_CLIENT_SOCKET_PATH;
+  });
+
+  test("session-only and socket-only targets set only their own var", () => {
+    const sessionOnly = herdrChildEnv({ session: "agents" });
+    expect(sessionOnly.HERDR_SESSION).toBe("agents");
+    expect(sessionOnly.HERDR_SOCKET_PATH).toBeUndefined();
+
+    const socketOnly = herdrChildEnv({ socketPath: "/tmp/x.sock" });
+    expect(socketOnly.HERDR_SOCKET_PATH).toBe("/tmp/x.sock");
+    expect(socketOnly.HERDR_SESSION).toBeUndefined();
   });
 });
