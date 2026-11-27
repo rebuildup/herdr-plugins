@@ -287,7 +287,38 @@ and fixture/loopback providers only (no real credentials or billing).
 | --- | --- | --- |
 | rebuildup.secrets | `resolve` metadata-only + `run` env injection verified via marker file (`MODELSCOPE_API_KEY` via infisical → `PRESENT`) | PASS (upgrades prior render-only) |
 | rebuildup.textgen | `generate` end-to-end via loopback OpenAI-compatible stub provider (`127.0.0.1:8399`, `api:` provider kind): task `pr_content` returned ok title/body | PASS (upgrades prior render-only) |
-| rebuildup.controls | `start` flow driven to pane/kind selection; agent launch blocked by environment artifact — isolated `XDG_CONFIG_HOME` hid mise config so the `claude` binary could not resolve (not a plugin defect; pane/kind/argv construction verified up to provider resolution) | PARTIAL — env-blocked, recorded honestly |
+| rebuildup.controls | `start w2:p1 --agent claude` → `launch_pending` → pane rendered Claude Code trust prompt → confirmed → main UI (`Sonnet 5.5`, `interactive_ready`, `agent_status: idle`, `agent_session.value: 58d1d08b-…`); `read --source detection` identity readback | **PASS — success path established** (see env recipe below) |
+| rebuildup.automations | `create` (pane destination → live claude agent `w2:p1`) → `run-now` → `runs` readback `status: success`, `result.agent_status: done`; pane shows injected `[automations] scheduled task …` prompt + task text. Provider reply itself blocked by the account's Claude subscription billing state ("payment is past due") — delivery contract satisfied, reply content is provider-side, not plugin scope | **PASS — agent-delivery success path established** |
+
+#### Reproducible isolated-env recipe (agent spawn blocker root cause + fix)
+
+Root cause of the earlier env-blocked agent launches: the isolated
+`XDG_CONFIG_HOME`/`XDG_STATE_HOME`/`XDG_DATA_HOME` override relocates
+**mise's own directories**, not just herdr's. `mise activate` in pane
+shells then (a) finds no config under `$XDG_CONFIG_HOME/mise`,
+(b) finds no trusted-config records under `$XDG_STATE_HOME/mise`
+(interactive trust prompt / non-interactive failure — the same mechanism
+behind the Windows `verifywin` mise-shim finding), and (c) looks for
+installs under `$XDG_DATA_HOME/mise/installs`, which is empty, triggering
+a full `mise install` of every locked tool (~341 targets observed).
+
+Fix (verified on `verifyrc-mac` @ herdr 0.9.5, claude 2.1.330): symlink
+the three mise dirs into the isolated XDG roots before starting the
+server — binaries resolve through the normal shim/activation path with
+zero plugin or herdr changes:
+
+```bash
+ln -sfn ~/.config/mise          "$XDG_CONFIG_HOME/mise"
+ln -sfn ~/.local/state/mise     "$XDG_STATE_HOME/mise"
+ln -sfn ~/.local/share/mise     "$XDG_DATA_HOME/mise"
+```
+
+Agent CLI auth lives under `$HOME` (`~/.claude`, `~/.codex`), which the
+XDG override does not touch — credentials resolve normally. On hosts
+where the agent CLI is not installed at all (e.g. `device-wsl` has no
+agent binaries), agent spawn remains env-blocked by missing provider
+installation, not by the isolation method; install the provider first
+(`mise use -g <tool>`) or accept the honest `agent_not_found` boundary.
 
 ### Windows 11 (`device-windows`, session `verifywin`, inbox @ `bcec8fb`)
 
@@ -312,11 +343,15 @@ Windows-specific findings (environment-level, not plugin defects):
 
 ### Remaining honest gaps
 
-- controls agent-start **success** path (real agent spawn) and
-  automations agent-delivery **success** path: env-blocked on all hosts
-  (no agent CLI resolvable inside isolated XDG env; no billing allowed).
-  Both were verified to the launch/delivery boundary with honest
-  failure recording.
+- controls agent-start / automations agent-delivery **success** paths:
+  **established on macOS** (`verifyrc-mac`, real claude 2.1.330, Claude
+  Pro auth) — see the macOS table and env recipe above. On `device-wsl`
+  the boundary remains provider installation (no agent binaries on that
+  host), not the isolation method.
+- Provider-side reply content: the Claude subscription on the verifying
+  account is in a billing-past-due state, so model replies error inside
+  the agent TUI. Plugin/herdr delivery contracts (`agent.start` readiness,
+  `agent.prompt` → `agent_status: done`) are unaffected and verified.
 - projects mutation TUI on macOS specifically: covered on WSL
   (register + scripts run/stop); macOS render-level only.
 - #267 usage latency: root-cause fix landed (#274); dedicated
@@ -324,11 +359,12 @@ Windows-specific findings (environment-level, not plugin defects):
 
 ### Updated verdict inputs
 
-All #234差戻し items now have real-device evidence or an explicitly
-recorded env-blocked boundary: WSL/SSH e2e (checkpoints plan/restore,
-projects scripts, conversations, usage, automations, plus prior git
-spot-check), macOS fixture verification (secrets inject, textgen
-generate, controls to launch boundary), Windows real pane
-launch/input/exit measurement, and ledger/doc accuracy (this section +
-`tui-coverage.md` RC block describe actual verification depth, including
-the defects found and fixed).
+All #234差戻し items now have real-device evidence: WSL/SSH e2e
+(checkpoints plan/restore, projects scripts, conversations, usage,
+automations create→run-now→runs, plus prior git spot-check), macOS
+fixture verification (secrets inject, textgen generate, controls
+agent-start success, automations agent-delivery success), Windows real
+pane launch/input/exit measurement, and ledger/doc accuracy. The only
+remaining boundaries are provider-side (agent CLIs absent on WSL;
+Claude subscription billing state on the verifying account) — both
+outside plugin scope and recorded honestly.
