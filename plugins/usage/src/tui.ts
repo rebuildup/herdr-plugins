@@ -285,6 +285,7 @@ export class ReportViewBase implements ScreenView {
     if (res.status !== "ok" || res.value === undefined) {
       this.error = res.error ?? res.status;
       this.payload = null;
+      this.app.invalidate();
       return;
     }
     const v = res.value;
@@ -295,6 +296,7 @@ export class ReportViewBase implements ScreenView {
       this.error = v.error ?? "report failed";
       this.payload = null;
     }
+    this.app.invalidate();
   }
 
   handleKey(ev: KeyEvent): boolean {

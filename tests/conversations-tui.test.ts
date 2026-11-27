@@ -47,6 +47,7 @@ function fakeApp(): TuiApp {
     pop: () => undefined,
     close: async () => {},
     setStatus: () => {},
+    invalidate: () => {},
   } as unknown as TuiApp;
 }
 

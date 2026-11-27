@@ -361,6 +361,7 @@ export class EventListView implements ScreenView {
       this.notes = [];
       this.hasMore = false;
       this.nextCursor = null;
+      this.app.invalidate();
       return;
     }
     this.rows = res.page.rows;
@@ -368,6 +369,7 @@ export class EventListView implements ScreenView {
     this.hasMore = res.page.hasMore;
     this.nextCursor = res.page.nextCursor;
     this.scroll = 0;
+    this.app.invalidate();
   }
 
   private async goto(delta: 1 | -1): Promise<void> {
