@@ -2,7 +2,7 @@
 
 This is the always-on contract for AI agents working on `hoxay-plugins` (`rebuildup/hoxay-plugins`).
 
-The repository follows the `rebuildup/project-init` release-driven operating
+The repository follows the `rebuildup/aude-skills` release-driven operating
 model. Keep this root contract project-specific; do not copy the complete
 upstream initialization prompt here.
 
@@ -41,7 +41,7 @@ upstream initialization prompt here.
   create empty or speculative packages.
 - `docs/` — specifications, ADRs, research, contracts.
 - `.agents/skills/` — project-local Agent Skills vendored from
-  `rebuildup/project-init` (and evaluated externals); `skills-lock.json` is
+  `rebuildup/aude-skills` (and evaluated externals); `skills-lock.json` is
   the freshness record. `.claude/skills/` symlinks into `.agents/skills/`.
 
 ## 4. Invariants (do not regress)
