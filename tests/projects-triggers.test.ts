@@ -463,7 +463,7 @@ describe("scripts tick drain (fake hook events)", () => {
     try {
       const reg = await runCli(["register", repo], { HERDR_PLUGIN_STATE_DIR: stateDir });
       expect(reg.status).toBe(0);
-      const projectId = (reg.json?.project as { id: string }).id;
+      const projectId = ((reg.json?.project ?? {}) as { id: string }).id;
 
       const hook = await runHook({
         ...worktreeCreatedEnv(fake.socketPath, worktree),

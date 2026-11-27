@@ -305,7 +305,7 @@ describe("checkpoints multi-repo save/restore-group", () => {
     expect(saved.error?.kind).toBe("partial_save");
     const results = saved.json?.results as Array<Record<string, unknown>>;
     const failed = results.find((r) => r.ok === false);
-    expect((failed?.error as Record<string, unknown>).kind).toBe("not_a_repo");
+    expect(((failed?.error ?? {}) as Record<string, unknown>).kind).toBe("not_a_repo");
     // The good repo's checkpoint was still captured and persisted.
     const entries = Object.values(readState(stateDir).checkpoints);
     expect(entries).toHaveLength(1);
@@ -384,7 +384,7 @@ describe("checkpoints multi-repo save/restore-group", () => {
     expect(byRepo.get(normalizePath(repoA))?.ok).toBe(true);
     const failB = byRepo.get(normalizePath(repoB));
     expect(failB?.ok).toBe(false);
-    expect((failB?.error as Record<string, unknown>).kind).toBe("checkpoint_ref_missing");
+    expect(((failB?.error ?? {}) as Record<string, unknown>).kind).toBe("checkpoint_ref_missing");
 
     // The successful repo was genuinely restored — partial success is
     // real work, reported as such, not hidden behind ok:true.

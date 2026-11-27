@@ -390,7 +390,7 @@ describe("repos list worktree association (#184)", () => {
     try {
       const reg = await runCli(["register", repo], { HERDR_PLUGIN_STATE_DIR: stateDir });
       expect(reg.status).toBe(0);
-      const projectId = (reg.json?.project as { id: string }).id;
+      const projectId = ((reg.json?.project ?? {}) as { id: string }).id;
 
       const { repos, worktrees_skipped } = await reposList(projectId, fake.socketPath, {
         HERDR_PROJECTS_ROOT_GIT: gitPlugin.root,
@@ -462,7 +462,7 @@ describe("repos list worktree association (#184)", () => {
     const deadSocket = path.join(tempDir(), "no-such.sock");
     const reg = await runCli(["register", repo], { HERDR_PLUGIN_STATE_DIR: stateDir });
     expect(reg.status).toBe(0);
-    const projectId = (reg.json?.project as { id: string }).id;
+    const projectId = ((reg.json?.project ?? {}) as { id: string }).id;
 
     const { repos } = await reposList(projectId, deadSocket);
     const entry = repos[0] as RepoEntry;
@@ -484,7 +484,7 @@ describe("repos list worktree association (#184)", () => {
     });
     try {
       const reg = await runCli(["register", repo], { HERDR_PLUGIN_STATE_DIR: stateDir });
-      const projectId = (reg.json?.project as { id: string }).id;
+      const projectId = ((reg.json?.project ?? {}) as { id: string }).id;
       const { repos } = await reposList(projectId, errFake.socketPath);
       const entry = repos[0] as RepoEntry;
       expect(entry.worktrees).toBeNull();
@@ -519,7 +519,7 @@ describe("repos list worktree association (#184)", () => {
     });
     try {
       const reg = await runCli(["register", repo], { HERDR_PLUGIN_STATE_DIR: stateDir });
-      const projectId = (reg.json?.project as { id: string }).id;
+      const projectId = ((reg.json?.project ?? {}) as { id: string }).id;
       const { repos } = await reposList(projectId, fake.socketPath, {
         HERDR_PROJECTS_ROOT_GIT: path.join(tempDir(), "does-not-exist"),
       });
@@ -545,7 +545,7 @@ describe("repos list worktree association (#184)", () => {
     });
     try {
       const reg = await runCli(["register", repo], { HERDR_PLUGIN_STATE_DIR: stateDir });
-      const projectId = (reg.json?.project as { id: string }).id;
+      const projectId = ((reg.json?.project ?? {}) as { id: string }).id;
       const { repos } = await reposList(projectId, fake.socketPath);
       const wtEntry = (repos[0] as RepoEntry).worktrees?.[0];
       expect(wtEntry?.open_workspace_id).toBe("ws-gone");
@@ -563,7 +563,7 @@ describe("repos list worktree association (#184)", () => {
     const fake = await fakeHerdr({ sourceRepoRoot: repo, worktrees: [] });
     try {
       const reg = await runCli(["register", repo], { HERDR_PLUGIN_STATE_DIR: stateDir });
-      const projectId = (reg.json?.project as { id: string }).id;
+      const projectId = ((reg.json?.project ?? {}) as { id: string }).id;
       const { repos } = await reposList(projectId, fake.socketPath);
       const entry = repos[0] as RepoEntry;
       expect(entry.worktree_submodules).toBe("recursive");

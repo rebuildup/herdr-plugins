@@ -553,9 +553,9 @@ describe("artifacts search filters (T3 #142)", () => {
         await runCli(["search", "quarterly", "--created-by", "cli"], r.env),
       );
       expect(artifactsOf(byCreatedBy)).toHaveLength(1);
-      expect((artifactsOf(byCreatedBy)[0]?.owner as Record<string, unknown>).created_by).toBe(
-        "cli",
-      );
+      expect(
+        ((artifactsOf(byCreatedBy)[0]?.owner ?? {}) as Record<string, unknown>).created_by,
+      ).toBe("cli");
 
       // Period: since in the future excludes everything; until in the
       // past excludes everything; a wide window keeps all.
@@ -585,7 +585,7 @@ describe("artifacts search filters (T3 #142)", () => {
       // list shares the owner filters.
       const listed = expectOk(await runCli(["list", "--agent", "sess-beta"], r.env));
       expect(artifactsOf(listed)).toHaveLength(1);
-      expect((artifactsOf(listed)[0]?.owner as Record<string, unknown>).agent_session).toBe(
+      expect(((artifactsOf(listed)[0]?.owner ?? {}) as Record<string, unknown>).agent_session).toBe(
         "sess-beta",
       );
     } finally {

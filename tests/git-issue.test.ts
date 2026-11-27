@@ -292,7 +292,7 @@ describe.skipIf(IS_WINDOWS)("git issue CLI (fake herdr + fake gh)", () => {
       action: "list",
       repo: "octo/widgets",
     });
-    expect((run.json?.issues as unknown[]).length).toBe(1);
+    expect(((run.json?.issues ?? []) as unknown[]).length).toBe(1);
   }, 60_000);
 
   test("issue view returns the bounded projection", async () => {
@@ -371,7 +371,7 @@ describe.skipIf(IS_WINDOWS)("git issue CLI (fake herdr + fake gh)", () => {
     );
     expect(run.status).toBe(0);
     expect(run.json).toMatchObject({ action: "edit", ok: true, number: 5 });
-    expect((run.json?.issue as Record<string, unknown>).number).toBe(5);
+    expect(((run.json?.issue ?? {}) as Record<string, unknown>).number).toBe(5);
   }, 60_000);
 
   test("issue close delegates to gh issue close", async () => {

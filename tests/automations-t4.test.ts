@@ -661,7 +661,7 @@ describe("hook entrypoint + tick drain (fake hook events)", () => {
         { HERDR_PLUGIN_STATE_DIR: stateDir },
       );
       expect(created.status).toBe(0);
-      const taskId = (created.json?.task as { task_id: string }).task_id;
+      const taskId = ((created.json?.task ?? {}) as { task_id: string }).task_id;
 
       // Fake hook delivery: snake_case envelope, done status on p1.
       const hook = await runHookAsync({

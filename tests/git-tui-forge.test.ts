@@ -19,6 +19,7 @@ import type { Line, ScreenView } from "../packages/tui/src/screen";
 import { TaskRunner } from "../packages/tui/src/task";
 import {
   buildPaneOpenParams,
+  forgeCliChildEnv,
   formatIssueView,
   formatPrChecksPayload,
   formatPrCommentsPayload,
@@ -262,6 +263,29 @@ describe("resolvePinnedTarget", () => {
       HERDR_PLUGIN_CONTEXT_JSON: "{}",
     } as NodeJS.ProcessEnv);
     expect(target.originPaneId).toBeNull();
+  });
+});
+
+describe("forgeCliChildEnv", () => {
+  test("drops UI-pane ambient identity, keeps targeting vars", () => {
+    const env = forgeCliChildEnv({
+      HERDR_PANE_ID: "w1:p9",
+      HERDR_PLUGIN_CONTEXT_JSON: '{"focused_pane_id":"w1:p1"}',
+      HERDR_SOCKET_PATH: "/tmp/s.sock",
+      HERDR_SESSION: "verify234",
+      HERDR_PLUGIN_CONFIG_DIR: "/cfg",
+      HERDR_WORKSPACE_ID: "w1",
+      PATH: "/bin",
+      EMPTY: undefined,
+    } as NodeJS.ProcessEnv);
+    expect(env.HERDR_PANE_ID).toBeUndefined();
+    expect(env.HERDR_PLUGIN_CONTEXT_JSON).toBeUndefined();
+    expect(env.EMPTY).toBeUndefined();
+    expect(env.HERDR_SOCKET_PATH).toBe("/tmp/s.sock");
+    expect(env.HERDR_SESSION).toBe("verify234");
+    expect(env.HERDR_PLUGIN_CONFIG_DIR).toBe("/cfg");
+    expect(env.HERDR_WORKSPACE_ID).toBe("w1");
+    expect(env.PATH).toBe("/bin");
   });
 });
 
@@ -521,6 +545,16 @@ function prListCli(overrides: Record<string, unknown> = {}): CliHandler {
 }
 
 describe("PrListView", () => {
+  test("constructor triggers the initial load (no keypress required)", async () => {
+    const ui = fakeUi();
+    const { calls, fn } = fakeCli(prListCli());
+    const view = new PrListView(makeDeps(fn, ui), () => {});
+    await flush();
+    expect(calls).toContainEqual(["pr", "list", "w1:p9", "--state", "open", "--limit", "50"]);
+    const text = linesText(view.render(100, 20)).join("\n");
+    expect(text).toContain("#42 Add forge TUI");
+  });
+
   test("loads and renders open PRs; enter opens detail", async () => {
     const ui = fakeUi();
     const opened: number[] = [];
@@ -763,6 +797,16 @@ function issueListCli(): CliHandler {
 }
 
 describe("IssueListView", () => {
+  test("constructor triggers the initial load (no keypress required)", async () => {
+    const ui = fakeUi();
+    const { calls, fn } = fakeCli(issueListCli());
+    const view = new IssueListView(makeDeps(fn, ui), () => {});
+    await flush();
+    expect(calls).toContainEqual(["issue", "list", "w1:p9", "--state", "open", "--limit", "50"]);
+    const text = linesText(view.render(100, 20)).join("\n");
+    expect(text).toContain("#7 Forge surface missing");
+  });
+
   test("loads and renders issues; enter opens detail", async () => {
     const ui = fakeUi();
     const opened: number[] = [];

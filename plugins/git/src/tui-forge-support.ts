@@ -254,7 +254,25 @@ function parseCliEnvelope(
  * positional: `HERDR_PANE_ID` in the child env is the UI pane itself,
  * and the forge repo resolves from the target pane's cwd — falling back
  * to ambient identity would silently target the wrong repository.
+ *
+ * The child env therefore drops `HERDR_PANE_ID` and
+ * `HERDR_PLUGIN_CONTEXT_JSON` entirely (same rule as the inbox TUI's
+ * runCli): pane-scoped commands always carry the explicit positional,
+ * so ambient identity must not leak through. Left in place, the CLI's
+ * ambientIdentity() sees HERDR_PANE_ID=<UI pane> contradicting
+ * context focused_pane_id=<origin pane> and fails closed with
+ * `ambient_identity_mismatch` on every forge call.
  */
+export function forgeCliChildEnv(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) continue;
+    if (key === "HERDR_PANE_ID" || key === "HERDR_PLUGIN_CONTEXT_JSON") continue;
+    out[key] = value;
+  }
+  return out;
+}
+
 export function runGitCli(
   args: readonly string[],
   options: CliRunOptions = {},
@@ -265,7 +283,7 @@ export function runGitCli(
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [cliPath, ...args], {
       cwd: root,
-      env: process.env,
+      env: forgeCliChildEnv(),
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";

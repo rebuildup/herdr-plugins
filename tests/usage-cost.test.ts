@@ -366,7 +366,7 @@ async function indexFixtures(env: FixtureEnv, herdrSocket: string): Promise<void
     HERDR_SOCKET_PATH: herdrSocket,
   });
   expect(idx.status).toBe(0);
-  expect((idx.json?.indexed as unknown[]).length).toBe(2);
+  expect(((idx.json?.indexed ?? []) as unknown[]).length).toBe(2);
 }
 
 /** Tiny LiteLLM-shaped price server for the `cost` command. */
@@ -742,7 +742,7 @@ describe("cost command", () => {
     const { usageEnv } = setupEnv();
     const r = runUsage(["capability"], usageEnv);
     expect(r.status).toBe(0);
-    expect((r.json?.commands as string[]).includes("cost")).toBe(true);
+    expect(((r.json?.commands ?? []) as string[]).includes("cost")).toBe(true);
     const sources = r.json?.sources as Record<string, unknown>[];
     const pricing = sources.find((s) => s.id === "model-pricing");
     expect(pricing?.kind).toBe("price-table");
@@ -798,7 +798,7 @@ describe("cost command", () => {
       expect(cost.estimated_cost_usd as number).toBeCloseTo(0.0002784, 10);
       // estimate and provider-reported are different figures, both present
       expect(cost.provider_reported_cost_usd as number).toBeCloseTo(0.0123, 6);
-      expect((r.json?.warnings as string[]).includes("unpriced_models")).toBe(true);
+      expect(((r.json?.warnings ?? []) as string[]).includes("unpriced_models")).toBe(true);
     } finally {
       await herdr.close();
       await server.close();
@@ -824,7 +824,7 @@ describe("cost command", () => {
       expect(cost.estimate).toBe(true); // still labeled an estimate attempt
       const byModel = cost.by_model as Record<string, unknown>[];
       expect(byModel.every((m) => m.cost_source === "unpriced")).toBe(true);
-      expect((r.json?.warnings as string[]).includes("pricing_unavailable")).toBe(true);
+      expect(((r.json?.warnings ?? []) as string[]).includes("pricing_unavailable")).toBe(true);
     } finally {
       await herdr.close();
       await server.close();
