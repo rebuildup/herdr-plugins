@@ -53,6 +53,26 @@ All commands print a single JSON document on stdout; errors print
 `{contract, ok:false, error:{code,message,kind?,…}}` on stderr.
 Exit codes: `0` success, `1` handled error, `2` usage.
 
+### Target selection
+
+Every command accepts the shared plugin target flags:
+
+```bash
+bun run src/cli.ts <command> [--socket PATH] [--session NAME]
+```
+
+They select the **local** herdr instance whose saved machines are
+listed/probed — the same flags external clients append to every plugin
+CLI invocation. Resolution order is explicit flag > ambient
+`HERDR_SOCKET_PATH`/`HERDR_SESSION` env > default, matching the
+herdr-client contract. The `herdr` CLI has no target flags of its own,
+so the plugin forwards them to spawned `herdr` children as
+`HERDR_SOCKET_PATH` / `HERDR_SESSION` (herdr's own precedence:
+`HERDR_SOCKET_PATH` > `HERDR_SESSION`). Ambient `HERDR_*` context is
+otherwise stripped from children per ADR-0020. These flags are
+unrelated to the remote `session` field on each saved `MachineEntry`,
+which names the session on the probed remote host.
+
 ### `list`
 
 Live enumeration merged with last-known probe metadata. Never probes.
