@@ -120,3 +120,18 @@ uses the isolated-session harness only.
   entries (e.g. structured approval dialogs, webhook triggers per
   ADR-0026, attention granularity per feature-ledger) — TUI tickets must
   render them as honest unsupported states, not simulate them.
+
+## RC 0.11.0 acceptance (#234)
+
+Release-candidate verification of every interactive TUI surface across
+all 14 plugins at `release-0-11-0` @ `0554aed` is recorded in
+[`docs/research/tui-rc-0-11-0-verification.md`](../research/tui-rc-0-11-0-verification.md).
+The RC doc path is appended to `real_machine_evidence` for every
+command whose `interactive_tui` status is `implemented:*` (108 entries).
+Headline results: full keyboard→operation→readback→focus-return pass on
+macOS for all 14 panes; two forge-TUI defects found and fixed on the
+verification branch; WSL2 `validate:fast` fully green plus a live TUI
+smoke; Windows install/typecheck/lint green (test suite limited by the
+known `core.autocrlf` portability gap, now mitigated for checkouts by
+the new `.gitattributes`); alternate Windows host unreachable and
+recorded honestly.
