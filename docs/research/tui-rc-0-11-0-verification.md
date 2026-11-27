@@ -178,3 +178,70 @@ normalized (D4); WSL2 fully green including a live TUI smoke;
 Windows build/lint/typecheck green with the test suite limited by the
 known autocrlf portability gap; alternate Windows host unreachable and
 recorded. No release-blocking defect remains open.
+
+## WSL/SSH practicality spot-check (supplementary, post-RC)
+
+Maintainer-priority check: are the TUI surfaces practical over plain SSH
+(no GUI, no herdr-t3)? Bounded breadth pass on `device-wsl` (WSL2 Ubuntu,
+herdr 0.9.5 real binary, Bun 1.4.5) against `release-0-11-0` @ `272ae2f`
+(tip incl. #266 Windows fixes). Isolated named session `verifywsl` with
+dedicated `XDG_CONFIG_HOME`/`XDG_STATE_HOME`/`XDG_DATA_HOME` under
+`/var/tmp/herdr-plugin-wsl`; ambient `HERDR_*` stripped via an `env -u`
+wrapper; the user's live session was never touched.
+
+### Plugin install (official path)
+
+`herdr plugin install rebuildup/herdr-plugins/plugins/<name>
+--ref release-0-11-0` for six representative plugins — inbox, git,
+projects, automations, secrets, machines. All resolved checkout SHA
+`272ae2fddedf291bb84f8572ed3936daf5bc0594` (verified via
+`git rev-parse HEAD` in the github-installations checkout).
+
+### Per-surface results (keyboard → operation → readback → focus return)
+
+Driving method identical to the macOS pass: `plugin pane open
+--placement tab`, `pane send-keys`/`send-text`, `pane read` captures,
+`q`/`esc` exit, plugin state JSON as readback.
+
+| plugin | surface exercised | result |
+| --- | --- | --- |
+| rebuildup.inbox | render, `down`/`up` nav, `?` help overlay, `F` scope cycle (inbox→all), settle `s` confirm dialog → **Esc cancel** → `s` → Enter confirm → state.json `settled` readback → restore `r` confirm → state cleared; `q` → focus returned to `w1:p1` | PASS |
+| rebuildup.git | render (branch/HEAD/dirty state), `j`/`k` nav, `r` refresh picked up probe file, Changed-files detail, `?` help, `s` stage → `git status` readback `A`, `u` unstage → `??` readback | PASS |
+| rebuildup.projects | honest empty-registry render, `?` help, `n` register → path/title prompts → confirm dialog → Enter → registry entry + state.json `projects` readback | PASS |
+| rebuildup.automations | honest empty render, `?` help, `n` create → full form (name→prompt→interval schedule→pane destination→misfire) → confirm dialog → `task_6755a140-…` created + state.json readback; task detail `t` disable → confirm → `enabled:false` + `disabled_at` readback; `D` delete → confirm → task removed | PASS |
+| rebuildup.secrets | honest empty-bindings render, `?` help, `w` init starter config → confirm dialog → `config.json` written under plugin config dir | PASS |
+| rebuildup.machines | honest empty-inventory render, `?` help, `i` capability/contract info render (read-only by design, ADR-0028) | PASS |
+
+### Non-TTY fallback
+
+Each plugin's `bun run src/tui.ts main` run with stdin `/dev/null` (no
+TTY) prints a plain-text summary plus a TTY hint and exits 0:
+
+- inbox: `inbox — session=verifywsl total=2 …` + "interactive UI requires
+  a TTY; use the CLI for scripting." exit 0
+- secrets: `secrets: no bindings declared` + hint. exit 0
+- git: `git-tui: interactive UI requires a TTY.` + CLI hint. exit 0
+- automations: `automations: no tasks registered` + hint. exit 0
+
+### Coexistence
+
+secrets (`w1:p6`) and machines (`w1:p7`) plugin panes were open
+simultaneously in separate tabs; secrets `q` closed cleanly while
+machines stayed rendered and interactive — no cross-pane state
+corruption. All panes closed with focus returning to the origin shell
+pane `w1:p1`.
+
+### Evidence
+
+Captured on `device-wsl` at `~/herdr-plugin-wsl-evidence/`:
+`plugin-list.txt` (6 installs @ release-0-11-0), `inbox-tui.txt`,
+`inbox-help.txt`, `inbox-state-after-restore.json`. Mutation readbacks
+were taken live from
+`/var/tmp/herdr-plugin-wsl/xdg-state/herdr/plugins/<id>/state.json`
+(session stopped and temp dir removed afterwards; evidence dir retained).
+
+### Defects
+
+None found. Every surface rendered, navigated, confirmed/cancelled, and
+returned focus correctly over a plain SSH session with no GUI and no
+herdr-t3 involvement.
