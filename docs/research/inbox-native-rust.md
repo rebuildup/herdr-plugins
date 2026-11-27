@@ -137,12 +137,25 @@ Notes:
   stall), which is why that one-line-class fix matters beyond the
   probe: any terminal that does not answer `ESC[6n` would have eaten a
   flat ~2 s on every launch.
-- Interactive key handling was exercised once via `tui-probe.py
-  --advance-*`: Enter at ~230 ms opened the item detail screen (PTY
-  output grew 1056 → 5440 bytes, clean exit). Full keymap coverage and
-  the screenshot/video + independent visual review required by the
-  acceptance criteria remain for human acceptance — this is why the PR
-  stays Draft.
+- Interactive key handling was exercised via `tui-probe.py
+  --advance-*` (Enter opened the item detail screen, clean exit) and,
+  for visual evidence, via a dedicated PTY+pyte driver
+  (`spikes/inbox-tui/drive.py`) against the isolated `np291` session
+  with four real panes in mixed organize states. Screen snapshots +
+  the raw ANSI typescript live in `spikes/inbox-tui/evidence/`:
+  `main-01-list` (scope:inbox), `main-02-selected`, `main-03-detail`
+  (item overlay), `main-04-filter-draft` / `main-05-filtered`
+  (`/np291-b` narrows 2/4 → 1/4) / `main-06-filter-cleared`,
+  `main-06b-scope-all` / `main-06c-scope-hidden` (`f` scope cycle with
+  `[settled]`/`[snoozed→…]` badges), `main-07-help` (`?` keymap),
+  `main-08-confirm-settle` → `main-09-after-settle` (confirm-gated
+  mutation: dialog shows pane/cwd/cli target, `y` applies, list
+  refreshes 2/4 → 1/4), `main-10-snooze-prompt` (snooze-until prompt,
+  Esc-cancelled), `main-11-confirm-reconcile` → `main-12-after-reconcile`
+  (`reconcile: cleared=0 pruned=0 projected=3`), and
+  `main-13-transitions` (read-only transition log, head_seq=8).
+  Independent human visual review of these snapshots remains a
+  separate acceptance gate — this is why the PR stays Draft.
 - The Rust TUI still draws every loop iteration (100 ms poll); output
   volume is small (≈1 KB/run in the probe) but a dirty-check is a
   possible follow-up, not a regression vs the TS renderer's behavior.
