@@ -35,9 +35,7 @@
     "stdev": 320.2
   },
   "marker_found": 12,
-  "exit_codes": [
-    0
-  ],
+  "exit_codes": [0],
   "maxrss_kb": {
     "n": 0
   },
