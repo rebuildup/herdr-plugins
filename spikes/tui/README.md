@@ -2,7 +2,7 @@
 
 **SPIKE — not shipped, not installed, not part of any plugin.** Evidence
 source for the Rust TUI adoption decision under Program #286. Findings:
-`docs/research/native-tui-spike-289.md`; decision record: ADR-0035.
+`docs/research/native-tui-spike-289.md`; decision record: ADR-0036.
 
 Minimal ratatui + crossterm prototype covering the `tui-v1` capability
 set: list, `/` filter input, detail view with scrollbar/viewport,

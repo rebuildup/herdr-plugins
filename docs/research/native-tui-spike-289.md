@@ -15,7 +15,7 @@ levels: a Python `pty` + `pyte` harness (`tools/drive.py`,
 `evidence/*.txt|*.typescript|stats-*`) and a **real herdr 0.9.5 pane** in
 an isolated named session `np289` (`evidence/herdr-*.txt`; session
 deleted afterwards, live session untouched). The adoption decision it
-feeds is recorded in **ADR-0035** (native TUI runtime + Inbox boundary).
+feeds is recorded in **ADR-0036** (native TUI runtime + Inbox boundary).
 
 ## 1. What was compared
 
@@ -180,7 +180,7 @@ Alternatives considered and rejected for the core:
   on all 14 plugins; rejected *for the native track* because it keeps
   the Bun prerequisite the program is removing, and pays interpreter
   startup on every pane. It remains the implementation for unmigrated
-  plugins during coexistence (see ADR-0035).
+  plugins during coexistence (see ADR-0036).
 - **Other Rust TUI crates** — `tui-rs` is unmaintained (ratatui is its
   successor); Cursive/bubbletea-style immediate-mode or Go runtimes do
   not match the retained-mode, diff-rendered model `packages/tui`
@@ -263,7 +263,7 @@ Kept deliberately small — no 14-screen design.
    users see identical keys/help regardless of which binary renders.
 4. **Coexistence behavior.** `packages/tui` remains the implementation
    for unmigrated plugins; Rust plugins link a shared Rust crate (the
-   `hoxay-tui` core implied by ADR-0035) that mirrors `packages/tui`'s
+   `hoxay-tui` core implied by ADR-0036) that mirrors `packages/tui`'s
    module roles: app shell (screen stack, reserved keys, task runner),
    renderer (ratatui), components (list/detail/input/confirm/help),
    safety helpers (sanitize, bounded output, escape/path checks). Both
@@ -275,7 +275,7 @@ Kept deliberately small — no 14-screen design.
 
 ## 9. Adoption decision input for Inbox (#291)
 
-Recommendation recorded in ADR-0035: **adopt ratatui/crossterm for the
+Recommendation recorded in ADR-0036: **adopt ratatui/crossterm for the
 Inbox Rust TUI**, because the spike shows the full `tui-v1` capability
 set working with large latency headroom, terminal restore is robust,
 and the only hard unverified area (IME/ConPTY) is terminal-side and

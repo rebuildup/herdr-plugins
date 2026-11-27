@@ -1,4 +1,4 @@
-# ADR-0035: Native TUI runtime — ratatui/crossterm for plugin surfaces, Inbox as the first consumer
+# ADR-0036: Native TUI runtime — ratatui/crossterm for plugin surfaces, Inbox as the first consumer
 
 ## Status
 
