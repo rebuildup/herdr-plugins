@@ -28,6 +28,13 @@ bun run src/cli.ts probe <machine-id|label>
 bun run src/cli.ts probe --all
 ```
 
+Every command accepts the shared target flags `--socket PATH` and
+`--session NAME`, which select the **local** herdr instance (explicit
+flag beats ambient `HERDR_SOCKET_PATH`/`HERDR_SESSION`). The `herdr`
+CLI itself has no target flags, so they are forwarded to spawned
+children as `HERDR_SOCKET_PATH` / `HERDR_SESSION`. This is unrelated to
+the remote `session` field on each saved machine.
+
 - `list` — `herdr machine list --json` merged with last-known probe
   metadata (`last_probe`, null when never probed). Never probes live.
 - `probe` — live probe via `herdr --machine <id>`: remote `api
@@ -43,7 +50,9 @@ Exit codes: 0 success, 1 handled error, 2 usage.
 
 Each remote call is a fresh `herdr` CLI spawn (45s timeout) with
 ambient `HERDR_*` env stripped — the ADR-0020 `SavedSshApiBridge` path,
-same as handoff's `remote-probe`. Probe logic is duplicated minimally
+same as handoff's `remote-probe`. Explicit `--socket`/`--session` CLI
+flags are re-injected into the child env as `HERDR_SOCKET_PATH` /
+`HERDR_SESSION` (see above). Probe logic is duplicated minimally
 from `plugins/handoff/src/remote.ts` per ADR-0028 §2 (no `packages/`
 extraction until a second consumer justifies it).
 
