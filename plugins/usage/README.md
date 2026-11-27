@@ -6,7 +6,7 @@ Token usage aggregation for herdr panes
 ## Install
 
 ```bash
-herdr plugin install rebuildup/herdr-plugins/plugins/usage
+herdr plugin install rebuildup/hoxay-plugins/plugins/usage
 ```
 
 Prerequisites: herdr ≥ 0.9.0, Bun on `PATH`, and the

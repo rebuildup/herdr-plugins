@@ -210,7 +210,7 @@ describe("ConfirmView", () => {
   function make() {
     const v = new ConfirmView({
       title: "Delete pane?",
-      target: ["pane_id: w1:p2", "repo: herdr-plugins"],
+      target: ["pane_id: w1:p2", "repo: hoxay-plugins"],
       consequence: "cannot be undone",
       danger: true,
     });

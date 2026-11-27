@@ -5,7 +5,7 @@ standalone-plugin port of T3 Code's scheduled tasks / webhook
 automations, adapted to herdr's no-daemon model.
 
 - Plugin ID: `rebuildup.automations`
-- Install: `herdr plugin install rebuildup/herdr-plugins/plugins/automations`
+- Install: `herdr plugin install rebuildup/hoxay-plugins/plugins/automations`
   (pre-release: append `--ref release-0-7-0` or a commit SHA)
 - Contract (STABLE): `herdr-plugins.automations/v1` —
   `docs/contracts/automations-v1.md`

@@ -1,6 +1,6 @@
-# AGENTS.md — herdr-plugins root agent contract
+# AGENTS.md — hoxay-plugins root agent contract
 
-This is the always-on contract for AI agents working on `herdr-plugins`.
+This is the always-on contract for AI agents working on `hoxay-plugins` (`rebuildup/hoxay-plugins`).
 
 The repository follows the `rebuildup/project-init` release-driven operating
 model. Keep this root contract project-specific; do not copy the complete
@@ -8,7 +8,7 @@ upstream initialization prompt here.
 
 ## 1. Project identity
 
-- `herdr-plugins` provides independent, installable
+- `hoxay-plugins` provides independent, installable
   [herdr](https://github.com/herdrdev/herdr) plugins for capabilities that
   herdr core and existing plugins do not cover. The first plugin is
   `rebuildup.inbox` (agent work-inbox: settle / snooze / restore).
@@ -18,7 +18,7 @@ upstream initialization prompt here.
   orchestration.
 - Targets: macOS, Linux, Windows (plugin manifest `platforms`).
 - Public repository. License: MIT. Canonical remote:
-  `https://github.com/rebuildup/herdr-plugins.git`.
+  `https://github.com/rebuildup/hoxay-plugins.git`.
 - Source code, commit messages: **English**.
 - Internal development docs, Issues, PRs, reviews: **Japanese** is preferred.
 
@@ -36,7 +36,7 @@ upstream initialization prompt here.
 
 - `plugins/<name>/` — one installable plugin per directory, each with an
   official `herdr-plugin.toml`. Install path:
-  `herdr plugin install rebuildup/herdr-plugins/plugins/<name>`.
+  `herdr plugin install rebuildup/hoxay-plugins/plugins/<name>`.
 - `packages/` — libraries actually shared by two or more plugins. Do not
   create empty or speculative packages.
 - `docs/` — specifications, ADRs, research, contracts.

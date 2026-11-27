@@ -1,13 +1,13 @@
-# herdr-plugins
+# hoxay-plugins
 
-Independent, installable plugins for [herdr](https://github.com/herdrdev/herdr)
+Hoxay Plugins — independent, installable plugins for [herdr](https://github.com/herdrdev/herdr)
 — the terminal workspace manager for AI coding agents.
 
 Each plugin in `plugins/` is distributed on its own through the official
 herdr plugin installer:
 
 ```bash
-herdr plugin install rebuildup/herdr-plugins/plugins/<name>
+herdr plugin install rebuildup/hoxay-plugins/plugins/<name>
 ```
 
 Plugins share capabilities that herdr core and existing plugins do not

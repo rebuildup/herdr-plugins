@@ -171,11 +171,11 @@ describe("staleCheck", () => {
 
 describe("parseLinkSpec", () => {
   test("pr and issue specs", () => {
-    expect(parseLinkSpec("pr rebuildup/herdr-plugins#237")).toEqual({
+    expect(parseLinkSpec("pr rebuildup/hoxay-plugins#237")).toEqual({
       ok: true,
       kind: "pr",
       flag: "--pr",
-      ref: "rebuildup/herdr-plugins#237",
+      ref: "rebuildup/hoxay-plugins#237",
     });
     expect(parseLinkSpec("issue owner/repo#12")).toMatchObject({
       ok: true,

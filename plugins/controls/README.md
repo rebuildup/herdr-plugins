@@ -6,7 +6,7 @@ Agent operation core for herdr panes
 ## Install
 
 ```bash
-herdr plugin install rebuildup/herdr-plugins/plugins/controls
+herdr plugin install rebuildup/hoxay-plugins/plugins/controls
 ```
 
 Prerequisites: herdr ≥ 0.9.0, Bun on `PATH`, and a reachable herdr

@@ -11,71 +11,71 @@
       },
     },
     "packages/git-core": {
-      "name": "@herdr-plugins/git-core",
+      "name": "@hoxay-plugins/git-core",
       "version": "0.1.0",
     },
     "packages/herdr-client": {
-      "name": "@herdr-plugins/client",
+      "name": "@hoxay-plugins/client",
       "version": "0.1.0",
     },
     "packages/tui": {
-      "name": "@herdr-plugins/tui",
+      "name": "@hoxay-plugins/tui",
       "version": "0.1.0",
     },
     "plugins/artifacts": {
-      "name": "@herdr-plugins/artifacts",
+      "name": "@hoxay-plugins/artifacts",
       "version": "0.2.0",
     },
     "plugins/automations": {
-      "name": "@herdr-plugins/automations",
+      "name": "@hoxay-plugins/automations",
       "version": "0.8.0",
     },
     "plugins/checkpoints": {
-      "name": "@herdr-plugins/checkpoints",
+      "name": "@hoxay-plugins/checkpoints",
       "version": "0.4.0",
     },
     "plugins/controls": {
-      "name": "@herdr-plugins/controls",
+      "name": "@hoxay-plugins/controls",
       "version": "0.6.0",
     },
     "plugins/conversations": {
-      "name": "@herdr-plugins/conversations",
+      "name": "@hoxay-plugins/conversations",
       "version": "0.6.0",
     },
     "plugins/git": {
-      "name": "@herdr-plugins/git",
+      "name": "@hoxay-plugins/git",
       "version": "0.6.0",
     },
     "plugins/handoff": {
-      "name": "@herdr-plugins/handoff",
+      "name": "@hoxay-plugins/handoff",
       "version": "0.7.0",
     },
     "plugins/inbox": {
-      "name": "@herdr-plugins/inbox",
+      "name": "@hoxay-plugins/inbox",
       "version": "0.7.0",
     },
     "plugins/machines": {
-      "name": "@herdr-plugins/machines",
+      "name": "@hoxay-plugins/machines",
       "version": "0.1.0",
     },
     "plugins/mcp": {
-      "name": "@herdr-plugins/mcp",
+      "name": "@hoxay-plugins/mcp",
       "version": "0.1.0",
     },
     "plugins/projects": {
-      "name": "@herdr-plugins/projects",
+      "name": "@hoxay-plugins/projects",
       "version": "0.4.0",
     },
     "plugins/secrets": {
-      "name": "@herdr-plugins/secrets",
+      "name": "@hoxay-plugins/secrets",
       "version": "0.2.0",
     },
     "plugins/textgen": {
-      "name": "@herdr-plugins/textgen",
+      "name": "@hoxay-plugins/textgen",
       "version": "0.8.0",
     },
     "plugins/usage": {
-      "name": "@herdr-plugins/usage",
+      "name": "@hoxay-plugins/usage",
       "version": "0.6.0",
     },
   },
@@ -98,39 +98,39 @@
 
     "@biomejs/cli-win32-x64": ["@biomejs/cli-win32-x64@2.2.4", "", { "os": "win32", "cpu": "x64" }, "sha512-3Y4V4zVRarVh/B/eSHczR4LYoSVyv3Dfuvm3cWs5w/HScccS0+Wt/lHOcDTRYeHjQmMYVC3rIRWqyN2EI52+zg=="],
 
-    "@herdr-plugins/artifacts": ["@herdr-plugins/artifacts@workspace:plugins/artifacts"],
+    "@hoxay-plugins/artifacts": ["@hoxay-plugins/artifacts@workspace:plugins/artifacts"],
 
-    "@herdr-plugins/automations": ["@herdr-plugins/automations@workspace:plugins/automations"],
+    "@hoxay-plugins/automations": ["@hoxay-plugins/automations@workspace:plugins/automations"],
 
-    "@herdr-plugins/checkpoints": ["@herdr-plugins/checkpoints@workspace:plugins/checkpoints"],
+    "@hoxay-plugins/checkpoints": ["@hoxay-plugins/checkpoints@workspace:plugins/checkpoints"],
 
-    "@herdr-plugins/client": ["@herdr-plugins/client@workspace:packages/herdr-client"],
+    "@hoxay-plugins/client": ["@hoxay-plugins/client@workspace:packages/herdr-client"],
 
-    "@herdr-plugins/controls": ["@herdr-plugins/controls@workspace:plugins/controls"],
+    "@hoxay-plugins/controls": ["@hoxay-plugins/controls@workspace:plugins/controls"],
 
-    "@herdr-plugins/conversations": ["@herdr-plugins/conversations@workspace:plugins/conversations"],
+    "@hoxay-plugins/conversations": ["@hoxay-plugins/conversations@workspace:plugins/conversations"],
 
-    "@herdr-plugins/git": ["@herdr-plugins/git@workspace:plugins/git"],
+    "@hoxay-plugins/git": ["@hoxay-plugins/git@workspace:plugins/git"],
 
-    "@herdr-plugins/git-core": ["@herdr-plugins/git-core@workspace:packages/git-core"],
+    "@hoxay-plugins/git-core": ["@hoxay-plugins/git-core@workspace:packages/git-core"],
 
-    "@herdr-plugins/handoff": ["@herdr-plugins/handoff@workspace:plugins/handoff"],
+    "@hoxay-plugins/handoff": ["@hoxay-plugins/handoff@workspace:plugins/handoff"],
 
-    "@herdr-plugins/inbox": ["@herdr-plugins/inbox@workspace:plugins/inbox"],
+    "@hoxay-plugins/inbox": ["@hoxay-plugins/inbox@workspace:plugins/inbox"],
 
-    "@herdr-plugins/machines": ["@herdr-plugins/machines@workspace:plugins/machines"],
+    "@hoxay-plugins/machines": ["@hoxay-plugins/machines@workspace:plugins/machines"],
 
-    "@herdr-plugins/mcp": ["@herdr-plugins/mcp@workspace:plugins/mcp"],
+    "@hoxay-plugins/mcp": ["@hoxay-plugins/mcp@workspace:plugins/mcp"],
 
-    "@herdr-plugins/projects": ["@herdr-plugins/projects@workspace:plugins/projects"],
+    "@hoxay-plugins/projects": ["@hoxay-plugins/projects@workspace:plugins/projects"],
 
-    "@herdr-plugins/secrets": ["@herdr-plugins/secrets@workspace:plugins/secrets"],
+    "@hoxay-plugins/secrets": ["@hoxay-plugins/secrets@workspace:plugins/secrets"],
 
-    "@herdr-plugins/textgen": ["@herdr-plugins/textgen@workspace:plugins/textgen"],
+    "@hoxay-plugins/textgen": ["@hoxay-plugins/textgen@workspace:plugins/textgen"],
 
-    "@herdr-plugins/tui": ["@herdr-plugins/tui@workspace:packages/tui"],
+    "@hoxay-plugins/tui": ["@hoxay-plugins/tui@workspace:packages/tui"],
 
-    "@herdr-plugins/usage": ["@herdr-plugins/usage@workspace:plugins/usage"],
+    "@hoxay-plugins/usage": ["@hoxay-plugins/usage@workspace:plugins/usage"],
 
     "@types/bun": ["@types/bun@1.3.14", "", { "dependencies": { "bun-types": "1.3.14" } }, "sha512-h1hFqFVcvAvD9j9K7ZW7vd82aSA+rTdznZa+5bwvCwqSB1jmmfLcbIWhOLx1/+boy/xmjgCs/OMUL8hRJSmnPw=="],
 
