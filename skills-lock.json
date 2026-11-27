@@ -2,7 +2,8 @@
   "version": 2,
   "skills": {
     "agent-delivery-estimation": {
-      "source": "rebuildup/project-init",
+      "source": "rebuildup/aude-skills",
+      "ref": "v0.13.0",
       "commit": "285b139b01c199d3d4135d90f3cc3f6a932eff3b",
       "sourceType": "github",
       "skillPath": "skills/agent-delivery-estimation/SKILL.md",
@@ -10,7 +11,8 @@
       "installMode": "copy"
     },
     "agent-recovery": {
-      "source": "rebuildup/project-init",
+      "source": "rebuildup/aude-skills",
+      "ref": "v0.13.0",
       "commit": "285b139b01c199d3d4135d90f3cc3f6a932eff3b",
       "sourceType": "github",
       "skillPath": "skills/agent-recovery/SKILL.md",
@@ -18,7 +20,8 @@
       "installMode": "copy"
     },
     "code-naming": {
-      "source": "rebuildup/project-init",
+      "source": "rebuildup/aude-skills",
+      "ref": "v0.13.0",
       "commit": "285b139b01c199d3d4135d90f3cc3f6a932eff3b",
       "sourceType": "github",
       "skillPath": "skills/code-naming/SKILL.md",
@@ -34,7 +37,8 @@
       "installMode": "copy"
     },
     "correctness-assurance": {
-      "source": "rebuildup/project-init",
+      "source": "rebuildup/aude-skills",
+      "ref": "v0.13.0",
       "commit": "285b139b01c199d3d4135d90f3cc3f6a932eff3b",
       "sourceType": "github",
       "skillPath": "skills/correctness-assurance/SKILL.md",
@@ -42,7 +46,8 @@
       "installMode": "copy"
     },
     "design-refinement": {
-      "source": "rebuildup/project-init",
+      "source": "rebuildup/aude-skills",
+      "ref": "v0.13.0",
       "commit": "285b139b01c199d3d4135d90f3cc3f6a932eff3b",
       "sourceType": "github",
       "skillPath": "skills/design-refinement/SKILL.md",
@@ -58,7 +63,8 @@
       "installMode": "copy"
     },
     "engineering-decisions": {
-      "source": "rebuildup/project-init",
+      "source": "rebuildup/aude-skills",
+      "ref": "v0.13.0",
       "commit": "285b139b01c199d3d4135d90f3cc3f6a932eff3b",
       "sourceType": "github",
       "skillPath": "skills/engineering-decisions/SKILL.md",
@@ -66,7 +72,8 @@
       "installMode": "copy"
     },
     "github-delivery": {
-      "source": "rebuildup/project-init",
+      "source": "rebuildup/aude-skills",
+      "ref": "v0.13.0",
       "commit": "285b139b01c199d3d4135d90f3cc3f6a932eff3b",
       "sourceType": "github",
       "skillPath": "skills/github-delivery/SKILL.md",
@@ -74,7 +81,8 @@
       "installMode": "copy"
     },
     "herdr-runtime": {
-      "source": "rebuildup/project-init",
+      "source": "rebuildup/aude-skills",
+      "ref": "v0.13.0",
       "commit": "285b139b01c199d3d4135d90f3cc3f6a932eff3b",
       "sourceType": "github",
       "skillPath": "skills/herdr-runtime/SKILL.md",
@@ -82,7 +90,8 @@
       "installMode": "copy"
     },
     "idea-discovery": {
-      "source": "rebuildup/project-init",
+      "source": "rebuildup/aude-skills",
+      "ref": "v0.13.0",
       "commit": "285b139b01c199d3d4135d90f3cc3f6a932eff3b",
       "sourceType": "github",
       "skillPath": "skills/idea-discovery/SKILL.md",
@@ -90,7 +99,8 @@
       "installMode": "copy"
     },
     "interaction-discipline": {
-      "source": "rebuildup/project-init",
+      "source": "rebuildup/aude-skills",
+      "ref": "v0.13.0",
       "commit": "285b139b01c199d3d4135d90f3cc3f6a932eff3b",
       "sourceType": "github",
       "skillPath": "skills/interaction-discipline/SKILL.md",
@@ -98,7 +108,8 @@
       "installMode": "copy"
     },
     "linear-release-control": {
-      "source": "rebuildup/project-init",
+      "source": "rebuildup/aude-skills",
+      "ref": "v0.13.0",
       "commit": "285b139b01c199d3d4135d90f3cc3f6a932eff3b",
       "sourceType": "github",
       "skillPath": "skills/linear-release-control/SKILL.md",
@@ -114,7 +125,8 @@
       "installMode": "copy"
     },
     "onboarding": {
-      "source": "rebuildup/project-init",
+      "source": "rebuildup/aude-skills",
+      "ref": "v0.13.0",
       "commit": "285b139b01c199d3d4135d90f3cc3f6a932eff3b",
       "sourceType": "github",
       "skillPath": "skills/onboarding/SKILL.md",
@@ -122,7 +134,8 @@
       "installMode": "copy"
     },
     "orca-frontend": {
-      "source": "rebuildup/project-init",
+      "source": "rebuildup/aude-skills",
+      "ref": "v0.13.0",
       "commit": "285b139b01c199d3d4135d90f3cc3f6a932eff3b",
       "sourceType": "github",
       "skillPath": "skills/orca-frontend/SKILL.md",
@@ -130,7 +143,8 @@
       "installMode": "copy"
     },
     "parallel-orchestration": {
-      "source": "rebuildup/project-init",
+      "source": "rebuildup/aude-skills",
+      "ref": "v0.13.0",
       "commit": "285b139b01c199d3d4135d90f3cc3f6a932eff3b",
       "sourceType": "github",
       "skillPath": "skills/parallel-orchestration/SKILL.md",
@@ -138,7 +152,8 @@
       "installMode": "copy"
     },
     "policy-evaluation": {
-      "source": "rebuildup/project-init",
+      "source": "rebuildup/aude-skills",
+      "ref": "v0.13.0",
       "commit": "285b139b01c199d3d4135d90f3cc3f6a932eff3b",
       "sourceType": "github",
       "skillPath": "skills/policy-evaluation/SKILL.md",
@@ -146,7 +161,8 @@
       "installMode": "copy"
     },
     "quality-gate": {
-      "source": "rebuildup/project-init",
+      "source": "rebuildup/aude-skills",
+      "ref": "v0.13.0",
       "commit": "285b139b01c199d3d4135d90f3cc3f6a932eff3b",
       "sourceType": "github",
       "skillPath": "skills/quality-gate/SKILL.md",
@@ -154,7 +170,8 @@
       "installMode": "copy"
     },
     "sandbox-runtime": {
-      "source": "rebuildup/project-init",
+      "source": "rebuildup/aude-skills",
+      "ref": "v0.13.0",
       "commit": "285b139b01c199d3d4135d90f3cc3f6a932eff3b",
       "sourceType": "github",
       "skillPath": "skills/sandbox-runtime/SKILL.md",
@@ -162,7 +179,8 @@
       "installMode": "copy"
     },
     "secrets-management": {
-      "source": "rebuildup/project-init",
+      "source": "rebuildup/aude-skills",
+      "ref": "v0.13.0",
       "commit": "285b139b01c199d3d4135d90f3cc3f6a932eff3b",
       "sourceType": "github",
       "skillPath": "skills/secrets-management/SKILL.md",
@@ -170,7 +188,8 @@
       "installMode": "copy"
     },
     "security-audit": {
-      "source": "rebuildup/project-init",
+      "source": "rebuildup/aude-skills",
+      "ref": "v0.13.0",
       "commit": "285b139b01c199d3d4135d90f3cc3f6a932eff3b",
       "sourceType": "github",
       "skillPath": "skills/security-audit/SKILL.md",
@@ -178,7 +197,8 @@
       "installMode": "copy"
     },
     "security-maintenance": {
-      "source": "rebuildup/project-init",
+      "source": "rebuildup/aude-skills",
+      "ref": "v0.13.0",
       "commit": "285b139b01c199d3d4135d90f3cc3f6a932eff3b",
       "sourceType": "github",
       "skillPath": "skills/security-maintenance/SKILL.md",
@@ -186,7 +206,8 @@
       "installMode": "copy"
     },
     "skill-selection": {
-      "source": "rebuildup/project-init",
+      "source": "rebuildup/aude-skills",
+      "ref": "v0.13.0",
       "commit": "285b139b01c199d3d4135d90f3cc3f6a932eff3b",
       "sourceType": "github",
       "skillPath": "skills/skill-selection/SKILL.md",
@@ -194,7 +215,8 @@
       "installMode": "copy"
     },
     "supervisor-boundary": {
-      "source": "rebuildup/project-init",
+      "source": "rebuildup/aude-skills",
+      "ref": "v0.13.0",
       "commit": "285b139b01c199d3d4135d90f3cc3f6a932eff3b",
       "sourceType": "github",
       "skillPath": "skills/supervisor-boundary/SKILL.md",
@@ -202,7 +224,8 @@
       "installMode": "copy"
     },
     "system-quality": {
-      "source": "rebuildup/project-init",
+      "source": "rebuildup/aude-skills",
+      "ref": "v0.13.0",
       "commit": "285b139b01c199d3d4135d90f3cc3f6a932eff3b",
       "sourceType": "github",
       "skillPath": "skills/system-quality/SKILL.md",
@@ -218,7 +241,8 @@
       "installMode": "copy"
     },
     "worktree-workflow": {
-      "source": "rebuildup/project-init",
+      "source": "rebuildup/aude-skills",
+      "ref": "v0.13.0",
       "commit": "285b139b01c199d3d4135d90f3cc3f6a932eff3b",
       "sourceType": "github",
       "skillPath": "skills/worktree-workflow/SKILL.md",
