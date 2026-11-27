@@ -2,7 +2,7 @@
 
 Port of T3 Code's thread inbox / settle / snooze / pin / archive / manual
 ordering semantics to standalone herdr plugins, per `rebuildup/herdr-t3`
-issue #173, `docs/design/info-architecture.md` §6.2, and herdr-plugins
+issue #173, `docs/design/info-architecture.md` §6.2, and hoxay-plugins
 issues #33/#176/#177 (upstream refs `docs/user/thread-sidebar.md`,
 `docs/user/triage.md` @ `9cc4018c`).
 

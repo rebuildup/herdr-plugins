@@ -25,8 +25,8 @@ members of v1; **v1 is stable** at plugin v0.6.0 (see Versioning).
 ## Invocation and discovery
 
 ```bash
-herdr plugin install rebuildup/herdr-plugins/plugins/handoff
-# pre-release / pinned: herdr plugin install rebuildup/herdr-plugins/plugins/handoff --ref <branch|tag|sha>
+herdr plugin install rebuildup/hoxay-plugins/plugins/handoff
+# pre-release / pinned: herdr plugin install rebuildup/hoxay-plugins/plugins/handoff --ref <branch|tag|sha>
 # development: herdr plugin link <repo>/plugins/handoff
 ```
 

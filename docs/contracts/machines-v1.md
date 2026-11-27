@@ -17,8 +17,8 @@ breaking changes require a new contract version.
 ## Invocation and discovery
 
 ```bash
-herdr plugin install rebuildup/herdr-plugins/plugins/machines
-# pre-release / pinned: herdr plugin install rebuildup/herdr-plugins/plugins/machines --ref <branch|tag|sha>
+herdr plugin install rebuildup/hoxay-plugins/plugins/machines
+# pre-release / pinned: herdr plugin install rebuildup/hoxay-plugins/plugins/machines --ref <branch|tag|sha>
 # development: herdr plugin link <repo>/plugins/machines
 ```
 

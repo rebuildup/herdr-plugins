@@ -8,7 +8,7 @@ real-provider verification).
 ## Install
 
 ```bash
-herdr plugin install rebuildup/herdr-plugins/plugins/textgen
+herdr plugin install rebuildup/hoxay-plugins/plugins/textgen
 ```
 
 Prerequisites: herdr ≥ 0.9.0, Bun on `PATH`. The `agent` path needs a

@@ -150,7 +150,7 @@ export async function showNotification(
   return request(
     socketFor(options),
     "notification.show",
-    { title: options.title ?? "herdr-plugins", message },
+    { title: options.title ?? "hoxay-plugins", message },
     options,
   );
 }

@@ -5,7 +5,7 @@ Git status/diff for herdr panes (`herdr-plugins.git/v1`).
 ## Install
 
 ```bash
-herdr plugin install rebuildup/herdr-plugins/plugins/git
+herdr plugin install rebuildup/hoxay-plugins/plugins/git
 ```
 
 Prerequisites: herdr ≥ 0.9.0, Bun on `PATH`, `git` on `PATH`.

@@ -1,5 +1,5 @@
 {
-  "name": "@herdr-plugins/git",
+  "name": "@hoxay-plugins/git",
   "version": "0.6.0",
   "private": true,
   "type": "module"

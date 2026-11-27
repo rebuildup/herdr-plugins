@@ -258,7 +258,7 @@ export const UPSTREAM_GAPS = [
     id: "saved-machine-mcp-targeting",
     summary:
       "herdr --machine SSH bridge exists for CLI use; exposing remote sessions through MCP is deferred post-v1",
-    tracking: "herdr-plugins#135 ADR-0025",
+    tracking: "hoxay-plugins#135 ADR-0025",
     v1: "excluded",
   },
 ] as const;

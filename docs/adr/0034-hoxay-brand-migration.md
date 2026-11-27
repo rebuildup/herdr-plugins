@@ -111,6 +111,12 @@ Verified against GitHub's rename documentation:
   every consumer without changing any behavior. A future contract
   revision MAY introduce `hoxay-plugins.*` names only with a
   dual-accept transition — out of scope for the initial migration.
+- Other persisted wire namespaces are likewise preserved: git ref
+  prefix `refs/herdr-plugins/checkpoints/` (checkpoints plugin),
+  systemd `Description=` labels are cosmetic and may adopt the new
+  product name, and unpublished workspace package scope
+  `@herdr-plugins/*` is renamed to `@hoxay-plugins/*` (private,
+  workspace-only, no external consumers).
 
 ### 5. Explicit non-goals
 

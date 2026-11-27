@@ -1,7 +1,7 @@
 # Contract: `herdr-plugins.tui/v1`
 
 Versioned interface for the **interactive terminal surface** of
-`herdr-plugins` plugins (program #228, foundation #229). This is not a
+`hoxay-plugins` plugins (program #228, foundation #229). This is not a
 per-plugin data contract like `herdr-plugins.<name>/vN`; it is the shared
 contract that every plugin TUI entrypoint, the optional shared launcher,
 and consumers (herdr TUI users, agents driving `plugin.pane.open`)

@@ -6,7 +6,7 @@ Provider transcript indexer for herdr panes
 ## Install
 
 ```bash
-herdr plugin install rebuildup/herdr-plugins/plugins/conversations
+herdr plugin install rebuildup/hoxay-plugins/plugins/conversations
 ```
 
 Prerequisites: herdr ≥ 0.9.0, Bun on `PATH`. `index`/`refresh`
