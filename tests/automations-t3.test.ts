@@ -666,7 +666,7 @@ function adapterDeps(run: CommandRunner, platform: string, home: string) {
   return {
     run,
     homeDir: home,
-    stateDir: path.join(home, ".local", "state", "herdr-plugins", "automations"),
+    stateDir: path.join(home, ".local", "state", "hoxay-plugins", "automations"),
     platform,
   };
 }

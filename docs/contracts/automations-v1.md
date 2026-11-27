@@ -25,7 +25,7 @@ no-daemon model (ADR-0002/0005, ADR-0022).
 
 ## Invocation and discovery
 
-Installed via `herdr plugin install rebuildup/herdr-plugins/plugins/automations`
+Installed via `herdr plugin install rebuildup/hoxay-plugins/plugins/automations`
 (pre-release: `--ref release-0-7-0` or a commit SHA; dev: `herdr plugin
 link <repo>/plugins/automations`). Run `<plugin_root>/src/cli.ts` with
 `bun run`; `capability` returns the discovery document

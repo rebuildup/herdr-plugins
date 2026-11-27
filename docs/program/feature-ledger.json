@@ -6,7 +6,7 @@
       "repo": "https://github.com/pingdotgg/t3code",
       "note": "上流参照はすべてこの revision の docs/user/*, docs/internals/*, docs/orchestration-v2/*, apps/, packages/ に対するパス。Issue #22 の棚卸し基準。"
     },
-    "herdr-plugins": {
+    "hoxay-plugins": {
       "revision": "414e87dea9faa5c221fb27508e5828f086849836",
       "branch": "release-0-2-0",
       "note": "台帳作成時点の release-0-2-0 HEAD。Issue #40 (docs/program) ブランチで作成。"

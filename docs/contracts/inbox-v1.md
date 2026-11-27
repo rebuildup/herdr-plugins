@@ -9,8 +9,8 @@ on the plugin's internal state file format.
 The plugin is installed through the official herdr plugin mechanism:
 
 ```bash
-herdr plugin install rebuildup/herdr-plugins/plugins/inbox
-# pre-release / pinned: herdr plugin install rebuildup/herdr-plugins/plugins/inbox --ref <branch|tag|sha>
+herdr plugin install rebuildup/hoxay-plugins/plugins/inbox
+# pre-release / pinned: herdr plugin install rebuildup/hoxay-plugins/plugins/inbox --ref <branch|tag|sha>
 # development: herdr plugin link <repo>/plugins/inbox
 ```
 

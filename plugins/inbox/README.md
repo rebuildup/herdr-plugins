@@ -4,7 +4,7 @@ Work inbox for herdr agent panes — the standalone-plugin port of T3 Code's
 settle / snooze / pin / archive / manual-ordering / restore organize model.
 
 - Plugin ID: `rebuildup.inbox`
-- Install: `herdr plugin install rebuildup/herdr-plugins/plugins/inbox`
+- Install: `herdr plugin install rebuildup/hoxay-plugins/plugins/inbox`
   (pre-release: append `--ref release-0-9-0` or a commit SHA)
 - Runtime prerequisite: [Bun](https://bun.sh) on `PATH` (plugin commands run
   `bun run src/cli.ts`; see ADR-0003 for the no-daemon/Bun decision).

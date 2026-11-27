@@ -41,7 +41,7 @@ For a resolved non-bare repo with at least one commit:
 5. Gitlink paths are collected from the scratch index (`ls-files -s -z`,
    mode `160000`) for the record-and-warn `submodules` field.
 6. `git commit-tree <tree> -p <head> -m "herdr checkpoint <id>"` with
-   fixed identity `herdr checkpoints <checkpoints@herdr-plugins.invalid>`
+   fixed identity `herdr checkpoints <checkpoints@hoxay-plugins.invalid>`
    (upstream uses the same approach — the host's `user.*` config may be
    absent and must not be required).
 7. `git update-ref refs/herdr-plugins/checkpoints/<repo-key>/<id>

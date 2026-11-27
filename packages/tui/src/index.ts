@@ -1,5 +1,5 @@
 /**
- * `@herdr-plugins/tui` — shared terminal UI core for herdr plugins.
+ * `@hoxay-plugins/tui` — shared terminal UI core for herdr plugins.
  *
  * Public surface (contract `docs/contracts/tui-v1.md`, ADR-0031/0032/0033):
  *

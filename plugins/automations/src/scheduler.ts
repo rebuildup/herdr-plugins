@@ -215,14 +215,14 @@ function systemdAdapter(deps: SchedulerDeps): SchedulerAdapter {
     const exec = [cmd.bun, ...tickArgv(cmd)].map(shellQuote).join(" ");
     return {
       service: `[Unit]
-Description=herdr-plugins automations tick (rebuildup.automations)
+Description=hoxay-plugins automations tick (rebuildup.automations)
 
 [Service]
 Type=oneshot
 ExecStart=${exec}
 `,
       timer: `[Unit]
-Description=herdr-plugins automations tick timer
+Description=hoxay-plugins automations tick timer
 
 [Timer]
 OnBootSec=1min

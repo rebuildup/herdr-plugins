@@ -5,7 +5,7 @@ Project registry for herdr panes (`herdr-plugins.projects/v1`).
 ## Install
 
 ```bash
-herdr plugin install rebuildup/herdr-plugins/plugins/projects
+herdr plugin install rebuildup/hoxay-plugins/plugins/projects
 ```
 
 Prerequisites: herdr ≥ 0.9.0, Bun on `PATH`, `git` on `PATH`.
