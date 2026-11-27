@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { inboxPluginRootFixture } from "./helpers/inbox-bin";
 import { installStub } from "./helpers/stub-bin";
 import { herdrSocketEndpoint, joinPathEnv, testEnv } from "./helpers/test-env";
 
@@ -211,6 +212,7 @@ describe("git issue CLI (fake herdr + fake gh)", () => {
   // through installStub so Windows gets a compiled gh.exe (issue #266).
   let workdir = "";
   let xdgConfig = "";
+  let pluginConfigDir = "";
   let xdgState = "";
   let binDir = "";
   let repoDir = "";
@@ -225,6 +227,10 @@ describe("git issue CLI (fake herdr + fake gh)", () => {
   const baseEnv = () => ({
     XDG_CONFIG_HOME: xdgConfig,
     XDG_STATE_HOME: xdgState,
+    // testEnv pins HERDR_PLUGIN_CONFIG_DIR to a shared isolate dir, so the
+    // git plugin's loadConfig would never see the xdgConfig path; pin it
+    // explicitly to the per-suite dir that carries config.json (#291).
+    HERDR_PLUGIN_CONFIG_DIR: pluginConfigDir,
     HOME: workdir,
     PATH: joinPathEnv(binDir),
     GH_STUB_ISSUE_LIST: issueListFile,
@@ -252,6 +258,17 @@ describe("git issue CLI (fake herdr + fake gh)", () => {
 
     sockPath = path.join(xdgConfig, "herdr", "sessions", "aaa", "herdr.sock");
     inboxStateFile = path.join(xdgState, "herdr", "plugins", "rebuildup.inbox", "state.json");
+
+    // `issue link|unlink|links` delegates to the inbox plugin root. The
+    // committed plugins/inbox/bin/inbox prebuilt is macOS arm64 only, so
+    // on Linux CI the repo sibling resolves but cannot exec (#291) —
+    // point config `inboxPluginRoot` at the platform-runnable fixture.
+    pluginConfigDir = path.join(workdir, "plugin-config");
+    mkdirSync(pluginConfigDir, { recursive: true });
+    writeFileSync(
+      path.join(pluginConfigDir, "config.json"),
+      `${JSON.stringify({ inboxPluginRoot: inboxPluginRootFixture() }, null, 2)}\n`,
+    );
 
     issueListFile = path.join(ghDir, "issue-list.json");
     issueViewFile = path.join(ghDir, "issue-view.json");

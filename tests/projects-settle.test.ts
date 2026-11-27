@@ -5,7 +5,7 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { loadRuns, updateRuns } from "../plugins/projects/src/runs";
-import { inboxBinary } from "./helpers/inbox-bin";
+import { inboxBinary, inboxPluginRootFixture } from "./helpers/inbox-bin";
 import { herdrSocketEndpoint, normalizePath, testEnv } from "./helpers/test-env";
 
 /**
@@ -348,6 +348,15 @@ async function fakeHerdr(opts: {
 
   const inboxStateDir = path.join(xdgState, "herdr", "plugins", "rebuildup.inbox");
   const inboxConfigDir = path.join(xdgConfig, "herdr", "plugins", "config", "rebuildup.inbox");
+
+  // Point the settle drain at the platform-runnable inbox fixture: the
+  // committed plugins/inbox/bin/inbox prebuilt is macOS arm64 only, so
+  // on Linux CI the repo sibling root resolves but cannot exec (#291).
+  mkdirSync(projConfigDir, { recursive: true });
+  writeFileSync(
+    path.join(projConfigDir, "config.json"),
+    `${JSON.stringify({ inboxRoot: inboxPluginRootFixture() }, null, 2)}\n`,
+  );
 
   return {
     socketPath,
