@@ -32,9 +32,9 @@ export const CHECKPOINT_REFS_PREFIX = "refs/herdr-plugins/checkpoints";
 /** Fixed author/committer identity for synthetic checkpoint commits. */
 const COMMIT_IDENTITY = {
   GIT_AUTHOR_NAME: "herdr checkpoints",
-  GIT_AUTHOR_EMAIL: "checkpoints@herdr-plugins.invalid",
+  GIT_AUTHOR_EMAIL: "checkpoints@hoxay-plugins.invalid",
   GIT_COMMITTER_NAME: "herdr checkpoints",
-  GIT_COMMITTER_EMAIL: "checkpoints@herdr-plugins.invalid",
+  GIT_COMMITTER_EMAIL: "checkpoints@hoxay-plugins.invalid",
 } as const;
 
 /**
