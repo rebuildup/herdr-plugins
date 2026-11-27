@@ -558,14 +558,20 @@ describe("formatGenerateResult / resultClipboardText", () => {
 });
 
 describe("copyToClipboard", () => {
-  test("win32 clip.exe absent on POSIX reports honest failure", async () => {
-    // Deterministic: clip.exe does not exist on macOS/Linux CI.
-    const res = await copyToClipboard("hello", {
-      platform: "win32",
-      timeoutMs: 2_000,
-    });
-    expect(res.ok).toBe(false);
-  });
+  // clip.exe genuinely exists on Windows (System32) — forcing platform
+  // "win32" there would succeed AND write "hello" to the real clipboard.
+  // The honest-failure path is only deterministic where clip.exe is
+  // absent (issue #266).
+  test.skipIf(process.platform === "win32")(
+    "win32 clip.exe absent on POSIX reports honest failure",
+    async () => {
+      const res = await copyToClipboard("hello", {
+        platform: "win32",
+        timeoutMs: 2_000,
+      });
+      expect(res.ok).toBe(false);
+    },
+  );
 });
 
 // --- TaskListView -------------------------------------------------------------------------

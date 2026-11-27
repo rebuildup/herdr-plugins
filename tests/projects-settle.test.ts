@@ -231,7 +231,7 @@ async function fakeHerdr(opts: {
             }
             pane.input = String(message.params?.text ?? "");
             inputs.push(pane.input);
-            const token = /__HERDR_DONE_(\S+?)__=\$\?/.exec(pane.input)?.[1];
+            const token = /__HERDR_DONE_(\S+?)__/.exec(pane.input)?.[1];
             if (token !== undefined) {
               pane.output = `${pane.input}\nfake script output\n__HERDR_DONE_${token}__=0\n`;
             }

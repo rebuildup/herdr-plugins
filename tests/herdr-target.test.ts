@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import net from "node:net";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   ambientIdentity,
@@ -412,7 +413,7 @@ async function runPluginCli(
   };
 }
 
-describe.skipIf(IS_WINDOWS)("CLI target isolation (fake herdr sessions)", () => {
+describe("CLI target isolation (fake herdr sessions)", () => {
   // macOS caps AF_UNIX paths at 104 chars; $TMPDIR is already too deep, so
   // anchor under /tmp directly.
   // NB: bun:test evaluates this callback even when skipIf skips the suite,
@@ -445,7 +446,9 @@ describe.skipIf(IS_WINDOWS)("CLI target isolation (fake herdr sessions)", () => 
   }
 
   beforeAll(async () => {
-    workdir = mkdtempSync(path.join("/tmp", "ht-target-"));
+    // macOS caps AF_UNIX paths at 104 chars so POSIX anchors under /tmp;
+    // Windows uses a named-pipe endpoint with no such limit (issue #266).
+    workdir = mkdtempSync(path.join(IS_WINDOWS ? tmpdir() : "/tmp", "ht-target-"));
     xdgConfig = path.join(workdir, "xdg-config");
     xdgState = path.join(workdir, "xdg-state");
     sockAPath = path.join(xdgConfig, "herdr", "sessions", "aaa", "herdr.sock");

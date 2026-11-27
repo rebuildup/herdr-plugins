@@ -43,6 +43,10 @@ function git(cwd: string, args: string[]): string {
 function initRepo(): string {
   const dir = realpathSync(tempDir());
   git(dir, ["init", "-b", "main"]);
+  // Pin LF checkout semantics: a developer/CI gitconfig with
+  // core.autocrlf=true (the Windows default) would rewrite worktree
+  // bytes to CRLF and break the byte-exact restore assertions (#266).
+  git(dir, ["config", "core.autocrlf", "false"]);
   git(dir, ["config", "user.email", "test@example.com"]);
   git(dir, ["config", "user.name", "Test"]);
   writeFileSync(path.join(dir, "a.txt"), "one\n");
