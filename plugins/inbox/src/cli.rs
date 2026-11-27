@@ -1528,19 +1528,23 @@ fn cmd_watch(options: &mut CliOptions) {
     ));
     must(assert_max_positionals(&options.args, &["--interval"], 0, "watch"));
     let interval_raw = flag_value(&options.args, "--interval");
-    let interval_sec = interval_raw
-        .as_deref()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(60.0);
-    if !interval_sec.is_finite() || interval_sec <= 0.0 {
-        fail(
-            &format!(
-                "invalid --interval: {} (expected a positive number of seconds)",
-                interval_raw.as_deref().unwrap_or("")
-            ),
-            2,
-        );
-    }
+    // Mirrors cli.ts: an explicit but unparseable/non-positive value is a
+    // usage error; only an absent flag defaults to 60s.
+    let interval_sec = match &interval_raw {
+        Some(raw) => match raw.parse::<f64>() {
+            Ok(v) if v.is_finite() && v > 0.0 => v,
+            _ => {
+                fail(
+                    &format!(
+                        "invalid --interval: {} (expected a positive number of seconds)",
+                        raw
+                    ),
+                    2,
+                )
+            }
+        },
+        None => 60.0,
+    };
     let interval_ms = (interval_sec * 1000.0) as u64;
 
     let call = options.call_options();
@@ -2416,6 +2420,32 @@ pub fn cmd_capability(options: &CliOptions) -> Result<Value, RunError> {
             "reconcile", "watch", "watch-pr",
         ],
         "actions": ["open", "settle", "restore", "snooze", "pin", "unpin", "archive", "unarchive"],
+        // Additive per-command metadata (#263 minimal subset,
+        // docs/research/disposition-ledger.md §5). `commands` and
+        // `mutation_commands` stay unchanged for backward compatibility;
+        // consumers read this opportunistically (absent ⇒ conservative
+        // defaults). Daemon-class commands (`watch`, `watch-pr`) omit
+        // `idempotent` — they are excluded from retry semantics.
+        "command_metadata": {
+            "list":        {"kind": "read", "idempotent": true, "coalesce": true, "freshness": "event-driven", "invalidation": "pull"},
+            "links":       {"kind": "read", "idempotent": true, "coalesce": true, "freshness": "event-driven", "invalidation": "pull"},
+            "transitions": {"kind": "read", "idempotent": true, "coalesce": true, "freshness": "snapshot-consistent", "invalidation": "pull"},
+            "capability":  {"kind": "read", "idempotent": true, "coalesce": true},
+            "help":        {"kind": "read", "idempotent": true, "coalesce": true},
+            "settle":      {"kind": "mutation", "idempotent": true},
+            "snooze":      {"kind": "mutation", "idempotent": true},
+            "restore":     {"kind": "mutation", "idempotent": true},
+            "pin":         {"kind": "mutation", "idempotent": true},
+            "unpin":       {"kind": "mutation", "idempotent": true},
+            "archive":     {"kind": "mutation", "idempotent": true},
+            "unarchive":   {"kind": "mutation", "idempotent": true},
+            "order":       {"kind": "mutation", "idempotent": true},
+            "link":        {"kind": "mutation", "idempotent": true},
+            "unlink":      {"kind": "mutation", "idempotent": true},
+            "reconcile":   {"kind": "mutation", "idempotent": true},
+            "watch":       {"kind": "mutation"},
+            "watch-pr":    {"kind": "mutation"},
+        },
         "tui": {"contract": "herdr-plugins.tui/v1", "entrypoint": "main", "action": "open"},
         "events": ["pane.agent_status_changed", "pane.closed"],
         "startup": ["reconcile"],

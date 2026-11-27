@@ -5,6 +5,7 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { loadRuns, updateRuns } from "../plugins/projects/src/runs";
+import { inboxBinary } from "./helpers/inbox-bin";
 import { herdrSocketEndpoint, normalizePath, testEnv } from "./helpers/test-env";
 
 /**
@@ -33,7 +34,12 @@ for (const key of [
 }
 
 function tempDir(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "projects-settle-test-"));
+  // Anchor under /tmp on POSIX: the native inbox binary (#291) uses a
+  // real sockaddr_un (104-char sun_path limit) while Bun tolerates
+  // deeper $TMPDIR paths — fake socket paths must stay connectable.
+  const dir = mkdtempSync(
+    path.join(process.platform === "win32" ? tmpdir() : "/tmp", "projects-settle-test-"),
+  );
   dirs.push(dir);
   return dir;
 }
@@ -47,9 +53,9 @@ afterAll(() => {
 });
 
 const PLUGIN = path.join(__dirname, "..", "plugins", "projects");
-const INBOX_PLUGIN = path.join(__dirname, "..", "plugins", "inbox");
 const CLI = path.join(PLUGIN, "src", "cli.ts");
-const INBOX_CLI = path.join(INBOX_PLUGIN, "src", "cli.ts");
+// rebuildup.inbox is native since #291: spawn bin/inbox directly.
+const INBOX_CLI = inboxBinary();
 
 function git(cwd: string, args: string[]): string {
   const result = spawnSync("git", args, { cwd, encoding: "utf8", env: testEnv() });
@@ -403,7 +409,12 @@ function projectsEnvNoTarget(fx: Fixture): Record<string, string> {
 
 function runProc(file: string, args: string[], env: Record<string, string>): Promise<ProcResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [file, ...args], { env });
+    // TypeScript entrypoints run under `bun run`; the native inbox
+    // binary (#291) is spawned directly.
+    const isTs = file.endsWith(".ts");
+    const child = isTs
+      ? spawn(process.execPath, [file, ...args], { env })
+      : spawn(file, args, { env });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk: Buffer) => {

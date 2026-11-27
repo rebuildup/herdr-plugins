@@ -10,7 +10,7 @@ Reports child max RSS via wait4 rusage (top-level process only).
 
 Usage:
   python3 scripts/perf/tui-probe.py --label inbox-tui --runs 10 \
-    --marker '\\d+ inbox' -- env XDG_STATE_HOME=... bun run plugins/inbox/src/tui.ts
+    --marker '\\d+ inbox' -- env XDG_STATE_HOME=... ./plugins/inbox/bin/inbox tui
 """
 
 import argparse

@@ -45,11 +45,12 @@ function defaultInboxConfigDir(): string {
 
 async function isInboxRoot(dir: string): Promise<boolean> {
   try {
-    const cli = await stat(path.join(dir, "src", "cli.ts"));
-    if (!cli.isFile()) return false;
+    // Native distribution (ADR-0035): the plugin ships bin/inbox.
+    const bin = await stat(path.join(dir, "bin", "inbox"));
+    if (!bin.isFile()) return false;
     const tomlPath = path.join(dir, "herdr-plugin.toml");
     const toml = await stat(tomlPath).catch(() => null);
-    if (toml === null || !toml.isFile()) return true; // cli.ts is enough signal
+    if (toml === null || !toml.isFile()) return true; // bin/inbox is enough signal
     const { readFile } = await import("node:fs/promises");
     const text = await readFile(tomlPath, "utf8");
     return text.includes(`id = "${INBOX_PLUGIN_ID}"`);
@@ -153,7 +154,7 @@ export async function resolveInboxSource(overrideRoot?: string): Promise<Resolve
     ok: true,
     source: {
       plugin_root: root,
-      cli_path: path.join(root, "src", "cli.ts"),
+      cli_path: path.join(root, "bin", "inbox"),
       state_dir: defaultInboxStateDir(),
       config_dir: defaultInboxConfigDir(),
       resolved_via: resolvedVia,
@@ -183,7 +184,9 @@ export function runInboxCli(
   args: string[],
   call: InboxCliCallOptions,
 ): Promise<InboxCliResult> {
-  const cliArgs = [source.cli_path, ...args];
+  // cli_path is the native binary (plugins/inbox/bin/inbox, ADR-0035) —
+  // spawned directly, not through `bun run`.
+  const cliArgs = args;
   // Child env: pin the plugin dirs to the *inbox* plugin so the ambient
   // HERDR_PLUGIN_* values (which belong to rebuildup.projects) cannot
   // redirect its state resolution.
@@ -198,7 +201,7 @@ export function runInboxCli(
   env.HERDR_PLUGIN_ID = INBOX_PLUGIN_ID;
 
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, cliArgs, {
+    const child = spawn(source.cli_path, cliArgs, {
       cwd: source.plugin_root,
       env,
       stdio: ["ignore", "pipe", "pipe"],

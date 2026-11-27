@@ -11,6 +11,8 @@
 use serde::Deserialize;
 use serde_json::Value;
 
+use hoxay_tui::safety::sanitize_display;
+
 use crate::state::AgentSessionRef;
 
 // --- CLI JSON shapes -------------------------------------------------------------
@@ -204,12 +206,15 @@ pub fn item_badges(item: &TuiItem) -> String {
     if !item.links.is_empty() {
         parts.push(format!("links:{}", item.links.len()));
     }
-    parts.join(" ")
+    // Badge text can carry state-derived values (e.g. snooze `until`) —
+    // sanitize before it can reach the renderer (tui-v1 §5 item 8).
+    sanitize_display(&parts.join(" "))
 }
 
 /// Primary list-row text: title (or pane id fallback) + pane id.
+/// Untrusted pane titles are sanitized before display.
 pub fn item_title(item: &TuiItem) -> String {
-    item.title.clone().unwrap_or_else(|| item.pane_id.clone())
+    sanitize_display(&item.title.clone().unwrap_or_else(|| item.pane_id.clone()))
 }
 
 /// Searchable text for `/` filtering — mirrors the CLI's search fields
@@ -328,7 +333,9 @@ pub fn item_detail_lines(item: &TuiItem, generated_at: Option<&str>) -> Vec<Stri
     lines.push(String::new());
     lines.push("Mutations go through the inbox domain — the TUI never".to_string());
     lines.push("writes organize state directly. `?` shows the keymap.".to_string());
-    lines
+    // Detail lines interpolate untrusted pane/session/link fields —
+    // sanitize each rendered line (tui-v1 §5 item 8).
+    lines.into_iter().map(|l| sanitize_display(&l)).collect()
 }
 
 // --- Stale-generation revalidation (contract §3.3) ----------------------------------

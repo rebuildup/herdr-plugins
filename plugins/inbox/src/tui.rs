@@ -38,6 +38,10 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Terminal;
 use serde_json::Value;
 
+// Shared safety helpers (ADR-0036): every untrusted string that can
+// reach the renderer goes through `sanitize_display` first.
+use hoxay_tui::safety::{bound_text, sanitize_display};
+
 use crate::tui_model::{
     self, cli_error_message, item_badges, item_detail_lines, item_title,
     next_scope, order_move_target, parse_link_spec, parse_list_output,
@@ -850,8 +854,8 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
         .constraints([Constraint::Length(2), Constraint::Min(1), Constraint::Length(1)])
         .split(area);
 
-    // Header
-    let sess = app.session_label();
+    // Header — session label and query are untrusted/env-derived.
+    let sess = sanitize_display(&app.session_label());
     let counts = match &app.state {
         ViewState::Ready => {
             let vis = app.filtered().len();
@@ -859,7 +863,8 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
         }
         _ => String::new(),
     };
-    let query_part = if app.query.is_empty() { String::new() } else { format!(" · /{}", app.query) };
+    let query = sanitize_display(&app.query);
+    let query_part = if query.is_empty() { String::new() } else { format!(" · /{}", query) };
     let header = format!(
         " Inbox — {} · scope:{}{} {}",
         sess,
@@ -876,20 +881,20 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
     match &mut app.screen {
         Screen::Main => render_main(app, frame, chunks[1]),
         Screen::Detail { title, lines } => {
-            let text = lines.join("\n");
+            let text = lines.join("\n"); // lines already sanitized in tui_model
             frame.render_widget(
                 Paragraph::new(text)
-                    .block(Block::default().borders(Borders::ALL).title(title.clone()))
+                    .block(Block::default().borders(Borders::ALL).title(sanitize_display(title)))
                     .wrap(Wrap { trim: false }),
                 chunks[1],
             );
         }
         Screen::Prompt { kind: _, draft, placeholder, label } => {
             let mut lines = vec![
-                Line::from(label.clone()).style(Style::default().add_modifier(Modifier::BOLD)),
-                Line::from(format!("> {}█", draft)),
+                Line::from(sanitize_display(label)).style(Style::default().add_modifier(Modifier::BOLD)),
+                Line::from(format!("> {}█", sanitize_display(draft))),
                 Line::from(Span::styled(
-                    format!("(enter submit · esc cancel · placeholder: {})", placeholder),
+                    format!("(enter submit · esc cancel · placeholder: {})", sanitize_display(placeholder)),
                     Style::default().add_modifier(Modifier::DIM),
                 )),
             ];
@@ -897,7 +902,7 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
                 if let PromptKind::Unlink { hints, .. } = kind {
                     if !hints.is_empty() {
                         lines.push(Line::from(Span::styled(
-                            format!("existing links: {}", hints.join(", ")),
+                            format!("existing links: {}", sanitize_display(&hints.join(", "))),
                             Style::default().add_modifier(Modifier::DIM),
                         )));
                     }
@@ -910,14 +915,14 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
         }
         Screen::Confirm { mutation } => {
             let mut text = vec![
-                Line::from(mutation.title.clone()).style(Style::default().add_modifier(Modifier::BOLD)),
+                Line::from(sanitize_display(&mutation.title)).style(Style::default().add_modifier(Modifier::BOLD)),
                 Line::from(""),
             ];
             for l in &mutation.target_lines {
-                text.push(Line::from(l.clone()));
+                text.push(Line::from(sanitize_display(l)));
             }
             text.push(Line::from(""));
-            text.push(Line::from(mutation.consequence.clone()));
+            text.push(Line::from(sanitize_display(&mutation.consequence)));
             text.push(Line::from(Span::styled(
                 "enter/y apply · esc cancel",
                 Style::default().add_modifier(Modifier::DIM),
@@ -947,8 +952,14 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
             );
         }
         Screen::Transitions { lines } => {
+            // Transition fields are state-derived — bound + sanitize each
+            // line (bounded output, tui-v1 §5 item 10).
+            let safe: Vec<String> = lines
+                .iter()
+                .map(|l| bound_text(&sanitize_display(l), 500))
+                .collect();
             frame.render_widget(
-                Paragraph::new(lines.join("\n"))
+                Paragraph::new(safe.join("\n"))
                     .block(Block::default().borders(Borders::ALL).title("Organize-transition log (read-only)"))
                     .wrap(Wrap { trim: false }),
                 chunks[1],
@@ -956,11 +967,12 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
         }
     }
 
-    // Footer
+    // Footer — status embeds pane ids/specs; the filter draft is raw
+    // user input. Both are sanitized before display.
     let hint = if app.filter_mode {
-        format!(" filter: /{}█ — enter apply · esc cancel", app.filter_draft)
+        format!(" filter: /{}█ — enter apply · esc cancel", sanitize_display(&app.filter_draft))
     } else {
-        format!(" {} · ? help · q quit", app.status)
+        format!(" {} · ? help · q quit", sanitize_display(&app.status))
     };
     frame.render_widget(
         Paragraph::new(hint).style(Style::default().add_modifier(Modifier::DIM)),
@@ -1020,7 +1032,17 @@ fn render_main(app: &mut App, frame: &mut ratatui::Frame, area: Rect) {
                 let badges = item_badges(item);
                 let badge_text = if badges.is_empty() { String::new() } else { format!("[{}] ", badges) };
                 let title = item_title(item);
-                let right = item.agent_status.clone().map(|s| format!(" {}", s)).unwrap_or_default();
+                let status_text = item
+                    .agent_status
+                    .clone()
+                    .map(|s| sanitize_display(&s))
+                    .unwrap_or_default();
+                let right = if status_text.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", status_text)
+                };
+                let pane_label = sanitize_display(&item.pane_id);
                 let prefix = if is_sel { "❯ " } else { "  " };
                 let sel_style = if is_sel { Style::default().add_modifier(Modifier::BOLD) } else { Style::default() };
                 let used = prefix.chars().count()
@@ -1038,12 +1060,12 @@ fn render_main(app: &mut App, frame: &mut ratatui::Frame, area: Rect) {
                     let pad = w.saturating_sub(used);
                     spans.push(Span::raw(" ".repeat(pad)));
                     spans.push(Span::styled(
-                        format!("{}{}", item.pane_id, right),
+                        format!("{}{}", pane_label, right),
                         Style::default().add_modifier(Modifier::DIM),
                     ));
                 } else {
                     spans.push(Span::styled(
-                        format!(" {}", item.pane_id),
+                        format!(" {}", pane_label),
                         Style::default().add_modifier(Modifier::DIM),
                     ));
                 }
@@ -1065,11 +1087,13 @@ fn render_main(app: &mut App, frame: &mut ratatui::Frame, area: Rect) {
 /// Honest plain-text rendering when there is no TTY (pipes, CI).
 pub fn plain_list(payload: &ListPayload) -> Vec<String> {
     let counts = payload.counts.clone().unwrap_or_default();
-    let session_label = payload
-        .session
-        .as_ref()
-        .and_then(|s| s.name.clone().or_else(|| s.socket.clone()))
-        .unwrap_or_else(|| "?".to_string());
+    let session_label = sanitize_display(
+        &payload
+            .session
+            .as_ref()
+            .and_then(|s| s.name.clone().or_else(|| s.socket.clone()))
+            .unwrap_or_else(|| "?".to_string()),
+    );
     let mut lines: Vec<String> = Vec::new();
     lines.push(format!(
         "inbox — session={} total={} inbox={} attention={} organized={} pinned={} archived={}",
@@ -1078,19 +1102,23 @@ pub fn plain_list(payload: &ListPayload) -> Vec<String> {
     ));
     for item in payload.items.iter().flatten() {
         let badges = item_badges(item);
-        let status = item.agent_status.as_ref().map(|s| format!(" [{}]", s)).unwrap_or_default();
+        let status = item
+            .agent_status
+            .as_ref()
+            .map(|s| sanitize_display(&format!(" [{}]", s)))
+            .unwrap_or_default();
         let hidden = if item.in_inbox { String::new() } else { " (hidden)".to_string() };
-        let title = item.title.clone().unwrap_or_default();
+        let title = sanitize_display(item.title.as_deref().unwrap_or(""));
         let badge_part = if badges.is_empty() { String::new() } else { format!(" <{}>", badges) };
         let links_part = if item.links.is_empty() {
             String::new()
         } else {
-            let refs: Vec<&str> = item.links.iter().map(|l| l.ref_.as_str()).collect();
+            let refs: Vec<String> = item.links.iter().map(|l| sanitize_display(&l.ref_)).collect();
             format!(" links={}", refs.join(","))
         };
         lines.push(format!(
             "  {}{}{} {}{}{}",
-            item.pane_id, status, hidden, title, badge_part, links_part
+            sanitize_display(&item.pane_id), status, hidden, title, badge_part, links_part
         ));
     }
     lines.push("interactive UI requires a TTY; use the CLI for scripting.".to_string());

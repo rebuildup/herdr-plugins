@@ -234,7 +234,13 @@ describe("git issue CLI (fake herdr + fake gh)", () => {
   const sessionArg = ["--session", "aaa"];
 
   beforeAll(async () => {
-    workdir = mkdtempSync(path.join(tmpdir(), "git-issue-"));
+    // Anchor under /tmp on POSIX: the native inbox binary uses a real
+    // sockaddr_un (104-char sun_path limit) while Bun tolerates deeper
+    // $TMPDIR paths — the delegated link/unlink/links calls would fail
+    // with SUN_LEN errors (same constraint as herdr-target.test.ts).
+    workdir = mkdtempSync(
+      path.join(process.platform === "win32" ? tmpdir() : "/tmp", "git-issue-"),
+    );
     xdgConfig = path.join(workdir, "xdg-config");
     xdgState = path.join(workdir, "xdg-state");
     binDir = path.join(workdir, "bin");

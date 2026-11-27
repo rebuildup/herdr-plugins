@@ -11,8 +11,9 @@
  * the inbox plugin's public CLI — the ADR-0013 sibling-plugin pattern
  * already used by usage→conversations and textgen→git/usage: resolve the
  * plugin root (explicit override → sibling `../inbox` →
- * `herdr plugin list --json`), invoke `<root>/src/cli.ts`, and never
- * touch the inbox plugin's state file directly.
+ * `herdr plugin list --json`), invoke `<root>/bin/inbox` (the native
+ * binary shipped per ADR-0035), and never touch the inbox plugin's
+ * state file directly.
  */
 
 import { spawn } from "node:child_process";
@@ -45,8 +46,9 @@ async function isPluginRoot(dir: string, pluginId: string): Promise<boolean> {
     const tomlPath = path.join(dir, "herdr-plugin.toml");
     const toml = await stat(tomlPath);
     if (!toml.isFile()) return false;
-    const cli = await stat(path.join(dir, "src", "cli.ts"));
-    if (!cli.isFile()) return false;
+    // Native distribution (ADR-0035): the plugin ships bin/inbox.
+    const bin = await stat(path.join(dir, "bin", "inbox"));
+    if (!bin.isFile()) return false;
     const text = await readFile(tomlPath, "utf8");
     return text.includes(`id = "${pluginId}"`);
   } catch {
@@ -140,7 +142,8 @@ export interface InboxCliRunResult {
 }
 
 /**
- * Run one inbox CLI command (`bun <root>/src/cli.ts …`). The child env is
+ * Run one inbox CLI command (`<root>/bin/inbox …` — the native binary;
+ * ADR-0035). The child env is
  * scrubbed of this plugin's HERDR_PLUGIN_* values (they belong to
  * rebuildup.git and must never redirect the child's state resolution)
  * and pinned to the inbox plugin's own dirs — the same env-pin rule as
@@ -154,7 +157,8 @@ export function runInboxCli(
   args: string[],
   call: InboxCliCallOptions,
 ): Promise<InboxCliRunResult> {
-  const cliArgs = [path.join(root, "src", "cli.ts"), ...args];
+  const binPath = path.join(root, "bin", "inbox");
+  const cliArgs = [...args];
   if (call.session !== undefined) cliArgs.push("--session", call.session);
   if (call.socketPath !== undefined) cliArgs.push("--socket", call.socketPath);
   if (call.timeoutMs !== undefined) cliArgs.push("--timeout", String(call.timeoutMs));
@@ -187,7 +191,7 @@ export function runInboxCli(
   env.HERDR_PLUGIN_ID = INBOX_PLUGIN_ID;
 
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, cliArgs, {
+    const child = spawn(binPath, cliArgs, {
       cwd: root,
       env,
       stdio: ["ignore", "pipe", "pipe"],

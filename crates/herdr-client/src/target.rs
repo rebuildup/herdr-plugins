@@ -321,8 +321,19 @@ pub fn resolve_target(
     })
 }
 
+/// Treat an explicit option value like `env_nonempty` treats env vars:
+/// trim and drop empties. (NOT `env_nonempty` itself — that reads a
+/// variable *named* by its argument, which would silently discard every
+/// explicit `--socket`/`--session` value.)
 fn env_nonempty_opt(value: Option<&str>) -> Option<String> {
-    value.and_then(env_nonempty)
+    value.and_then(|v| {
+        let t = v.trim();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        }
+    })
 }
 
 /// Resolve which herdr socket to talk to. Kept for callers that only

@@ -1,20 +1,31 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import path from "node:path";
+import { inboxBinary } from "./helpers/inbox-bin";
 import { installStub } from "./helpers/stub-bin";
 import { envValue, herdrSocketEndpoint, testEnv } from "./helpers/test-env";
 
 /**
- * Contract tests for rebuildup.inbox v0.2.0 (pin / archive / manual order)
- * against a fake herdr socket. The fake records every JSON-RPC method it
- * receives so tests can prove organize commands never touch execution
- * surfaces (no pane.close / agent.* / pty methods — only session.snapshot
- * reads and pane.report_metadata projections).
+ * Contract tests for the NATIVE rebuildup.inbox implementation (Rust,
+ * Issue #291). These spawn the shipped binary — `plugins/inbox/bin/inbox`
+ * (committed prebuilt, ADR-0035) with a cargo-built fallback — against the
+ * same fake herdr socket protocol the TS suite used, so wire behavior is
+ * verified end-to-end without Bun or a live session.
+ *
+ * Coverage mirrors the retired TS-internal tests at contract level:
+ * usage errors, the fake-socket command flows (organize verbs, filters,
+ * tracker links, stale-generation guards, gh env sanitization), the
+ * capability document incl. additive `command_metadata` (#263), and the
+ * non-TTY `tui` fallback. Pure-function unit coverage lives in the Rust
+ * crates (`cargo test`); TS↔Rust output parity is evidenced by the diff
+ * harness documented in docs/research/inbox-native-rust.md.
  */
 
-const CLI = path.join(import.meta.dir, "../plugins/inbox/src/cli.ts");
+const INBOX_BIN = inboxBinary();
+
+// --- fake herdr socket (same NDJSON RPC protocol as the TS suite) -----------
 
 interface FakeAgent {
   pane_id: string;
@@ -102,6 +113,7 @@ async function fakeHerdr(): Promise<FakeHerdr> {
 interface CliResult {
   status: number;
   json: Record<string, unknown> | null;
+  stdout: string;
   stderr: string;
 }
 
@@ -112,8 +124,10 @@ function cliEnv(stateDir: string, configDir: string): Record<string, string> {
   });
 }
 
+// Async spawn is REQUIRED: the fake herdr server lives in this same
+// Bun process, so a blocking spawnSync would deadlock every request.
 async function runCli(args: string[], env: Record<string, string>): Promise<CliResult> {
-  const proc = Bun.spawn(["bun", "run", CLI, ...args], {
+  const proc = Bun.spawn([INBOX_BIN, ...args], {
     env,
     stdout: "pipe",
     stderr: "pipe",
@@ -129,7 +143,7 @@ async function runCli(args: string[], env: Record<string, string>): Promise<CliR
   } catch {
     json = null;
   }
-  return { status, json, stderr };
+  return { status, json, stdout, stderr };
 }
 
 function itemByPane(json: Record<string, unknown>, paneId: string) {
@@ -137,7 +151,117 @@ function itemByPane(json: Record<string, unknown>, paneId: string) {
   return items.find((item) => item.pane_id === paneId);
 }
 
-describe("inbox contract v1 (pin/archive/order)", () => {
+// --- usage errors (no socket needed: validation precedes any connect) -------
+
+describe("inbox native CLI usage errors", () => {
+  const env = testEnv();
+
+  async function expectUsage(args: string[]): Promise<void> {
+    const { status, stderr } = await runCli(args, env);
+    expect(status).toBe(2);
+    const doc = JSON.parse(stderr) as { ok?: boolean; error?: { code?: string } };
+    expect(doc.ok).toBe(false);
+    expect(doc.error?.code).toBe("usage");
+  }
+
+  test("every command rejects unknown options with exit 2", async () => {
+    const cases: string[][] = [
+      ["list", "--bogus"],
+      ["settle", "p1", "--bogus"],
+      ["snooze", "p1", "--until", "+1h", "--bogus"],
+      ["restore", "p1", "--bogus"],
+      ["reconcile", "--bogus"],
+      ["watch", "--bogus"],
+      ["capability", "--bogus"],
+      ["_wake", "--until", "2026-01-01T00:00:00Z", "--bogus"],
+    ];
+    for (const args of cases) await expectUsage(args);
+  });
+
+  test("value flags require values and invalid values are usage errors", async () => {
+    await expectUsage(["snooze", "p1", "--until"]);
+    await expectUsage(["watch", "--interval"]);
+    await expectUsage(["watch", "--interval", "abc"]);
+    await expectUsage(["watch", "--interval", "-1"]);
+    await expectUsage(["list", "--timeout", "abc"]);
+  });
+
+  test("extra positionals and wrong-flag usage are exit 2", async () => {
+    await expectUsage(["list", "extra"]);
+    await expectUsage(["settle", "p1", "extra"]);
+    await expectUsage(["restore", "p1", "extra"]);
+    await expectUsage(["reconcile", "extra"]);
+    await expectUsage(["capability", "extra"]);
+    await expectUsage(["settle", "p1", "--until", "+1h"]); // --until is snooze-only
+    await expectUsage(["watch", "--until", "+1h"]);
+  });
+
+  test("order requires exactly one placement flag", async () => {
+    await expectUsage(["order", "w1:p1"]);
+    await expectUsage(["order", "w1:p1", "--first", "--last"]);
+  });
+
+  test("link requires exactly one tracker kind and a valid ref", async () => {
+    await expectUsage(["link", "w1:p1"]);
+    await expectUsage(["link", "w1:p1", "--pr", "not-a-ref"]);
+    await expectUsage(["link", "w1:p1", "--pr", "owner/repo#1", "--issue", "o/r#2"]);
+  });
+
+  test("unknown command exits 2 with usage document", async () => {
+    const { status, stderr } = await runCli(["bogus"], env);
+    expect(status).toBe(2);
+    const doc = JSON.parse(stderr) as { ok?: boolean; error?: { code?: string } };
+    expect(doc.ok).toBe(false);
+    expect(doc.error?.code).toBe("usage");
+  });
+});
+
+// --- capability document -------------------------------------------------------
+
+describe("inbox native capability document", () => {
+  test("advertises commands, mutation_commands, and command_metadata", async () => {
+    const { status, json } = await runCli(["capability"], testEnv());
+    expect(status).toBe(0);
+    expect(json?.contract).toBe("herdr-plugins.inbox/v1");
+    expect(json?.plugin).toBe("rebuildup.inbox");
+    expect(json?.version).toBe("0.8.0");
+
+    const commands = json?.commands as string[];
+    const mutations = json?.mutation_commands as string[];
+    expect(commands).toContain("list");
+    expect(commands).toContain("transitions");
+    expect(commands).toContain("watch-pr");
+    expect(mutations).toContain("settle");
+    expect(mutations).toContain("reconcile");
+    expect(mutations).toContain("watch-pr");
+    expect(mutations).not.toContain("list");
+
+    // Additive #263 metadata: every advertised command is described;
+    // commands/mutation_commands stay the backward-compatible split.
+    const meta = json?.command_metadata as Record<
+      string,
+      { kind?: string; idempotent?: boolean; coalesce?: boolean }
+    >;
+    expect(meta).toBeDefined();
+    for (const cmd of [...commands, "help"]) {
+      expect(meta[cmd]?.kind).toBe(mutations.includes(cmd) ? "mutation" : "read");
+    }
+    expect(meta.list?.coalesce).toBe(true);
+    expect(meta.transitions?.coalesce).toBe(true);
+    expect(meta.settle?.idempotent).toBe(true);
+    // Daemon-class commands are excluded from retry semantics.
+    expect(meta.watch?.idempotent).toBeUndefined();
+    expect(meta["watch-pr"]?.idempotent).toBeUndefined();
+    // Mutations are never coalesced.
+    for (const cmd of mutations) {
+      expect(meta[cmd]?.coalesce).toBeUndefined();
+    }
+  });
+});
+
+// --- fake-socket command contract ----------------------------------------------
+
+describe("inbox native contract v1 (pin/archive/order)", () => {
   let herdr: FakeHerdr;
   let stateDir: string;
   let configDir: string;
@@ -159,13 +283,11 @@ describe("inbox contract v1 (pin/archive/order)", () => {
   const cli = (args: string[]) => runCli([...args, "--socket", herdr.socketPath], env);
 
   test("pin/unpin/archive/unarchive/order/restore flow", async () => {
-    // Baseline list.
     const list0 = await cli(["list"]);
     expect(list0.status).toBe(0);
     expect(list0.json?.contract).toBe("herdr-plugins.inbox/v1");
     expect(((list0.json?.counts ?? {}) as Record<string, number>).inbox).toBe(3);
 
-    // Pin p2: stays in inbox, sorts first, counts.pinned = 1.
     const pin = await cli(["pin", "w1:p2"]);
     expect(pin.status).toBe(0);
     expect(pin.json?.command).toBe("pin");
@@ -177,7 +299,6 @@ describe("inbox contract v1 (pin/archive/order)", () => {
     expect(items1[0]?.pinned).toBe(true);
     expect(((list1.json?.counts ?? {}) as Record<string, number>).pinned).toBe(1);
 
-    // Archive p3: hidden from default view, organize.kind = archived.
     const archive = await cli(["archive", "w1:p3"]);
     expect(archive.status).toBe(0);
     expect(archive.json?.organize).toMatchObject({ kind: "archived" });
@@ -189,15 +310,12 @@ describe("inbox contract v1 (pin/archive/order)", () => {
     expect(((list2.json?.counts ?? {}) as Record<string, number>).inbox).toBe(2);
     expect(((list2.json?.counts ?? {}) as Record<string, number>).archived).toBe(1);
 
-    // Unarchive returns it.
     const unarchive = await cli(["unarchive", "w1:p3"]);
     expect(unarchive.status).toBe(0);
     expect(unarchive.json?.organize).toBeNull();
     const list3 = await cli(["list"]);
     expect(itemByPane(list3.json as Record<string, unknown>, "w1:p3")?.in_inbox).toBe(true);
 
-    // Order: move p1 before p2 within its group. p1 is unpinned/non-attention;
-    // p2 is pinned so it is NOT a valid sibling — use p3 (same group as p1).
     const order = await cli(["order", "w1:p1", "--before", "w1:p3"]);
     expect(order.status).toBe(0);
     expect(order.json?.order).toBe(0);
@@ -206,17 +324,14 @@ describe("inbox contract v1 (pin/archive/order)", () => {
     const visible = ((list4.json?.items ?? []) as Array<Record<string, unknown>>).filter(
       (i) => i.in_inbox,
     );
-    // p2 pinned first; p1 ordered before p3.
     expect(visible.map((i) => i.pane_id)).toEqual(["w1:p2", "w1:p1", "w1:p3"]);
 
-    // Order rejects a hidden pane and a cross-group reference.
     await cli(["settle", "w1:p3"]);
     const hiddenOrder = await cli(["order", "w1:p3", "--first"]);
     expect(hiddenOrder.status).not.toBe(0);
     const crossGroup = await cli(["order", "w1:p1", "--before", "w1:p2"]);
     expect(crossGroup.status).not.toBe(0);
 
-    // Restore clears everything including pin/order.
     await cli(["restore", "w1:p2"]);
     await cli(["restore", "w1:p1"]);
     const list5 = await cli(["list"]);
@@ -224,9 +339,6 @@ describe("inbox contract v1 (pin/archive/order)", () => {
   });
 
   test("attention is never hidden by pin/archive/settle/snooze", async () => {
-    // Keep state_change_seq constant so organize marks survive resolution —
-    // this exercises the defense-in-depth path where attention must force
-    // visibility even while a hide-kind mark is still live.
     herdr.setAgents([
       { pane_id: "w1:p1", agent_status: "done", state_change_seq: 5 },
       { pane_id: "w1:p2", agent_status: "working", state_change_seq: 5 },
@@ -245,7 +357,6 @@ describe("inbox contract v1 (pin/archive/order)", () => {
     expect(p1?.in_inbox).toBe(true);
     expect(p1?.organize).toMatchObject({ kind: "archived" });
 
-    // Same for pin + settle on p2.
     await cli(["pin", "w1:p2"]);
     await cli(["settle", "w1:p2"]);
     herdr.setAgents([
@@ -272,13 +383,11 @@ describe("inbox contract v1 (pin/archive/order)", () => {
     await cli(["reconcile"]);
 
     const unique = [...new Set(herdr.methods)];
-    // Read + metadata projection only. Anything else (pane.close,
-    // agent.*, pane.send_input, ...) would be an execution-state violation.
     expect(unique.sort()).toEqual(["pane.report_metadata", "session.snapshot"]);
   });
 });
 
-describe("inbox contract v1 (filters and tracker links)", () => {
+describe("inbox native contract v1 (filters and tracker links)", () => {
   let herdr: FakeHerdr;
   let stateDir: string;
   let configDir: string;
@@ -324,7 +433,6 @@ describe("inbox contract v1 (filters and tracker links)", () => {
     expect(paneIds(all.json).sort()).toEqual(["w1:p1", "w1:p2", "w2:p9"]);
     expect(((all.json?.filters ?? {}) as Record<string, unknown>).attention).toBe(false);
 
-    // Organize p2, then filter by kind.
     await cli(["settle", "w1:p2"]);
     const settled = await cli(["list", "--organize", "settled"]);
     expect(paneIds(settled.json)).toEqual(["w1:p2"]);
@@ -333,7 +441,6 @@ describe("inbox contract v1 (filters and tracker links)", () => {
     const none = await cli(["list", "--organize", "none"]);
     expect(paneIds(none.json).sort()).toEqual(["w1:p1", "w2:p9"]);
 
-    // Attention: flip p1 to blocked — attention is never hidden by settle.
     herdr.setAgents([
       {
         pane_id: "w1:p1",
@@ -347,23 +454,19 @@ describe("inbox contract v1 (filters and tracker links)", () => {
     ]);
     const attention = await cli(["list", "--attention"]);
     expect(paneIds(attention.json)).toEqual(["w1:p1"]);
-    // Combined filters.
     const combined = await cli(["list", "--attention", "--search", "login", "--workspace", "w1"]);
     expect(paneIds(combined.json)).toEqual(["w1:p1"]);
     const miss = await cli(["list", "--search", "login", "--workspace", "ws2"]);
     expect(miss.json?.items).toEqual([]);
 
-    // Search hits title/cwd/pane_id case-insensitively.
     const byCwd = await cli(["list", "--search", "/REPO/app"]);
     expect(paneIds(byCwd.json)).toEqual(["w1:p1"]);
 
-    // Filters never mutate state: settled mark on p2 survives every read.
     const again = await cli(["list"]);
     expect(itemByPane(again.json as Record<string, unknown>, "w1:p2")?.organize).toMatchObject({
       kind: "settled",
     });
 
-    // Invalid --organize value is a usage error.
     const bad = await cli(["list", "--organize", "bogus"]);
     expect(bad.status).toBe(2);
 
@@ -382,7 +485,6 @@ describe("inbox contract v1 (filters and tracker links)", () => {
   });
 
   test("link/unlink/links contract and honest errors", async () => {
-    // Happy path: PR + Issue links on p1.
     const link = await cli(["link", "w1:p1", "--pr", "owner/repo#42"]);
     expect(link.status).toBe(0);
     expect(link.json?.command).toBe("link");
@@ -392,7 +494,6 @@ describe("inbox contract v1 (filters and tracker links)", () => {
     expect(linkIssue.status).toBe(0);
     expect(((linkIssue.json?.links ?? []) as unknown[]).length).toBe(2);
 
-    // list exposes links additively; counts.linked reflects them.
     const list = await cli(["list"]);
     const p1 = itemByPane(list.json as Record<string, unknown>, "w1:p1");
     expect(((p1?.links ?? []) as Array<Record<string, unknown>>).map((l) => l.ref).sort()).toEqual([
@@ -401,22 +502,18 @@ describe("inbox contract v1 (filters and tracker links)", () => {
     ]);
     expect(((list.json?.counts ?? {}) as Record<string, number>).linked).toBe(1);
 
-    // links command reads stored state.
     const links = await cli(["links", "w1:p1"]);
     expect(links.status).toBe(0);
     expect(((links.json?.links ?? []) as unknown[]).length).toBe(2);
 
-    // Re-link same ref is idempotent (re-validation), not a duplicate.
     const relink = await cli(["link", "w1:p1", "--pr", "owner/repo#42"]);
     expect(((relink.json?.links ?? []) as unknown[]).length).toBe(2);
 
-    // unlink removes exactly the matching ref.
     const unlink = await cli(["unlink", "w1:p1", "--issue", "owner/repo#7"]);
     expect(unlink.status).toBe(0);
     expect((unlink.json?.removed as Record<string, unknown>)?.ref).toBe("owner/repo#7");
     expect(((unlink.json?.links ?? []) as unknown[]).length).toBe(1);
 
-    // Honest errors: unknown pane, missing link, bad ref, ambiguous kind.
     const noPane = await cli(["link", "w9:p9", "--pr", "owner/repo#1"]);
     expect(noPane.status).not.toBe(0);
     const noLink = await cli(["unlink", "w1:p1", "--issue", "owner/repo#7"]);
@@ -428,7 +525,6 @@ describe("inbox contract v1 (filters and tracker links)", () => {
     const noKind = await cli(["link", "w1:p1"]);
     expect(noKind.status).toBe(2);
 
-    // --verify records anyway with a warning when gh cannot confirm.
     const verified = await cli([
       "link",
       "w1:p2",
@@ -443,8 +539,6 @@ describe("inbox contract v1 (filters and tracker links)", () => {
   });
 
   test("stale links never attach to a different agent generation", async () => {
-    // p1 currently has pr owner/repo#42 recorded under sess-1.
-    // Simulate an agent generation swap: same pane, new session value.
     herdr.setAgents([
       {
         pane_id: "w1:p1",
@@ -459,15 +553,11 @@ describe("inbox contract v1 (filters and tracker links)", () => {
     const p1 = itemByPane(list.json as Record<string, unknown>, "w1:p1");
     expect(p1?.links).toEqual([]);
 
-    // Same seq-advance tolerance: links survive status transitions within
-    // the same session — covered by model tests; here verify re-link works
-    // as the explicit re-validation path after staleness.
     const relink = await cli(["link", "w1:p1", "--pr", "owner/repo#42"]);
     expect(relink.status).toBe(0);
     expect(((relink.json?.links ?? []) as unknown[]).length).toBe(1);
     await cli(["unlink", "w1:p1", "--pr", "owner/repo#42"]);
 
-    // Restore clears organize state but keeps declared links.
     await cli(["link", "w1:p2", "--issue", "owner/repo#9"]);
     await cli(["settle", "w1:p2"]);
     await cli(["restore", "w1:p2"]);
@@ -482,17 +572,12 @@ describe("inbox contract v1 (filters and tracker links)", () => {
     await cli(["links", "w1:p1"]);
     await cli(["unlink", "w1:p1", "--pr", "owner/repo#5"]);
     const unique = [...new Set(herdr.methods)];
-    // No pane.report_metadata (links have no tokens), no execution surfaces.
     expect(unique).toEqual(["session.snapshot"]);
   });
 
-  // Fake `gh` for the --verify env-sanitization test. POSIX sh on
-  // macOS/Linux; on Windows installStub compiles GH_VERIFY_TS to gh.exe
-  // (issue #225) — Bun/libuv cannot exec extensionless shell stubs there.
+  // Fake `gh` for the --verify env-sanitization test (same stub contract
+  // as the TS suite; the Rust verify path must scrub identically).
   const GH_VERIFY_POSIX = `#!/bin/sh
-# Unset vars expand to empty under plain sh (no \`set -u\`), so
-# \`[ -n "$VAR" ]\` doubles as an unset check — and keeps the
-# script free of \`\${}\` for the linter.
 if [ -n "$GH_DEBUG" ] || [ -n "$GH_REPO" ] || [ -n "$GH_FORCE_TTY" ] || [ -n "$GIT_DIR" ] || [ -n "$GIT_CONFIG_COUNT" ] || [ -n "$GIT_CONFIG_PARAMETERS" ]; then
   echo "env-leak-marker" >&2
   exit 1
@@ -503,8 +588,6 @@ if [ "$FAKE_GH_FAIL" = "1" ]; then
 fi
 exit 0
 `;
-  // TypeScript twin of GH_VERIFY_POSIX — no backticks/`${`/literal-newline
-  // escapes so it survives the outer template literal verbatim.
   const GH_VERIFY_TS = `const NL = String.fromCharCode(10);
 const poisoned = ["GH_DEBUG", "GH_REPO", "GH_FORCE_TTY", "GIT_DIR", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"].some((k) => process.env[k]);
 if (poisoned) {
@@ -523,11 +606,6 @@ process.exit(0);
     try {
       installStub(ghBin, { name: "gh", posix: GH_VERIFY_POSIX, windows: GH_VERIFY_TS });
 
-      // Ambient poison vars that ghChildEnv must strip before spawn.
-      // Windows env keys are case-insensitive: `env` may carry "Path"
-      // while the literal below adds "PATH" — a duplicate-key env block
-      // lets the real gh win over the stub. Drop case variants first
-      // (issue #266).
       const verifyEnv: Record<string, string> = { ...env };
       for (const key of Object.keys(verifyEnv)) {
         if (key !== "PATH" && key.toLowerCase() === "path") delete verifyEnv[key];
@@ -545,16 +623,11 @@ process.exit(0);
           { ...verifyEnv, ...extra },
         );
 
-      // Sanitized env: the fake gh sees none of the poison vars → exit 0
-      // → verification succeeds with no warning. If any var leaked, the
-      // stub exits 1 and a warning appears.
       const ok = await runVerify({});
       expect(ok.status).toBe(0);
       expect(ok.json?.warnings).toEqual([]);
       expect(((ok.json?.links ?? []) as unknown[]).length).toBeGreaterThan(0);
 
-      // Failing gh: its stderr carries a credential marker that must
-      // never reach warnings[] (or anywhere in the JSON payload).
       const bad = await runVerify({ FAKE_GH_FAIL: "1" });
       expect(bad.status).toBe(0);
       const warnings = bad.json?.warnings as string[];
@@ -562,12 +635,183 @@ process.exit(0);
       expect(warnings[0]).toContain("link verification failed");
       expect(JSON.stringify(bad.json)).not.toContain("credential-marker");
       expect(JSON.stringify(bad.json)).not.toContain("env-leak-marker");
-      // The link is still recorded — verification never blocks.
       expect(((bad.json?.links ?? []) as unknown[]).length).toBeGreaterThan(0);
 
       await cli(["unlink", "w1:p1", "--pr", "owner/repo#216"]);
     } finally {
       rmSync(ghBin, { recursive: true, force: true });
+    }
+  });
+});
+
+// --- transitions log + non-TTY tui fallback --------------------------------------
+
+describe("inbox native transitions and tui fallback", () => {
+  let herdr: FakeHerdr;
+  let stateDir: string;
+  let configDir: string;
+  let env: Record<string, string>;
+
+  beforeAll(async () => {
+    herdr = await fakeHerdr();
+    stateDir = mkdtempSync(path.join(tmpdir(), "inbox-state-"));
+    configDir = mkdtempSync(path.join(tmpdir(), "inbox-config-"));
+    env = cliEnv(stateDir, configDir);
+  });
+
+  afterAll(async () => {
+    await herdr.close();
+    rmSync(stateDir, { recursive: true, force: true });
+    rmSync(configDir, { recursive: true, force: true });
+  });
+
+  test("transitions records organize ops with seq cursor", async () => {
+    const cli = (args: string[]) => runCli([...args, "--socket", herdr.socketPath], env);
+    // Only settle/snooze/restore record organize transitions (pin/unpin/
+    // archive do not — cli.ts parity).
+    await cli(["settle", "w1:p1"]);
+    await cli(["restore", "w1:p1"]);
+
+    const page = await cli(["transitions", "--limit", "50"]);
+    expect(page.status).toBe(0);
+    expect(page.json?.command).toBe("transitions");
+    const items = page.json?.transitions as Array<Record<string, unknown>>;
+    expect(items.length).toBeGreaterThanOrEqual(2);
+    const seqs = items.map((t) => t.seq as number);
+    expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
+    const head = page.json?.head_seq as number;
+    expect(head).toBeGreaterThanOrEqual(seqs[seqs.length - 1] ?? 0);
+
+    // --after is exclusive cursor pagination.
+    const firstSeq = items[0]?.seq as number;
+    const after = await cli(["transitions", "--after", String(firstSeq)]);
+    const afterItems = after.json?.transitions as Array<Record<string, unknown>>;
+    expect(afterItems.every((t) => (t.seq as number) > firstSeq)).toBe(true);
+
+    await cli(["restore", "w1:p1"]);
+    await cli(["unpin", "w1:p2"]);
+  });
+
+  test("tui without a TTY prints an honest plain list", async () => {
+    // `tui` has no argv channel for --socket; the target comes from the
+    // ambient HERDR_SOCKET_PATH the pane runtime exports. testEnv strips
+    // HERDR_* by default, so re-add just the socket path for this spawn.
+    const tuiEnv = { ...env, HERDR_SOCKET_PATH: herdr.socketPath };
+    const proc = Bun.spawn([INBOX_BIN, "tui"], {
+      env: tuiEnv,
+      stdout: "pipe",
+      stderr: "pipe",
+      stdin: "ignore",
+    });
+    const [stdout, , status] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    expect(status).toBe(0);
+    expect(stdout).toContain("inbox — session=");
+    expect(stdout).toContain("w1:p1");
+    expect(stdout).toContain("interactive UI requires a TTY");
+  });
+
+  test("tui --help prints usage without touching the socket", async () => {
+    const proc = Bun.spawn([INBOX_BIN, "tui", "--help"], {
+      env: testEnv(),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, , status] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    expect(status).toBe(0);
+    expect(stdout).toContain("inbox tui");
+  });
+});
+
+// --- state compatibility -----------------------------------------------------
+//
+// tests/fixtures/inbox-state-ts-v2.json was written by the RETIRED TypeScript
+// implementation (plugins/inbox/src/state.ts @ pre-#291 main, via updateState)
+// with a placeholder session key. The Rust port must read it verbatim:
+// schema v2 namespacing, generation marks, links, watch baselines, and the
+// organize-transition log all carry over.
+
+describe("state compatibility (TS-written state.json)", () => {
+  test("rust binary honors organize state, links, watch, and transitions written by TS", async () => {
+    const herdr = await fakeHerdr();
+    const stateDir = mkdtempSync(path.join(tmpdir(), "inbox-state-"));
+    const configDir = mkdtempSync(path.join(tmpdir(), "inbox-config-"));
+    try {
+      const sess = { agent: "claude", kind: "session", value: "sess-abc" };
+      herdr.setAgents([
+        { pane_id: "w1:p1", agent_status: "done", state_change_seq: 1, agent_session: sess },
+        { pane_id: "w1:p2", agent_status: "working", state_change_seq: 1, agent_session: sess },
+        { pane_id: "w1:p3", agent_status: "done", state_change_seq: 1 },
+        { pane_id: "w1:p4", agent_status: "working", state_change_seq: 1 },
+      ]);
+      herdr.setPanes(
+        ["w1:p1", "w1:p2", "w1:p3", "w1:p4"].map((id) => ({
+          pane_id: id,
+          workspace_id: "w1",
+          tab_id: "w1:t1",
+        })),
+      );
+
+      // Mirrors sessionKeyFor/session_key_for: canonicalize the socket
+      // path. realpathSync can't lstat a unix socket, so resolve the
+      // parent dir (which carries the /var→/private/var symlink) and
+      // re-append the basename — matching std::fs::canonicalize output.
+      const canonicalSocket = path.join(
+        realpathSync(path.dirname(herdr.socketPath)),
+        path.basename(herdr.socketPath),
+      );
+      const sessionKey = `${hostname()} ${canonicalSocket}`;
+      const fixture = JSON.parse(
+        readFileSync(path.join(import.meta.dir, "fixtures", "inbox-state-ts-v2.json"), "utf8"),
+      ) as Record<string, Record<string, unknown>>;
+      for (const section of ["sessions", "watch", "transitions"] as const) {
+        const map = fixture[section];
+        if (map && "SESSION_KEY_PLACEHOLDER" in map) {
+          fixture[section] = { [sessionKey]: map.SESSION_KEY_PLACEHOLDER };
+        }
+      }
+      mkdirSync(stateDir, { recursive: true });
+      writeFileSync(path.join(stateDir, "state.json"), `${JSON.stringify(fixture, null, 2)}\n`);
+
+      const env = cliEnv(stateDir, configDir);
+      const cli = (args: string[]) => runCli([...args, "--socket", herdr.socketPath], env);
+
+      const list = await cli(["list"]);
+      expect(list.status).toBe(0);
+      const p1 = itemByPane(list.json as Record<string, unknown>, "w1:p1");
+      const p2 = itemByPane(list.json as Record<string, unknown>, "w1:p2");
+      const p3 = itemByPane(list.json as Record<string, unknown>, "w1:p3");
+      const p4 = itemByPane(list.json as Record<string, unknown>, "w1:p4");
+      expect(p1?.organize).toMatchObject({ kind: "settled" });
+      expect(p1?.in_inbox).toBe(false);
+      expect(p1?.links).toEqual(
+        expect.arrayContaining([expect.objectContaining({ ref: "owner/repo#12" })]),
+      );
+      expect(p2?.organize).toMatchObject({ kind: "snoozed" });
+      expect(p2?.in_inbox).toBe(false);
+      expect(p3?.organize).toMatchObject({ kind: "archived" });
+      expect(p3?.pinned).toBe(true);
+      expect(p4?.in_inbox).toBe(true);
+      expect(p4?.links).toEqual(
+        expect.arrayContaining([expect.objectContaining({ ref: "owner/repo#34" })]),
+      );
+
+      const transitions = await cli(["transitions", "--limit", "50"]);
+      expect(transitions.status).toBe(0);
+      const items = transitions.json?.transitions as Array<Record<string, unknown>>;
+      expect(items.map((t) => t.kind)).toEqual(["settled", "snoozed", "cleared"]);
+      expect(items[2]?.cause).toBe("pane_closed");
+    } finally {
+      await herdr.close();
+      rmSync(stateDir, { recursive: true, force: true });
+      rmSync(configDir, { recursive: true, force: true });
     }
   });
 });
