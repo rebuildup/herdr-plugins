@@ -189,6 +189,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "controls"
+version = "0.6.0"
+dependencies = [
+ "chrono",
+ "crossterm",
+ "hoxay-herdr-client",
+ "hoxay-tui",
+ "libc",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "unicode-width",
+]
+
+[[package]]
 name = "conversations"
 version = "0.7.0"
 dependencies = [
