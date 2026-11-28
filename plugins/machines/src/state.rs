@@ -43,9 +43,7 @@ fn lock_path() -> PathBuf {
 }
 
 fn empty_state() -> MachinesState {
-    MachinesState {
-        probes: Map::new(),
-    }
+    MachinesState { probes: Map::new() }
 }
 
 /// Read the state document. Missing file → empty; wrong schema version
@@ -61,10 +59,8 @@ pub fn load_state() -> Result<MachinesState, String> {
     };
     let parsed: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
     let obj = parsed.as_object();
-    let version_ok = obj
-        .and_then(|o| o.get("version"))
-        .and_then(|v| v.as_u64())
-        == Some(STATE_SCHEMA_VERSION);
+    let version_ok =
+        obj.and_then(|o| o.get("version")).and_then(|v| v.as_u64()) == Some(STATE_SCHEMA_VERSION);
     let probes_ok = obj
         .and_then(|o| o.get("probes"))
         .map(|v| v.is_object())
@@ -155,15 +151,17 @@ where
         fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     let mut doc = Map::new();
-    doc.insert("version".to_string(), serde_json::json!(STATE_SCHEMA_VERSION));
+    doc.insert(
+        "version".to_string(),
+        serde_json::json!(STATE_SCHEMA_VERSION),
+    );
     doc.insert("probes".to_string(), Value::Object(state.probes.clone()));
     let tmp = {
         let mut p = path.clone().into_os_string();
         p.push(format!(".tmp-{}", std::process::id()));
         PathBuf::from(p)
     };
-    let body = serde_json::to_string_pretty(&Value::Object(doc))
-        .map_err(|e| e.to_string())?;
+    let body = serde_json::to_string_pretty(&Value::Object(doc)).map_err(|e| e.to_string())?;
     fs::write(&tmp, format!("{body}\n")).map_err(|e| e.to_string())?;
     fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
     Ok(result)

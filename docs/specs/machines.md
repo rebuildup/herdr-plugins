@@ -111,10 +111,10 @@ returned `{plugins: []}` consistent with its plugin-less
 ## Commands
 
 ```bash
-bun run src/cli.ts capability
-bun run src/cli.ts list
-bun run src/cli.ts probe <machine-id|label>
-bun run src/cli.ts probe --all
+./bin/machines capability
+./bin/machines list
+./bin/machines probe <machine-id|label>
+./bin/machines probe --all
 ```
 
 - `list` — live `herdr machine list --json` merged with

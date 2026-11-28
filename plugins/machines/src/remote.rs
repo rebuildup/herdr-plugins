@@ -148,22 +148,31 @@ pub fn spawn_herdr(
     cancel: Option<Arc<AtomicBool>>,
 ) -> RunResult {
     let env = herdr_child_env(target);
-    let mut command = Command::new(herdr_bin());
-    command
+    let bin = herdr_bin();
+    let mut child = match Command::new(&bin)
         .args(args)
         .env_clear()
         .envs(env)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let mut child = match command.spawn() {
+        .stderr(Stdio::piped())
+        .spawn()
+    {
         Ok(c) => c,
         Err(e) => {
+            // Mirror Node's `child.on("error")` surface: the TS runner
+            // resolves with `stderr = String(err)` where err reads
+            // "Error: spawn <bin> ENOENT" — keep the same shape so CLI
+            // error envelopes stay comparable across implementations.
+            let detail = match e.kind() {
+                std::io::ErrorKind::NotFound => "ENOENT".to_string(),
+                std::io::ErrorKind::PermissionDenied => "EACCES".to_string(),
+                _ => e.to_string(),
+            };
             return RunResult {
                 code: None,
                 stdout: String::new(),
-                stderr: e.to_string(),
+                stderr: format!("Error: spawn {bin} {detail}"),
                 timed_out: false,
                 cancelled: false,
             };
@@ -243,18 +252,16 @@ fn parse_envelope(run: &RunResult) -> CliEnvelope {
             .filter(|l| l.starts_with('{') && l.ends_with('}'))
             .collect();
         for line in lines.iter().rev() {
-            if let Ok(parsed) = serde_json::from_str::<Value>(line) {
-                if let Value::Object(map) = &parsed {
-                    let has_result = map.contains_key("result");
-                    let has_error = map.contains_key("error");
-                    if has_result || has_error {
-                        return CliEnvelope {
-                            has_result,
-                            has_error,
-                            result: map.get("result").cloned().unwrap_or(Value::Null),
-                            error: map.get("error").cloned(),
-                        };
-                    }
+            if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(line) {
+                let has_result = map.contains_key("result");
+                let has_error = map.contains_key("error");
+                if has_result || has_error {
+                    return CliEnvelope {
+                        has_result,
+                        has_error,
+                        result: map.get("result").cloned().unwrap_or(Value::Null),
+                        error: map.get("error").cloned(),
+                    };
                 }
             }
         }
@@ -343,7 +350,9 @@ fn run_remote(
             format!(
                 "herdr --machine {} exited {}: {}",
                 selector,
-                run.code.map(|c| c.to_string()).unwrap_or_else(|| "?".to_string()),
+                run.code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "?".to_string()),
                 detail
             ),
             json!({
@@ -435,7 +444,10 @@ pub fn list_machines(target: Option<&HerdrTarget>) -> Result<Vec<MachineEntry>, 
 /// Resolve a probe selector (machine id or label) against the saved
 /// machine list. Labels match case-insensitively; ids match exactly.
 /// Ambiguity and unknown selectors are usage errors (exit 2 upstream).
-pub fn resolve_machine(selector: &str, machines: &[MachineEntry]) -> Result<MachineEntry, RemoteError> {
+pub fn resolve_machine(
+    selector: &str,
+    machines: &[MachineEntry],
+) -> Result<MachineEntry, RemoteError> {
     if let Some(m) = machines.iter().find(|m| m.id == selector) {
         return Ok(m.clone());
     }
@@ -467,16 +479,11 @@ pub fn resolve_machine(selector: &str, machines: &[MachineEntry]) -> Result<Mach
 
 // --- Probe ---------------------------------------------------------------------
 
-fn now_iso() -> String {
+pub(crate) fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-fn fail_probe(
-    machine: &MachineEntry,
-    state: &str,
-    kind: &str,
-    message: String,
-) -> MachineProbe {
+fn fail_probe(machine: &MachineEntry, state: &str, kind: &str, message: String) -> MachineProbe {
     let mut probe = probe_shell(machine, state, now_iso());
     probe.error_kind = Some(kind.to_string());
     probe.error = Some(message);
@@ -544,14 +551,21 @@ fn parse_plugin_entries(result: &Value) -> Vec<RemotePluginEntry> {
 
 /// Probe the remote plugin surface after a successful snapshot. Any
 /// failure degrades to `plugin_surface: "unsupported"` with the detail
-/// preserved — never a fabricated inventory (ADR-0028 §4/§5).
+/// preserved — never a fabricated inventory (ADR-0028 §4/§5). A
+/// cooperative cancel propagates as `Err` instead: recording a
+/// cancelled probe as `unsupported`/`error` data would fabricate
+/// last-known metadata (tui-v1 §5 item 7).
 fn probe_plugin_surface(
     machine: &MachineEntry,
     probe: &mut MachineProbe,
     target: Option<&HerdrTarget>,
     cancel: Option<Arc<AtomicBool>>,
-) {
-    let cli_args = vec!["plugin".to_string(), "list".to_string(), "--json".to_string()];
+) -> Result<(), RemoteError> {
+    let cli_args = vec![
+        "plugin".to_string(),
+        "list".to_string(),
+        "--json".to_string(),
+    ];
     match run_remote(
         &machine.id,
         &cli_args,
@@ -571,29 +585,33 @@ fn probe_plugin_surface(
                 probe.plugin_surface_error = Some(format!(
                     "remote plugin list returned no plugins array: {snippet}"
                 ));
-                return;
+                return Ok(());
             }
             probe.plugin_surface = "supported".to_string();
             probe.plugins = Some(parse_plugin_entries(&result));
+            Ok(())
         }
+        Err(err) if err.kind == "cancelled" => Err(err),
         Err(err) => {
             probe.plugin_surface = "unsupported".to_string();
             probe.plugin_surface_error = Some(err.message);
+            Ok(())
         }
     }
 }
 
 /// Probe one saved machine: check `enabled`, then `api snapshot` +
-/// `plugin list` over the SSH bridge. Always returns a MachineProbe —
-/// failures are data, not exceptions (selector resolution stays a
-/// usage error upstream).
+/// `plugin list` over the SSH bridge. Probe outcomes are data, not
+/// exceptions — the only `Err` is a cooperative cancel, which must
+/// propagate so callers never persist a fabricated probe (the retired
+/// TS path killed the CLI child, so nothing was recorded either).
 pub fn probe_machine_entry(
     machine: &MachineEntry,
     target: Option<&HerdrTarget>,
     cancel: Option<Arc<AtomicBool>>,
-) -> MachineProbe {
+) -> Result<MachineProbe, RemoteError> {
     if !machine.enabled {
-        return probe_shell(machine, "disabled", now_iso());
+        return Ok(probe_shell(machine, "disabled", now_iso()));
     }
 
     let cli_args = vec!["api".to_string(), "snapshot".to_string()];
@@ -605,7 +623,8 @@ pub fn probe_machine_entry(
         cancel.clone(),
     ) {
         Ok(r) => r,
-        Err(err) => return classify_snapshot_error(machine, &err),
+        Err(err) if err.kind == "cancelled" => return Err(err),
+        Err(err) => return Ok(classify_snapshot_error(machine, &err)),
     };
 
     let record = as_record(&result);
@@ -619,8 +638,8 @@ pub fn probe_machine_entry(
     probe.server_version = str_field(&snap, "version").map(|s| s.to_string());
     probe.protocol = snap.get("protocol").and_then(|v| v.as_f64());
 
-    probe_plugin_surface(machine, &mut probe, target, cancel);
-    probe
+    probe_plugin_surface(machine, &mut probe, target, cancel)?;
+    Ok(probe)
 }
 
 /// Probe a selector (id or label) against the saved machine list.
@@ -633,27 +652,42 @@ pub fn probe_machine(
 ) -> Result<MachineProbe, RemoteError> {
     let machines = list_machines(target)?;
     let machine = resolve_machine(selector, &machines)?;
-    Ok(probe_machine_entry(&machine, target, cancel))
+    probe_machine_entry(&machine, target, cancel)
 }
 
 /// Probe every saved machine sequentially — each probe re-opens the SSH
 /// bridge per call, so parallelism would multiply connection churn for
-/// no correctness gain. Stops early when `cancel` fires.
+/// no correctness gain. Stops early when `cancel` fires; the returned
+/// flag reports whether the run completed (`false` = partial results,
+/// which callers must label rather than present as a full probe).
 pub fn probe_all_machines(
     target: Option<&HerdrTarget>,
     cancel: Option<Arc<AtomicBool>>,
-) -> Result<Vec<MachineProbe>, RemoteError> {
+) -> Result<(Vec<MachineProbe>, bool), RemoteError> {
     let machines = list_machines(target)?;
     let mut probes = Vec::new();
+    let mut completed = true;
     for machine in &machines {
         if cancel
             .as_ref()
             .map(|c| c.load(Ordering::SeqCst))
             .unwrap_or(false)
         {
+            completed = false;
             break;
         }
-        probes.push(probe_machine_entry(machine, target, cancel.clone()));
+        match probe_machine_entry(machine, target, cancel.clone()) {
+            Ok(probe) => probes.push(probe),
+            Err(err) => {
+                // Only cooperative cancel reaches Err here; surface it
+                // with the partial results already gathered.
+                if err.kind == "cancelled" {
+                    completed = false;
+                    break;
+                }
+                return Err(err);
+            }
+        }
     }
-    Ok(probes)
+    Ok((probes, completed))
 }

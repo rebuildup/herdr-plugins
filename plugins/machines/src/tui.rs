@@ -40,10 +40,9 @@ use hoxay_herdr_client::target::{resolve_target, ResolveTargetOptions};
 use hoxay_tui::safety::sanitize_display;
 
 use crate::cli;
-use crate::model::PLUGIN_ID;
+use crate::model::{PLUGIN_ID, PLUGIN_VERSION};
 use crate::remote::{self, HerdrTarget, RemoteError};
 
-const PLUGIN_VERSION: &str = "0.1.0";
 const TASK_TIMEOUT_MS: u64 = 300_000;
 
 // --- pinned target identity -------------------------------------------------
@@ -104,8 +103,8 @@ fn resolve_pinned_target() -> PinnedTarget {
         .cloned()
         .unwrap_or_default();
 
-    let workspace_id = env_str("HERDR_TUI_WORKSPACE_ID")
-        .or_else(|| jstr(context.get("workspace_id")));
+    let workspace_id =
+        env_str("HERDR_TUI_WORKSPACE_ID").or_else(|| jstr(context.get("workspace_id")));
     let tab_id = env_str("HERDR_TUI_TAB_ID").or_else(|| jstr(context.get("tab_id")));
     let origin_pane_id = env_str("HERDR_TUI_PANE_ID")
         .or_else(|| jstr(context.get("focused_pane_id")))
@@ -382,7 +381,9 @@ fn machine_header_lines(item: &MachineItem) -> Vec<String> {
             ));
             lines.push(format!(
                 "  server: {} · protocol: {}",
-                p.server_version.clone().unwrap_or_else(|| "unknown".to_string()),
+                p.server_version
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
                 p.protocol
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "unknown".to_string())
@@ -474,10 +475,7 @@ fn format_probe_payload(payload: &Value) -> Vec<String> {
                 lines.push(format!("  remote plugins ({}):", plugins.len()));
                 for pl in plugins {
                     let pr = pl.as_object().cloned().unwrap_or_default();
-                    let pid = pr
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
+                    let pid = pr.get("id").and_then(|v| v.as_str()).unwrap_or("?");
                     let pname = pr.get("name").and_then(|v| v.as_str());
                     let pver = pr.get("version").and_then(|v| v.as_str());
                     lines.push(format!(
@@ -602,11 +600,18 @@ fn run_open() -> i32 {
             0
         }
         Err(e) => {
+            // Preserve the upstream RPC error code when present (TS
+            // `err.code` passthrough); transport-level failures keep the
+            // generic `pane_open_failed` kind.
+            let (kind, message) = match &e {
+                socket::ClientError::Rpc(rpc) => (rpc.code.clone(), rpc.message.clone()),
+                other => ("pane_open_failed".to_string(), other.to_string()),
+            };
             eprintln!(
                 "{}",
                 serde_json::to_string(&json!({
                     "ok": false,
-                    "error": {"kind": "pane_open_failed", "message": e.to_string()}
+                    "error": {"kind": kind, "message": message}
                 }))
                 .unwrap_or_default()
             );
@@ -637,29 +642,27 @@ fn render_plain_list() -> i32 {
                     .cloned()
                     .unwrap_or_default();
                 let probe = rec.get("last_probe").and_then(|v| v.as_object());
-                let id = m
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("?");
-                let label = m
-                    .get("label")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(id);
-                let target = m
-                    .get("target")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("?");
+                let id = m.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                let label = m.get("label").and_then(|v| v.as_str()).unwrap_or(id);
+                let target = m.get("target").and_then(|v| v.as_str()).unwrap_or("?");
                 let enabled = m.get("enabled").and_then(|v| v.as_bool()) != Some(false);
                 let probe_state = probe
                     .and_then(|p| p.get("state"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("never");
+                // Remote-sourced fields are sanitized even on the plain
+                // fallback path (tui-v1 §5 item 8).
                 println!(
-                    "{label} ({id})\ttarget={target}\tenabled={enabled}\tprobe={probe_state}"
+                    "{} ({})\ttarget={}\tenabled={}\tprobe={}",
+                    sanitize_display(label),
+                    sanitize_display(id),
+                    sanitize_display(target),
+                    enabled,
+                    sanitize_display(probe_state)
                 );
             }
             println!(
-                "hint: run inside a herdr pane (or a TTY) for the interactive TUI; CLI: ./bin/machines <cmd>"
+                "hint: run inside a herdr pane (or a TTY) for the interactive TUI; CLI: machines <cmd>"
             );
             0
         }
@@ -740,9 +743,7 @@ impl SelectList {
     /// filtered view, wrapping (port of `move`).
     fn filtered_position(&self) -> usize {
         let f = self.filtered_indices();
-        f.iter()
-            .position(|&r| r == self.cursor)
-            .unwrap_or(0)
+        f.iter().position(|&r| r == self.cursor).unwrap_or(0)
     }
 
     fn move_cursor(&mut self, delta: isize) {
@@ -892,9 +893,8 @@ impl SelectList {
                 .unwrap_or(false);
         let list_w = if use_detail { width * 55 / 100 } else { width };
         let detail_w = width.saturating_sub(list_w + 1);
-        let chrome = usize::from(
-            self.filter_active || !self.committed_filter.is_empty(),
-        ) + usize::from(list_len > 0);
+        let chrome = usize::from(self.filter_active || !self.committed_filter.is_empty())
+            + usize::from(list_len > 0);
         let visible = height.saturating_sub(chrome + 1).max(1);
 
         // Scroll window follows cursor (port of SelectList.render clamps).
@@ -905,9 +905,7 @@ impl SelectList {
         if pos >= self.scroll_top + visible {
             self.scroll_top = pos + 1 - visible;
         }
-        self.scroll_top = self
-            .scroll_top
-            .min(list_len.saturating_sub(visible));
+        self.scroll_top = self.scroll_top.min(list_len.saturating_sub(visible));
 
         let mut rows: Vec<Line<'static>> = Vec::new();
         if self.filter_active || !self.committed_filter.is_empty() {
@@ -924,7 +922,10 @@ impl SelectList {
                 ),
             ];
             if self.filter_active {
-                spans.push(Span::styled("▌", Style::default().add_modifier(Modifier::REVERSED)));
+                spans.push(Span::styled(
+                    "▌",
+                    Style::default().add_modifier(Modifier::REVERSED),
+                ));
             }
             rows.push(Line::from(spans));
         }
@@ -939,17 +940,16 @@ impl SelectList {
                 let (label, _, _) = &self.rows[row_idx];
                 let is_sel = row_idx == self.cursor;
                 let style = if is_sel {
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };
                 let label_w = list_w.saturating_sub(4);
                 let shown = ellipsize(&sanitize_display(label), label_w);
                 rows.push(Line::from(vec![
-                    Span::styled(
-                        if is_sel { "❯ " } else { "  " },
-                        style,
-                    ),
+                    Span::styled(if is_sel { "❯ " } else { "  " }, style),
                     Span::styled(pad_end(&shown, label_w), style),
                 ]));
             }
@@ -995,16 +995,27 @@ impl SelectList {
                 out.push(Line::from(spans));
                 continue;
             }
-            spans.push(Span::styled("│", Style::default().add_modifier(Modifier::DIM)));
+            spans.push(Span::styled(
+                "│",
+                Style::default().add_modifier(Modifier::DIM),
+            ));
             spans.push(Span::raw(" "));
             let detail_row_idx = r as isize - filter_offset as isize;
             let (d_text, d_style) = if detail_row_idx == 0 {
-                (detail_title.clone(), Style::default().add_modifier(Modifier::BOLD))
+                (
+                    detail_title.clone(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                )
             } else if detail_row_idx > 0 {
                 let idx = (detail_row_idx - 1) as usize;
                 detail_lines
                     .get(idx)
-                    .map(|l| (clip(&sanitize_display(l), detail_w.saturating_sub(1)), Style::default().add_modifier(Modifier::DIM)))
+                    .map(|l| {
+                        (
+                            clip(&sanitize_display(l), detail_w.saturating_sub(1)),
+                            Style::default().add_modifier(Modifier::DIM),
+                        )
+                    })
                     .unwrap_or_else(|| (String::new(), Style::default()))
             } else {
                 (String::new(), Style::default())
@@ -1145,12 +1156,89 @@ enum View {
     },
     /// Capability info detail.
     Info { lines: Vec<String>, scroll: usize },
+    /// `?`/`h` help — generated from MACHINES_TUI_KEYMAP (tui-v1 §6:
+    /// help comes from the same keymap table, no drift).
+    Help { lines: Vec<String>, scroll: usize },
     /// Probe result detail.
     ProbeResult {
         title: String,
         lines: Vec<String>,
         scroll: usize,
     },
+}
+
+/// One row of the in-TUI keymap/help table (tui-v1 §6 reserved keys:
+/// `q`/`Esc` back, `?`/`h` help, `Ctrl-C` cancel-then-exit, `/` filter).
+struct KeyBinding {
+    keys: &'static [&'static str],
+    description: &'static str,
+}
+
+/// Single source for dispatch docs + `?` help.
+const MACHINES_TUI_KEYMAP: &[KeyBinding] = &[
+    KeyBinding {
+        keys: &["↑", "k", "↓", "j"],
+        description: "move selection",
+    },
+    KeyBinding {
+        keys: &["pgup", "pgdn"],
+        description: "page",
+    },
+    KeyBinding {
+        keys: &["home", "end"],
+        description: "first / last",
+    },
+    KeyBinding {
+        keys: &["/"],
+        description: "filter machines",
+    },
+    KeyBinding {
+        keys: &["enter"],
+        description: "machine detail",
+    },
+    KeyBinding {
+        keys: &["p"],
+        description: "probe selected machine (slow SSH; esc cancels)",
+    },
+    KeyBinding {
+        keys: &["a"],
+        description: "probe all machines (slow SSH; esc cancels)",
+    },
+    KeyBinding {
+        keys: &["i"],
+        description: "capability / contract info",
+    },
+    KeyBinding {
+        keys: &["R"],
+        description: "refresh list (read-only)",
+    },
+    KeyBinding {
+        keys: &["?", "h"],
+        description: "this help",
+    },
+    KeyBinding {
+        keys: &["q", "esc"],
+        description: "back / close",
+    },
+    KeyBinding {
+        keys: &["ctrl-c"],
+        description: "cancel running probe",
+    },
+];
+
+/// Help-view lines rendered from the keymap table (no drift).
+fn help_lines() -> Vec<String> {
+    let mut lines = vec!["machines — read-only saved-machine inventory".to_string()];
+    lines.push(String::new());
+    for kb in MACHINES_TUI_KEYMAP {
+        lines.push(format!("  {:<22} {}", kb.keys.join("/"), kb.description));
+    }
+    lines.push(String::new());
+    lines.push(
+        "Read-only: machine lifecycle stays with `herdr machine …`; probes go through the SavedSshApiBridge."
+            .to_string(),
+    );
+    lines
 }
 
 struct MachinesApp {
@@ -1217,9 +1305,8 @@ impl MachinesApp {
         let (tx, rx) = mpsc::channel();
         let target = self.herdr_target();
         std::thread::spawn(move || {
-            let result = cli::list_payload_for_tui(&target).map(|payload| {
-                as_machine_items(payload.get("machines"))
-            });
+            let result = cli::list_payload_for_tui(&target)
+                .map(|payload| as_machine_items(payload.get("machines")));
             let _ = tx.send(TaskMsg::List(result.map_err(|e| error_line(&e))));
         });
         self.task_rx = Some(rx);
@@ -1301,7 +1388,11 @@ impl MachinesApp {
                         let label = self.task_label.clone();
                         let status = format!(
                             "{label} {}: {e}",
-                            if e.starts_with("cancelled") { "cancelled" } else { "failed" },
+                            if e.starts_with("cancelled") {
+                                "cancelled"
+                            } else {
+                                "failed"
+                            },
                         );
                         self.set_status(&status, "");
                     }
@@ -1343,14 +1434,17 @@ impl MachinesApp {
                     self.cancel_task();
                     return true;
                 }
-                KeyCode::Char('c')
-                    if ev.modifiers.contains(KeyModifiers::CONTROL) =>
-                {
+                KeyCode::Char('c') if ev.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.cancel_task();
                     return true;
                 }
                 _ => {}
             }
+        }
+        // tui-v1 §6: Ctrl-C cancels the current op; with no op running
+        // it exits (same convention as the other native TUIs).
+        if ev.modifiers.contains(KeyModifiers::CONTROL) {
+            return false;
         }
         match self.list.handle_key(&ev) {
             ListKeyResult::Consumed => true,
@@ -1400,6 +1494,10 @@ impl MachinesApp {
                 self.capability_info();
                 true
             }
+            KeyCode::Char('?') | KeyCode::Char('h') => {
+                self.show_help();
+                true
+            }
             KeyCode::Char('r') | KeyCode::Char('R') => {
                 self.start_list_load();
                 true
@@ -1408,12 +1506,20 @@ impl MachinesApp {
         }
     }
 
+    /// `?`/`h` help overlay (tui-v1 §6 reserved keys).
+    fn show_help(&mut self) {
+        self.views.push(View::Help {
+            lines: help_lines(),
+            scroll: 0,
+        });
+    }
+
     /// Capability/contract info detail (read-only diagnostics).
     fn capability_info(&mut self) {
         let payload = self
             .capability
             .clone()
-            .unwrap_or_else(|| cli::capability_payload());
+            .unwrap_or_else(cli::capability_payload);
         self.views.push(View::Info {
             lines: format_capability_payload(&payload),
             scroll: 0,
@@ -1439,6 +1545,9 @@ impl MachinesApp {
                 }
                 _ => {}
             }
+        }
+        if ev.modifiers.contains(KeyModifiers::CONTROL) {
+            return false;
         }
         match ev.code {
             KeyCode::Up | KeyCode::Char('k') => {
@@ -1478,6 +1587,9 @@ impl MachinesApp {
                     let id = machine_id.clone();
                     self.start_probe(&id);
                 }
+            }
+            KeyCode::Char('?') | KeyCode::Char('h') => {
+                self.show_help();
             }
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.views.pop();
@@ -1532,24 +1644,28 @@ impl MachinesApp {
                 )));
                 v
             }
-            Phase::Ready => self.list.render(area.width as usize, list_area.height as usize),
+            Phase::Ready => self
+                .list
+                .render(area.width as usize, list_area.height as usize),
         };
         frame.render_widget(Paragraph::new(header), Rect { height: 1, ..area });
         frame.render_widget(Paragraph::new(lines), list_area);
-        // Status line.
+        // Status line. Status text can carry remote error detail —
+        // sanitize before render (tui-v1 §5 item 8: no CSI/OSC injection).
         let status = if self.task_rx.is_some() {
-            format!("{}… (esc cancel)", self.task_label)
+            format!("{}… (esc cancel)", sanitize_display(&self.task_label))
         } else {
-            self.status_left.clone()
+            sanitize_display(&self.status_left)
         };
         let right = if self.task_rx.is_some() {
             String::new()
         } else {
-            self.status_right.clone()
+            sanitize_display(&self.status_right)
         };
-        let status_line = Line::from(vec![
-            Span::styled(pad_end(&status, area.width as usize), Style::default().add_modifier(Modifier::DIM)),
-        ]);
+        let status_line = Line::from(vec![Span::styled(
+            pad_end(&status, area.width as usize),
+            Style::default().add_modifier(Modifier::DIM),
+        )]);
         let _ = right;
         frame.render_widget(
             Paragraph::new(status_line),
@@ -1565,15 +1681,22 @@ impl MachinesApp {
     fn render_view(&self, frame: &mut ratatui::Frame, area: Rect, view: &View) {
         let (title, lines, scroll) = match view {
             View::Detail {
-                title, lines, scroll, ..
+                title,
+                lines,
+                scroll,
+                ..
             } => (title.clone(), lines.clone(), *scroll),
             View::Info { lines, scroll } => (
                 "capability — contract & probe taxonomy".to_string(),
                 lines.clone(),
                 *scroll,
             ),
+            View::Help { lines, scroll } => ("help — keymap".to_string(), lines.clone(), *scroll),
             View::ProbeResult {
-                title, lines, scroll, ..
+                title,
+                lines,
+                scroll,
+                ..
             } => (title.clone(), lines.clone(), *scroll),
         };
         // Title header row (dim), matching the TS DetailView chrome.
@@ -1629,6 +1752,7 @@ fn scroll_by(view: &mut View, delta: isize) {
     let scroll = match view {
         View::Detail { scroll, .. }
         | View::Info { scroll, .. }
+        | View::Help { scroll, .. }
         | View::ProbeResult { scroll, .. } => scroll,
     };
     *scroll = scroll.saturating_add_signed(delta);
@@ -1638,6 +1762,7 @@ fn set_scroll(view: &mut View, v: usize) {
     let scroll = match view {
         View::Detail { scroll, .. }
         | View::Info { scroll, .. }
+        | View::Help { scroll, .. }
         | View::ProbeResult { scroll, .. } => scroll,
     };
     *scroll = if v == usize::MAX { usize::MAX / 2 } else { v };
@@ -1650,11 +1775,21 @@ fn run_probe_domain(
     target: &HerdrTarget,
     cancel: Option<Arc<AtomicBool>>,
 ) -> Result<Value, String> {
-    let probes = if selector == "--all" {
+    let (probes, completed) = if selector == "--all" {
         remote::probe_all_machines(Some(target), cancel).map_err(|e| error_line(&e))?
     } else {
-        vec![remote::probe_machine(selector, Some(target), cancel).map_err(|e| error_line(&e))?]
+        (
+            vec![remote::probe_machine(selector, Some(target), cancel)
+                .map_err(|e| error_line(&e))?],
+            true,
+        )
     };
+    // A cancelled/partial run must not persist last-known metadata or
+    // render as a successful probe (tui-v1 §5 items 7–8; the retired TS
+    // path killed the CLI child, so nothing was recorded either).
+    if !completed {
+        return Err("cancelled: probe cancelled before completion".to_string());
+    }
     let mut results = Vec::new();
     for probe in &probes {
         crate::state::record_probe(probe).map_err(|e| format!("state_error: {e}"))?;
@@ -1712,6 +1847,10 @@ fn run_main() -> i32 {
     let mut terminal = match Terminal::new(backend) {
         Ok(t) => t,
         Err(err) => {
+            // Raw mode + alternate screen are already active — restore
+            // before exiting (same pattern as the inbox TUI).
+            let _ = crossterm::execute!(io::stdout(), crossterm::terminal::LeaveAlternateScreen);
+            crossterm::terminal::disable_raw_mode().ok();
             eprintln!("machines-tui: {err}");
             return 1;
         }

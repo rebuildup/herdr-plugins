@@ -2117,7 +2117,8 @@
           "gui": "consumer:herdr-t3 (#7)",
           "real_machine_evidence": [
             "docs/research/machines-v1-live-verification.md",
-            "docs/research/tui-rc-0-11-0-verification.md"
+            "docs/research/tui-rc-0-11-0-verification.md",
+            "docs/research/machines-native-rust.md"
           ],
           "upstream_gap": null,
           "notes": "machine inventory table"
@@ -2132,7 +2133,8 @@
           "gui": "consumer:herdr-t3 (#7)",
           "real_machine_evidence": [
             "docs/research/machines-v1-live-verification.md",
-            "docs/research/tui-rc-0-11-0-verification.md"
+            "docs/research/tui-rc-0-11-0-verification.md",
+            "docs/research/machines-native-rust.md"
           ],
           "upstream_gap": null,
           "notes": "reachability/version/plugin-surface probe; progress+cancel"

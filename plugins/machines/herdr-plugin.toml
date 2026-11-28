@@ -3,32 +3,37 @@ name = "Machines"
 version = "0.1.0"
 min_herdr_version = "0.9.0"
 description = "Remote machines inventory: read-only list/probe/capability over herdr saved machines — reachability, remote herdr version/protocol, and plugin surface via the ADR-0020 SavedSshApiBridge path. Machine lifecycle stays with the herdr CLI; no credential handling (herdr-plugins.machines/v1)."
-platforms = ["linux", "macos", "windows"]
+platforms = ["macos"]
 
-# No build step: the plugin is dependency-free TypeScript executed by Bun
-# (runtime prerequisite, see plugins/machines/README.md).
-#
+# No build step for normal installs: the plugin ships a committed
+# prebuilt native binary (ADR-0035). Verified platform: macOS arm64
+# only; other platforms are declared honestly once their binaries
+# exist (Issue #315 tracks the per-OS verification matrix).
+
 # No [[events]] / [[startup]]: inventory and probe are explicit
 # invocations. Issue #161 (parent #34, ADR-0028): read-only
 # inventory/probe only — machine add/remove/enable/disable is never
 # reimplemented.
 #
-# TUI surface (#247, contract herdr-plugins.tui/v1, ADR-0031/0032/0033):
-# `main` pane = machines browser (list + on-demand probe + capability
-# info; read-only — no mutating affordance); `open` action opens it in
-# a tab. CLI behavior is unchanged.
+# TUI surface (#247, contract herdr-plugins.tui/v1, ADR-0031/0032/0033;
+# native port #326): `main` pane = machines browser (list + on-demand
+# probe + capability info; read-only — no mutating affordance); `open`
+# action opens it in a tab. The TUI calls the plugin's own domain
+# functions in-process, so the public contract
+# `herdr-plugins.machines/v1` stays the single source of truth. CLI
+# behavior is unchanged.
 
 [[panes]]
 id = "main"
 title = "Machines: inventory"
 description = "Saved machines browser: list with last-known probe state, on-demand probe (progress + cancel), plugin-surface support, capability info. Read-only."
-platforms = ["linux", "macos", "windows"]
+platforms = ["macos"]
 placement = "tab"
-command = ["bun", "run", "src/tui.ts", "main"]
+command = ["./bin/machines", "tui", "main"]
 
 [[actions]]
 id = "open"
 title = "Machines: open inventory UI"
 description = "Open the machines inventory TUI in a new tab."
 contexts = ["pane", "workspace"]
-command = ["bun", "run", "src/tui.ts", "open"]
+command = ["./bin/machines", "tui", "open"]

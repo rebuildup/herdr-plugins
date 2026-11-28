@@ -29,17 +29,13 @@ use std::io::Write;
 use serde_json::{json, Value};
 
 use crate::model::{
-    emit, error_envelope, IMPLEMENTED_COMMANDS, PLUGIN_ID, PLUGIN_SURFACES, PLUGIN_VERSION,
-    PROBE_STATES, CONTRACT, CONTRACT_STATUS,
+    emit, error_envelope, CONTRACT, CONTRACT_STATUS, IMPLEMENTED_COMMANDS, PLUGIN_ID,
+    PLUGIN_SURFACES, PLUGIN_VERSION, PROBE_STATES,
 };
 use crate::remote::{
-    list_machines, probe_all_machines, probe_machine, HerdrTarget, RemoteError,
+    list_machines, now_iso, probe_all_machines, probe_machine, HerdrTarget, RemoteError,
 };
 use crate::state::{self, record_probe};
-
-fn now_iso() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-}
 
 /// Write a payload to stdout and flush — `process::exit` does not run
 /// destructors, so every emit path must flush explicitly (piped stdout
@@ -51,7 +47,11 @@ fn write_out(text: &str) {
 
 fn fail(usage: bool, message: &str, kind: Option<&str>, extra: Option<Value>) -> ! {
     let envelope = error_envelope(usage, message, kind, extra);
-    let _ = writeln!(std::io::stderr(), "{}", serde_json::to_string(&envelope).unwrap_or_default());
+    let _ = writeln!(
+        std::io::stderr(),
+        "{}",
+        serde_json::to_string(&envelope).unwrap_or_default()
+    );
     let _ = std::io::stderr().flush();
     std::process::exit(if usage { 2 } else { 1 });
 }
@@ -153,10 +153,8 @@ fn cmd_help() {
         "contract": CONTRACT,
         "plugin": PLUGIN_ID,
         "version": PLUGIN_VERSION,
-        "usage": format!(
-            "machines <capability|help|list|probe> [--socket PATH] [--session NAME] — \
-             list [saved machines + last probe]; probe <machine-id|label|--all>"
-        ),
+        "usage": "machines <capability|help|list|probe> [--socket PATH] [--session NAME] — \
+                  list [saved machines + last probe]; probe <machine-id|label|--all>",
     });
     write_out(&emit(&payload));
 }
@@ -196,7 +194,9 @@ fn probe_payload(
     target: &HerdrTarget,
 ) -> Result<Vec<crate::model::MachineProbe>, RemoteError> {
     let probes = if all {
-        probe_all_machines(Some(target), None)?
+        // The CLI never cancels (cancel=None) so `completed` is always
+        // true here; the flag exists for the TUI's cooperative cancel.
+        probe_all_machines(Some(target), None)?.0
     } else {
         vec![probe_machine(
             selector.expect("selector required"),
@@ -221,11 +221,7 @@ fn cmd_probe(args: &[String]) {
         usage_fail("probe requires exactly one <machine-id|label> or --all");
     }
 
-    match probe_payload(
-        pos.first().map(|s| s.as_str()),
-        parsed.all,
-        &parsed.target,
-    ) {
+    match probe_payload(pos.first().map(|s| s.as_str()), parsed.all, &parsed.target) {
         Ok(probes) => {
             let results: Vec<Value> = probes
                 .iter()
@@ -250,12 +246,7 @@ fn cmd_probe(args: &[String]) {
 fn fail_with_remote(err: RemoteError) -> ! {
     let usage_kinds = ["machine_not_found", "machine_ambiguous"];
     let usage = usage_kinds.contains(&err.kind.as_str());
-    fail(
-        usage,
-        &err.message,
-        Some(&err.kind),
-        err.extra.clone(),
-    )
+    fail(usage, &err.message, Some(&err.kind), err.extra.clone())
 }
 
 /// CLI entrypoint; returns the process exit code.

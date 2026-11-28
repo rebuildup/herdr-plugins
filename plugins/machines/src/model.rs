@@ -124,7 +124,12 @@ pub fn emit(payload: &Value) -> String {
 /// `usage` selects `code: "usage"` (exit 2) vs `"error"` (exit 1),
 /// mirroring the TS `fail`. `extra` keys are merged into `error` last
 /// (Object.assign semantics — they may overwrite `code`/`message`).
-pub fn error_envelope(usage: bool, message: &str, kind: Option<&str>, extra: Option<Value>) -> Value {
+pub fn error_envelope(
+    usage: bool,
+    message: &str,
+    kind: Option<&str>,
+    extra: Option<Value>,
+) -> Value {
     let mut error = Map::new();
     error.insert(
         "code".to_string(),
