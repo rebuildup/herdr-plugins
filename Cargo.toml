@@ -4,6 +4,7 @@ members = [
     "crates/herdr-client",
     "crates/tui",
     "plugins/inbox",
+    "plugins/git",
 ]
 
 [workspace.package]
