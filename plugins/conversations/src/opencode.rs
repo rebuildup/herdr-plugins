@@ -127,6 +127,24 @@ fn is_db_name(name: &str) -> bool {
             .unwrap_or(false))
 }
 
+/// Approximation of JS `String.prototype.localeCompare` (ICU root
+/// collation) for the `is_db_name` charset `[A-Za-z0-9._-]`: punctuation
+/// (`-`, `_`, `.`) is "variable" and ignored at the primary level, and
+/// case is a tertiary difference — so the primary key is the
+/// lowercase-alphanumeric skeleton, with byte order as the tiebreak.
+/// Exact quaternary punctuation weighting is not replicated; ordering
+/// only matters when multiple opencode DBs coexist, and each scan
+/// filters rows by `session_id` regardless.
+fn db_name_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    fn primary(s: &str) -> String {
+        s.chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .flat_map(|c| c.to_lowercase())
+            .collect()
+    }
+    primary(a).cmp(&primary(b)).then_with(|| a.cmp(b))
+}
+
 /// All opencode databases under a data root, opencode.db first.
 fn find_databases(root: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(root) else {
@@ -139,7 +157,7 @@ fn find_databases(root: &Path) -> Vec<String> {
         .collect();
     candidates.sort_by(|a, b| {
         let rank = |n: &str| if n == "opencode.db" { 0 } else { 1 };
-        rank(a).cmp(&rank(b)).then_with(|| a.cmp(b))
+        rank(a).cmp(&rank(b)).then_with(|| db_name_cmp(a, b))
     });
     candidates
         .into_iter()
@@ -431,7 +449,13 @@ fn tool_result_from(state: Option<&Map<String, Value>>) -> ToolResult {
     if status != "completed" && status != "error" {
         return ToolResult { is_error, ..empty };
     }
-    let output = state.get("output").or_else(|| state.get("content"));
+    // TS `state.output ?? state.content`: `??` falls through on
+    // null/undefined — an explicit `output: null` must not shadow
+    // `content`.
+    let output = state
+        .get("output")
+        .filter(|v| !v.is_null())
+        .or_else(|| state.get("content").filter(|v| !v.is_null()));
     let (text, truncated) = content_text(output);
     ToolResult {
         text,
@@ -498,12 +522,11 @@ fn row_id(row: &MessageRow, prefix: &str) -> String {
 }
 
 fn parse_data(raw: &str, malformed: &mut u64) -> Option<Value> {
+    // TS `JSON.parse` + `asRecord`: only a parse *throw* counts as
+    // malformed; valid JSON that is not an object (array/scalar/null)
+    // returns null silently — callers skip it via `as_object()`.
     match serde_json::from_str::<Value>(raw) {
-        Ok(v) if v.is_object() => Some(v),
-        Ok(_) => {
-            *malformed += 1;
-            None
-        }
+        Ok(v) => Some(v),
         Err(_) => {
             *malformed += 1;
             None
@@ -679,7 +702,9 @@ fn assistant_events(
             event.text_truncated = Some(true);
         }
     }
-    if let Some(m) = model.or(fallback_model) {
+    // TS `if (finalModel)` — falsy ("") is omitted; `model_from` never
+    // yields "", but a bare empty `modelID` can reach here.
+    if let Some(m) = model.or(fallback_model).filter(|m| !m.is_empty()) {
         event.model = Some(m);
     }
     if let Some(u) = usage {
@@ -807,11 +832,15 @@ fn scan_v2(
                 let id = row_id(&row, "msg");
                 let mut event = ctx.base_event("system", timestamp, id);
                 event.subtype = Some("compaction".to_string());
+                // TS `if (summary)` — empty string is falsy and emits
+                // no text at all.
                 if let Some(Value::String(summary)) = data.get("summary") {
-                    let (text, truncated) = bounded(summary, OPENCODE_MAX_TEXT_CHARS);
-                    event.text = Some(text);
-                    if truncated {
-                        event.text_truncated = Some(true);
+                    if !summary.is_empty() {
+                        let (text, truncated) = bounded(summary, OPENCODE_MAX_TEXT_CHARS);
+                        event.text = Some(text);
+                        if truncated {
+                            event.text_truncated = Some(true);
+                        }
                     }
                 }
                 events.push(event);

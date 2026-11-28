@@ -1333,7 +1333,10 @@ fn render_events(list: &mut EventList, frame: &mut ratatui::Frame, area: Rect) {
 
     if let Some(err) = &list.error {
         out.push(Line::from(Span::styled(
-            format!("  error: {}", clip(err, width.saturating_sub(10))),
+            format!(
+                "  error: {}",
+                clip(&sanitize_display(err), width.saturating_sub(10))
+            ),
             Style::default().fg(Color::Red),
         )));
         out.push(Line::from(Span::styled(
@@ -1341,13 +1344,15 @@ fn render_events(list: &mut EventList, frame: &mut ratatui::Frame, area: Rect) {
             Style::default().add_modifier(Modifier::DIM),
         )));
     } else if list.rows.is_empty() {
+        // empty_text embeds session keys/status or the raw search query —
+        // untrusted/provider-derived, sanitize before render.
         out.push(Line::from(Span::styled(
-            format!("  {}", list.empty_text),
+            format!("  {}", sanitize_display(&list.empty_text)),
             Style::default().add_modifier(Modifier::DIM),
         )));
         for n in list.notes.iter().take(3) {
             out.push(Line::from(Span::styled(
-                format!("  {}", clip(n, width.saturating_sub(4))),
+                format!("  {}", clip(&sanitize_display(n), width.saturating_sub(4))),
                 Style::default().add_modifier(Modifier::DIM),
             )));
         }
@@ -1398,7 +1403,7 @@ fn render_events(list: &mut EventList, frame: &mut ratatui::Frame, area: Rect) {
         let note_budget = height.saturating_sub(out.len() + 2);
         for n in list.notes.iter().take(note_budget) {
             out.push(Line::from(Span::styled(
-                format!("  {}", clip(n, width.saturating_sub(4))),
+                format!("  {}", clip(&sanitize_display(n), width.saturating_sub(4))),
                 Style::default().add_modifier(Modifier::DIM),
             )));
         }

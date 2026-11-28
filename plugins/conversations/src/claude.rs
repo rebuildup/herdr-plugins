@@ -75,7 +75,8 @@ fn file_exists(file: &Path) -> bool {
 /// when nothing matches — callers must report `missing`, never guess.
 pub fn resolve_claude_transcript(session_id: &str, cwd: Option<&str>) -> Option<String> {
     // Defensive: a value that is already a readable file path.
-    if (session_id.contains('/') || session_id.contains('\\')) && file_exists(Path::new(session_id)) {
+    if (session_id.contains('/') || session_id.contains('\\')) && file_exists(Path::new(session_id))
+    {
         return Some(session_id.to_string());
     }
     let projects_dir = claude_projects_dir();
@@ -540,5 +541,9 @@ mod tests {
             bounded("a\u{1F600}b", 4),
             ("a\u{1F600}b".to_string(), false)
         );
+        // Boundary: max lands between the surrogate halves — the whole
+        // scalar is dropped, never split into a lone surrogate.
+        assert_eq!(bounded("a\u{1F600}b", 2), ("a".to_string(), true));
+        assert_eq!(bounded("\u{1F600}", 1), ("".to_string(), true));
     }
 }

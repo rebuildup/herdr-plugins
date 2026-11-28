@@ -44,13 +44,24 @@ needed no change.
   `packages` at the pinned pre-removal commit, runs both
   implementations against the same fake socket and fresh state dirs,
   and deep-compares normalized stdout JSON, exit codes, final
-  `state.json`, and every `events/*.jsonl` byte. Result: **40/40 checks
-  identical** (usage-errors ×6, capability, index-all-providers,
+  `state.json`, and every `events/*.jsonl` line (each line parsed and
+  key-sorted before comparison). Result: **40/40 checks identical**
+  (usage-errors ×6, capability, index-all-providers,
   read-claude ×9, read-codex-opencode ×6, tui-fallback ×2, plus
   per-scenario state/events parity). Re-run: `bun
   scripts/diff-conversations.ts`.
 
-Parity work that made byte-identical output possible (all in this PR):
+**Parity boundary (honest scope):** the harness proves *normalized
+JSON/schema parity* — same fields, values, counts, cursors, and exit
+behavior — not byte-level identity. `serde_json::Map` is a `BTreeMap`
+(keys sorted; `preserve_order` is not enabled), so object key order
+inside emitted JSON can differ from JS insertion order, and float
+formatting follows serde rules. All consumers parse JSON, so this is
+safe; it is documented here rather than "fixed" because byte-order
+parity would require `preserve_order` + hand-rolled number emission
+for zero consumer benefit.
+
+Parity work that made normalized-identical output possible (all in this PR):
 
 - `state_change_seq`/`cost_usd` serialize with JS `JSON.stringify`
   number semantics — serde's `1.0` vs JS `1` cost +2 bytes/event-line
@@ -178,7 +189,7 @@ Notes:
   faster. A `simd-json`/streaming-parse follow-up is the obvious next
   step if miss-scan latency matters.
 - **First-build index is ~2× slower** (one-time cost per transcript;
-  writes are identical bytes). The hot path — `refresh`/incremental
+  normalized output is identical). The hot path — `refresh`/incremental
   reindex, which is what hooks and repeated `index` calls actually
   pay — is ~10× faster because cursors skip unchanged bytes instead of
   re-statting/re-hashing every transcript.
@@ -197,6 +208,11 @@ Notes:
   no CI freshness gate yet — same follow-up as `bin/inbox`.
 - Search-miss full-scan parse cost (§5) — candidate for `simd-json` or
   a two-phase raw-line prefilter that respects JSON escaping.
+- opencode DB discovery order approximates `localeCompare` (ICU root)
+  via a lowercase-alphanumeric skeleton + byte tiebreak
+  (`db_name_cmp`); exact quaternary punctuation weighting is not
+  replicated. Impact is nil in practice — each scan filters rows by
+  `session_id`, so at most one DB can contain a given session.
 - First-build index cost (§5) — candidate for parallel per-session
   scans or cheaper event materialization.
 - ~~Managed-install verification~~ — done post-push (§4).
@@ -210,8 +226,9 @@ Notes:
 The TS implementation is intact at `4d6e08c~1` (`8ddb7db`). To roll a
 user installation back: `herdr plugin install
 rebuildup/hoxay-plugins/plugins/conversations --ref <previous-release-sha>`.
-`state.json` + `events/*.jsonl` are byte-format compatible in both
-directions (the diff harness compares them byte-for-byte), so no state
+`state.json` + `events/*.jsonl` are schema-compatible in both
+directions (the diff harness proves normalized parity — parsed,
+key-sorted JSON equality, not byte identity; see §2), so no state
 migration is needed either direction. Sibling plugins fall back to
 `bun src/cli.ts` automatically if a checkout without `bin/` is
 resolved.

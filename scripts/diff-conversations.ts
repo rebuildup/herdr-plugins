@@ -359,6 +359,59 @@ const OC_T0 = 1767225600000;
       tokens: { input: 100, output: 20, reasoning: 5, cache: { read: 50, write: 0 } },
     }),
   );
+  // Edge cases pinned by review: `output: null` must fall back to
+  // `content` (TS `??`), empty `summary`/`modelID` emit nothing, and
+  // valid-JSON non-object `data` is skipped without counting malformed.
+  insertMsg.run(
+    "msg_c1",
+    OPENCODE_SESSION,
+    "compaction",
+    3,
+    OC_T0 + 4,
+    OC_T0 + 4,
+    JSON.stringify({ time: { created: OC_T0 + 4 }, summary: "" }),
+  );
+  insertMsg.run(
+    "msg_a2",
+    OPENCODE_SESSION,
+    "assistant",
+    4,
+    OC_T0 + 5,
+    OC_T0 + 5,
+    JSON.stringify({
+      time: { created: OC_T0 + 5 },
+      modelID: "",
+      content: [{ type: "text", text: "edge case" }],
+    }),
+  );
+  insertMsg.run(
+    "msg_a3",
+    OPENCODE_SESSION,
+    "assistant",
+    5,
+    OC_T0 + 6,
+    OC_T0 + 6,
+    JSON.stringify({
+      time: { created: OC_T0 + 6 },
+      content: [
+        {
+          type: "tool",
+          callID: "call-null-out",
+          name: "bash",
+          state: {
+            status: "completed",
+            input: { command: "pwd" },
+            output: null,
+            content: [{ type: "text", text: "via-content-fallback" }],
+          },
+        },
+      ],
+    }),
+  );
+  // Valid JSON but not an object — skipped silently (no malformed++).
+  insertMsg.run("msg_x1", OPENCODE_SESSION, "assistant", 6, OC_T0 + 7, OC_T0 + 7, "123");
+  // Invalid JSON — counted malformed on both sides.
+  insertMsg.run("msg_x2", OPENCODE_SESSION, "assistant", 7, OC_T0 + 8, OC_T0 + 8, "{broken json");
   db.close();
 }
 
