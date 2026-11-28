@@ -554,6 +554,18 @@ describe("git native CLI: git reads over fake herdr", () => {
     git("add", ".");
     git("commit", "-qm", "init");
     writeFileSync(path.join(repoDir, "a.txt"), "one\ntwo\nchanged\n");
+    // Staged binary rename: exercises the `git diff --numstat -z`
+    // rename record (`-\t-\t\0old\0new\0`) — `files[].binary` must be
+    // true for the NEW path.
+    writeFileSync(
+      path.join(repoDir, "logo.png"),
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x02, 0xff]),
+    );
+    git("add", "logo.png");
+    git("commit", "-qm", "add logo");
+    git("mv", "logo.png", "logo-renamed.png");
+    // Stage c.txt only after the logo commit — committing earlier would
+    // sweep the staged c.txt into "add logo" and leave it clean.
     writeFileSync(path.join(repoDir, "c.txt"), "new\n");
     git("add", "c.txt");
 
@@ -657,6 +669,24 @@ describe("git native CLI: git reads over fake herdr", () => {
     const paths = arr.map((f) => f.path);
     expect(paths).toContain("a.txt");
     expect(paths).toContain("c.txt");
+  });
+
+  test("files marks a renamed binary path binary:true (numstat -z rename)", async () => {
+    const { status, stdout } = await run(["files", "w1:p1"]);
+    expect(status).toBe(0);
+    const doc = JSON.parse(stdout) as {
+      files?: Array<{
+        path: string;
+        oldPath?: string | null;
+        kind?: string;
+        binary?: boolean | null;
+      }>;
+    };
+    const entry = (doc.files ?? []).find((f) => f.path === "logo-renamed.png");
+    expect(entry).toBeDefined();
+    expect(entry?.oldPath).toBe("logo.png");
+    expect(entry?.kind).toBe("renamed");
+    expect(entry?.binary).toBe(true);
   });
 
   test("log returns bounded commit list", async () => {

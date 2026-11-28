@@ -3084,7 +3084,7 @@ fn tui_main(args: &[String]) -> i32 {
         // on a pipe. The CLI is the non-interactive path.
         eprintln!(
             "git-tui: interactive UI requires a TTY.\n\
-             Use the CLI instead: bin/git status|files|diff|log|compare|stage|commit|branch|push <pane_id>"
+             Use the CLI instead: git status|files|diff|log|compare|stage|commit|branch|push <pane_id>"
         );
         return 1;
     }

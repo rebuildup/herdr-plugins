@@ -766,6 +766,28 @@ fn run_cli(args: &[String], timeout_ms: u64) -> Result<Value, CliError> {
         kind: "cli_spawn_error".to_string(),
         message: e.to_string(),
     })?;
+    // Drain both pipes on reader threads BEFORE waiting: a child that
+    // writes more than the pipe buffer (~64 KiB — reachable via `pr
+    // logs`, `diff`, `compare`, unbounded `files`) would otherwise
+    // deadlock against the try_wait loop below.
+    let (tx_out, rx_out) = std::sync::mpsc::channel::<String>();
+    if let Some(mut o) = child.stdout.take() {
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut s = String::new();
+            let _ = o.read_to_string(&mut s);
+            tx_out.send(s).ok();
+        });
+    }
+    let (tx_err, rx_err) = std::sync::mpsc::channel::<String>();
+    if let Some(mut e) = child.stderr.take() {
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut s = String::new();
+            let _ = e.read_to_string(&mut s);
+            tx_err.send(s).ok();
+        });
+    }
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     let status = loop {
         match child.try_wait() {
@@ -789,16 +811,10 @@ fn run_cli(args: &[String], timeout_ms: u64) -> Result<Value, CliError> {
             }
         }
     };
-    let mut stdout = String::new();
-    let mut stderr = String::new();
-    if let Some(mut o) = child.stdout.take() {
-        use std::io::Read;
-        let _ = o.read_to_string(&mut stdout);
-    }
-    if let Some(mut e) = child.stderr.take() {
-        use std::io::Read;
-        let _ = e.read_to_string(&mut stderr);
-    }
+    // Child exited → pipes hit EOF → readers have finished (or are about
+    // to); recv cannot block indefinitely.
+    let stdout = rx_out.recv().unwrap_or_default();
+    let stderr = rx_err.recv().unwrap_or_default();
     parse_cli_envelope(&stdout, &stderr, status.code().unwrap_or(-1))
 }
 

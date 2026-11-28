@@ -21,6 +21,12 @@
  * Documented intentional divergences (stripped on both sides, covered by
  * tests/git-native.test.ts instead):
  *   - `version` in capability: TS reports 0.6.0, Rust 0.7.0.
+ *   - `requires` in capability: TS reports {"git":true,"bun":true}; the
+ *     native binary needs no Bun, so Rust reports {"git":true}.
+ *
+ * Both stdout AND stderr are compared: handled errors emit a JSON
+ * envelope `{contract, ok:false, error:{code,message}}` on stderr, so
+ * error-kind/code/message parity is verified, not just exit codes.
  *
  * Usage:
  *   bun scripts/diff-git.ts [--ts-commit <sha>] [--keep]
@@ -434,6 +440,12 @@ function scrubPathsInit(tsDirs: Dirs, rsDirs: Dirs) {
     rsDirs.configDir,
     realpathSync(path.dirname(tsDirs.stateDir)),
     realpathSync(path.dirname(rsDirs.stateDir)),
+    // stderr may embed the invoked binary/script paths (spawn errors,
+    // bun diagnostics).
+    rustBin,
+    realpathSync(rustBin),
+    tsRoot,
+    realpathSync(tsRoot),
   ];
   scrubPaths = [...new Set(candidates.filter(Boolean))].sort((a, b) => b.length - a.length);
 }
@@ -492,6 +504,28 @@ function parseJsonOrText(stdout: string): unknown {
   }
 }
 
+// stderr carries either nothing (success) or a single-line JSON error
+// envelope `{contract, ok:false, error:{...}}`; fall back to per-line
+// normalization for anything else (git stderr passthrough, panics).
+function normalizeStderr(stderr: string): unknown {
+  const trimmed = stderr.trim();
+  if (trimmed === "") return "";
+  try {
+    return normalize(JSON.parse(trimmed));
+  } catch {
+    // not a single JSON doc — normalize each line independently
+    return trimmed.split("\n").map((line) => {
+      const t = line.trim();
+      if (t === "") return "";
+      try {
+        return normalize(JSON.parse(t));
+      } catch {
+        return scrubString(t);
+      }
+    });
+  }
+}
+
 // --- scenarios ---------------------------------------------------------------
 
 const SCENARIOS: { name: string; steps: Step[] }[] = [
@@ -516,8 +550,10 @@ const SCENARIOS: { name: string; steps: Step[] }[] = [
       {
         rs: ["capability"],
         ts: ["capability"],
-        // Intentional 0.6.0 -> 0.7.0 bump; covered by contract tests.
-        strip: ["version"],
+        // Intentional divergences: 0.6.0 -> 0.7.0 version bump, and
+        // requires {"git","bun"} -> {"git"} (the native binary needs no
+        // Bun). Covered by contract tests.
+        strip: ["version", "requires"],
       },
     ],
   },
@@ -696,15 +732,18 @@ for (const scenario of SCENARIOS) {
     const [ts, rs] = await Promise.all([runTs(step, tsEnv), runRust(step, rsEnv)]);
     const tsNorm = normalize(parseJsonOrText(ts.stdout), undefined, strip);
     const rsNorm = normalize(parseJsonOrText(rs.stdout), undefined, strip);
+    const tsErr = normalizeStderr(ts.stderr);
+    const rsErr = normalizeStderr(rs.stderr);
     const sameStatus = ts.status === rs.status;
     const stdoutDiff = diffJson(tsNorm, rsNorm);
-    if (sameStatus && stdoutDiff === null) {
+    const stderrDiff = diffJson(tsErr, rsErr);
+    if (sameStatus && stdoutDiff === null && stderrDiff === null) {
       report(true, label);
     } else {
       report(
         false,
         label,
-        `  status ts=${ts.status} rs=${rs.status}\n${stdoutDiff ?? ""}\n  ts.stderr: ${ts.stderr.slice(0, 300)}\n  rs.stderr: ${rs.stderr.slice(0, 300)}`,
+        `  status ts=${ts.status} rs=${rs.status}\nstdout diff:\n${stdoutDiff ?? ""}\nstderr diff:\n${stderrDiff ?? ""}`,
       );
     }
   }

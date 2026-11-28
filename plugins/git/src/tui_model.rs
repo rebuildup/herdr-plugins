@@ -540,7 +540,7 @@ mod tests {
                 Some(2),
                 Some(0)
             )),
-            "main -> origin/main ahead 2 up to date"
+            "main -> origin/main ahead 2"
         );
         assert_eq!(
             format_branch_line(&branch(

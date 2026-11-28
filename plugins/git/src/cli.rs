@@ -2702,7 +2702,7 @@ pub fn cmd_capability(options: &mut CliOptions) -> Result<Value, RunError> {
             "stage", "unstage", "commit", "branch", "upstream", "fetch",
             "push", "pr", "issue",
         ],
-        "requires": { "git": true, "bun": true },
+        "requires": { "git": true },
         "defaults": {
             "timeoutMs": config.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS),
             "remoteTimeoutMs": config.remote_timeout_ms.unwrap_or(DEFAULT_REMOTE_TIMEOUT_MS),

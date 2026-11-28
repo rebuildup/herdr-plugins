@@ -39,12 +39,14 @@ not-yet-migrated checkouts:
 
 ## 2. Contract parity evidence
 
-- `tests/git-native.test.ts` — 24 spawn-based contract tests against a
+- `tests/git-native.test.ts` — 25 spawn-based contract tests against a
   fake herdr socket (same NDJSON protocol the TS suites used) plus a
   stub `gh`: strict usage errors (exit 2) across every command,
   `capability` shape, `pane_not_found`/`not_a_repo`/`gh_missing` honest
   failure kinds, git reads (`status`/`files`/`log`/`diff`/`compare`)
-  against a real fixture repo, forge reads (`pr list|view`,
+  against a real fixture repo (including a staged binary rename
+  exercising the `--numstat -z` rename record), forge reads
+  (`pr list|view`,
   `issue list|view`) through the stub, a real stage+commit mutation
   round-trip, the non-TTY `tui` fallback, and `issue
   link|links|unlink` delegation to the real `rebuildup.inbox` native
@@ -69,10 +71,14 @@ not-yet-migrated checkouts:
   identical** across usage errors, capability, git reads, git mutations
   (stage/commit/branch/upstream/fetch/push), forge reads, forge
   mutations, and both non-TTY TUI fallbacks. Documented intentional
-  divergences normalized by the harness: `version` (0.6.0 → 0.7.0) and
-  the non-TTY hint's CLI invocation name (`bun run src/cli.ts` →
-  `git`). Volatile fields (timestamps, SHAs, pane ids, tmp paths) are
-  normalized; everything else is byte-compared after key sorting.
+  divergences normalized by the harness: `version` (0.6.0 → 0.7.0),
+  `requires` (`{git,bun}` → `{git}` — the native binary needs no Bun),
+  and the non-TTY hint's CLI invocation name (`bun run src/cli.ts` →
+  `git`). Volatile fields (timestamps, SHAs, pane ids, tmp paths,
+  invoked-binary paths in stderr) are normalized; **both stdout and
+  stderr are compared** — handled errors emit a JSON envelope on
+  stderr, so error kind/code/message parity is verified, not just exit
+  codes.
 
 ## 3. Bugs found by the port (all fixed)
 
@@ -89,6 +95,26 @@ not-yet-migrated checkouts:
    closed with `target_conflict` (verified live during perf runs — the
    first naive measurement attempt hit this guard, not the live
    session).
+3. **Stdin-write deadlocks (acceptance phase).** `spawn_bounded`,
+   `run_stream_bounded`, and the forge TUI's `run_cli` wrote child
+   stdin synchronously and drained stdout/stderr only after
+   `try_wait`/exit — a payload larger than the ~64 KiB pipe buffer (or
+   a chatty child like `pr logs`/`diff`) could deadlock both directions.
+   stdin is now written on a helper thread and the forge subprocess
+   pipes are drained on reader threads before the wait loop.
+4. **`git diff --numstat -z` rename record misparsed.** The parser
+   skipped two tokens after an empty inline path instead of consuming
+   old+new correctly, dropping rename entries; `files[].binary` for
+   renamed binaries was wrong. Fixed and covered by the
+   `files marks a renamed binary path binary:true` contract test.
+5. **`capability.requires` still claimed `bun`.** The ported document
+   reported `{"git":true,"bun":true}`; the native binary needs no Bun,
+   so it now reports `{"git":true}` (the one remaining documented
+   divergence vs the TS 0.6.0 document, normalized in the diff
+   harness).
+6. **Non-TTY TUI hint named `bin/git`.** The fallback message printed
+   the on-disk path; it now prints `git`, matching the normalized TS
+   hint (`bun run src/cli.ts` → `git`).
 
 ## 4. Isolated-session verification (np292)
 

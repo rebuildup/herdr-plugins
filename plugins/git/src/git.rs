@@ -138,8 +138,14 @@ fn spawn_bounded(
 
     if let Some(input) = &opts.input {
         if let Some(mut stdin) = child.stdin.take() {
-            use std::io::Write;
-            let _ = stdin.write_all(input.as_bytes());
+            // Write on a thread: a large payload plus early child output
+            // could otherwise deadlock against the not-yet-spawned pipe
+            // readers below.
+            let data = input.clone();
+            std::thread::spawn(move || {
+                use std::io::Write;
+                let _ = stdin.write_all(data.as_bytes());
+            });
         }
     }
 
@@ -434,8 +440,13 @@ fn run_stream_bounded(
     })?;
     if let Some(input) = stdin_data {
         if let Some(mut stdin) = child.stdin.take() {
-            use std::io::Write;
-            let _ = stdin.write_all(input.as_bytes());
+            // Write on a thread so a large payload cannot deadlock
+            // against the stdout/stderr readers spawned below.
+            let data = input.to_string();
+            std::thread::spawn(move || {
+                use std::io::Write;
+                let _ = stdin.write_all(data.as_bytes());
+            });
         }
     }
     let mut stdout_pipe = child.stdout.take().expect("stdout piped");
@@ -793,9 +804,12 @@ pub fn parse_numstat_z(output: &str) -> (HashSet<String>, HashMap<String, (i64, 
         }
         let mut path = inline.to_string();
         if inline.is_empty() {
-            // Rename/copy: next two NUL fields are old then new path.
-            i += 2;
+            // Rename/copy: `i` already points at the old path; the new
+            // path is the next token. Consume both so the loop lands on
+            // the following record's header.
+            i += 1;
             path = tokens.get(i).copied().unwrap_or("").to_string();
+            i += 1;
         }
         if path.is_empty() {
             continue;
