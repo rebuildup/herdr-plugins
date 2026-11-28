@@ -889,6 +889,52 @@ describe("git native CLI: issue tracker delegation", () => {
     });
   }, 60_000);
 
+  test("issue links falls back to src/cli.ts on a pre-#291 inbox checkout", async () => {
+    // TS-only inbox root: herdr-plugin.toml + src/cli.ts, no bin/.
+    // Mirrors the fallback coverage the retired tests/git-issue.test.ts
+    // had for plugins/git/src/inbox.ts — the Rust inboxlink resolver
+    // must accept the root and run_inbox_cli must fall back to
+    // `bun src/cli.ts` (same semantics as plugins/projects'
+    // inbox-source.ts on release-0-13-0).
+    const tsOnlyRoot = path.join(workdir, "inbox-ts-only");
+    mkdirSync(path.join(tsOnlyRoot, "src"), { recursive: true });
+    writeFileSync(
+      path.join(tsOnlyRoot, "herdr-plugin.toml"),
+      'id = "rebuildup.inbox"\nname = "Inbox"\nversion = "0.0.0-test"\n',
+    );
+    writeFileSync(
+      path.join(tsOnlyRoot, "src", "cli.ts"),
+      [
+        "const links = {",
+        '  via: "src-cli-ts",',
+        "  plugin_id: process.env.HERDR_PLUGIN_ID ?? null,",
+        "};",
+        "console.log(JSON.stringify({ links }));",
+        "",
+      ].join("\n"),
+    );
+    const configFile = path.join(pluginConfigDir, "config.json");
+    const original = readFileSync(configFile, "utf8");
+    writeFileSync(configFile, `${JSON.stringify({ inboxPluginRoot: tsOnlyRoot }, null, 2)}\n`);
+    try {
+      const runResult = await run(["issue", "links", "w1:p1"]);
+      expect(runResult.status).toBe(0);
+      const doc = JSON.parse(runResult.stdout) as {
+        delegated?: string;
+        links?: { via?: string; plugin_id?: string | null };
+      };
+      expect(doc.delegated).toBe("rebuildup.inbox");
+      // Reaching the stub at all proves is_plugin_root accepted a
+      // src/cli.ts-only root and run_inbox_cli took the bun fallback.
+      expect(doc.links?.via).toBe("src-cli-ts");
+      // run_inbox_cli pins the child's HERDR_PLUGIN_ID to the inbox id
+      // after scrubbing this plugin's HERDR_PLUGIN_* env.
+      expect(doc.links?.plugin_id).toBe("rebuildup.inbox");
+    } finally {
+      writeFileSync(configFile, original);
+    }
+  }, 60_000);
+
   test("issue link is a mutation: fails closed without a target", async () => {
     const runResult = await runCli(["issue", "link", "w1:p1", "octo/widgets#9"], env());
     expect(runResult.status).toBe(1);
