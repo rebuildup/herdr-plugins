@@ -19,7 +19,6 @@
  */
 
 import { spawn } from "node:child_process";
-import { statSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import path from "node:path";
 import {
@@ -72,11 +71,11 @@ function defaultConfigDir(pluginId: string): string {
 
 async function isPluginRoot(dir: string, pluginId: string): Promise<boolean> {
   try {
-    // Native layout (ADR-0035): committed bin/<plugin>; legacy TS layout:
-    // src/cli.ts run under bun. Either marks a usable plugin root.
-    const nativeBin = await stat(path.join(dir, "bin", pluginDirName(pluginId))).catch(() => null);
-    const tsCli = await stat(path.join(dir, "src", "cli.ts")).catch(() => null);
-    if (nativeBin?.isFile() !== true && tsCli?.isFile() !== true) return false;
+    // Native distribution (ADR-0035): prefer bin/<name>; src/cli.ts is
+    // the legacy Bun entrypoint fallback.
+    const bin = await stat(path.join(dir, "bin", pluginDirName(pluginId))).catch(() => null);
+    const cli = bin?.isFile() === true ? bin : await stat(path.join(dir, "src", "cli.ts"));
+    if (!cli.isFile()) return false;
     const tomlPath = path.join(dir, "herdr-plugin.toml");
     const toml = await stat(tomlPath).catch(() => null);
     if (toml === null || !toml.isFile()) return true; // cli.ts is enough signal
@@ -122,6 +121,13 @@ async function discoverViaHerdr(pluginId: string): Promise<string | null> {
     return null;
   }
   return null;
+}
+
+/** Prefer the native `bin/<name>`; fall back to `src/cli.ts`. */
+async function pluginCliPath(root: string, pluginId: string): Promise<string> {
+  const bin = path.join(root, "bin", pluginDirName(pluginId));
+  const info = await stat(bin).catch(() => null);
+  return info?.isFile() === true ? bin : path.join(root, "src", "cli.ts");
 }
 
 export interface PluginSource {
@@ -183,7 +189,7 @@ export async function resolvePluginSource(pluginId: string): Promise<ResolvePlug
     ok: true,
     source: {
       plugin_root: root,
-      cli_path: pluginCliPath(root, pluginId),
+      cli_path: await pluginCliPath(root, pluginId),
       state_dir: defaultStateDir(pluginId),
       config_dir: defaultConfigDir(pluginId),
       resolved_via: resolvedVia,
@@ -204,17 +210,6 @@ export interface RunPluginOptions {
   socketPath: string;
   /** Wall-clock budget for the child process (default 60s). */
   timeoutMs?: number | undefined;
-}
-
-/** Native plugins ship `bin/<name>`; legacy TS plugins `src/cli.ts`. */
-function pluginCliPath(root: string, pluginId: string): string {
-  const nativeBin = path.join(root, "bin", pluginDirName(pluginId));
-  try {
-    if (statSync(nativeBin).isFile()) return nativeBin;
-  } catch {
-    /* fall through to TS layout */
-  }
-  return path.join(root, "src", "cli.ts");
 }
 
 /**
@@ -257,10 +252,11 @@ export async function runPluginCli(
   const timeoutMs = options.timeoutMs ?? 60_000;
 
   const result = await new Promise<PluginCliResult>((resolvePromise, reject) => {
-    const isNative = source.cli_path.includes(`${path.sep}bin${path.sep}`);
+    // `.ts` entrypoints run under Bun; a native `bin/` path spawns directly.
+    const isTs = source.cli_path.endsWith(".ts");
     const child = spawn(
-      isNative ? source.cli_path : process.execPath,
-      isNative ? cliArgs : [source.cli_path, ...cliArgs],
+      isTs ? process.execPath : source.cli_path,
+      isTs ? [source.cli_path, ...cliArgs] : cliArgs,
       {
         cwd: source.plugin_root,
         env,
