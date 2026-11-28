@@ -832,15 +832,17 @@ fn record_identity_pane_id(record: &SessionRecord) -> Option<String> {
 }
 
 /// Session block shared by sessions/history/search/show/usage
-/// responses (TS `sessionReadEntry` + the `sessions` command entry).
-fn session_entry(record: &SessionRecord, live_ctx: Option<&LiveContext>) -> Value {
+/// responses. `with_events` mirrors the TS split: `sessionReadEntry`
+/// (history/search/show/usage) adds `events_present`; the `sessions`
+/// command entry does not.
+fn session_entry(record: &SessionRecord, live_ctx: Option<&LiveContext>, with_events: bool) -> Value {
     let live = record_identity_pane_id(record).and_then(|pid| {
         live_ctx
             .and_then(|c| c.live_by_pane.get(&pid))
             .cloned()
     });
     let (stale, reason) = binding_is_stale(record, live.as_ref());
-    json!({
+    let mut entry = json!({
         "key": record.key,
         "provider": record.provider,
         "provider_status": provider_descriptor(&record.provider)
@@ -866,7 +868,17 @@ fn session_entry(record: &SessionRecord, live_ctx: Option<&LiveContext>) -> Valu
         "last_event_at": record.last_event_at,
         "last_indexed_at": record.last_indexed_at,
         "transcript_present": path_exists(Path::new(&record.transcript_path)),
-    })
+    });
+    if with_events {
+        entry
+            .as_object_mut()
+            .unwrap()
+            .insert(
+                "events_present".to_string(),
+                json!(path_exists(&events_file_path(&record.key))),
+            );
+    }
+    entry
 }
 
 fn cmd_sessions(options: &CliOptions) -> Result<Value, RunError> {
@@ -883,7 +895,7 @@ fn cmd_sessions(options: &CliOptions) -> Result<Value, RunError> {
     records.sort_by(|a, b| b.last_event_at.cmp(&a.last_event_at));
     let sessions: Vec<Value> = records
         .iter()
-        .map(|r| session_entry(r, live_ctx.as_ref()))
+        .map(|r| session_entry(r, live_ctx.as_ref(), false))
         .collect();
     let count = sessions.len();
     Ok(json!({
@@ -1000,7 +1012,7 @@ fn cmd_history(options: &CliOptions) -> Result<Value, RunError> {
     Ok(json!({
         "contract": CONTRACT,
         "command": "history",
-        "session": session_entry(record, live_ctx.as_ref()),
+        "session": session_entry(record, live_ctx.as_ref(), true),
         "selector_note": note,
         "events": events,
         "page": {
@@ -1130,7 +1142,7 @@ fn run_paged_read(
 
     let sessions: Vec<Value> = records
         .iter()
-        .map(|r| session_entry(r, live_ctx.as_ref()))
+        .map(|r| session_entry(r, live_ctx.as_ref(), true))
         .collect();
 
     let results: Vec<Value> = scan
@@ -1377,7 +1389,7 @@ fn cmd_show(options: &CliOptions) -> Result<Value, RunError> {
 
     let sessions: Vec<Value> = records
         .iter()
-        .map(|r| session_entry(r, live_ctx.as_ref()))
+        .map(|r| session_entry(r, live_ctx.as_ref(), true))
         .collect();
     let results: Vec<Value> = scan
         .matches
