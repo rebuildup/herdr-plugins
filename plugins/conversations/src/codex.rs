@@ -118,7 +118,8 @@ fn find_session_file(
 /// nothing matches — callers must report `missing`, never guess.
 pub fn resolve_codex_transcript(session_id: &str, _cwd: Option<&str>) -> Option<String> {
     // Defensive: a value that is already a readable file path.
-    if (session_id.contains('/') || session_id.contains('\\')) && file_exists(Path::new(session_id)) {
+    if (session_id.contains('/') || session_id.contains('\\')) && file_exists(Path::new(session_id))
+    {
         return Some(session_id.to_string());
     }
     let home = codex_home_dir();

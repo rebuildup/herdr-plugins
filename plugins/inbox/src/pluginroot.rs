@@ -23,20 +23,27 @@ use serde_json::Value;
 
 /// This plugin's own root (`plugins/inbox`). Mirrors TS `pluginRoot()`:
 /// `HERDR_PLUGIN_ROOT` wins, otherwise the parent of the `bin/` dir the
-/// executable lives in.
+/// executable lives in. Only a real `bin/` parent is trusted — a
+/// cargo-built exe under `target/{debug,release}` falls through to the
+/// manifest dir, which IS the plugin root for in-repo builds.
 pub fn plugin_root() -> PathBuf {
     if let Some(env_root) = env_nonempty("HERDR_PLUGIN_ROOT") {
         return PathBuf::from(env_root);
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(bin_dir) = exe.parent() {
-            // bin/inbox → plugin root is the parent of bin.
-            if let Some(root) = bin_dir.parent() {
-                return root.to_path_buf();
+            // bin/inbox → plugin root is the parent of bin. Require the
+            // dir to actually be named `bin` so target/debug/inbox does
+            // not resolve to <repo>/target.
+            if bin_dir.file_name().is_some_and(|n| n == "bin") {
+                if let Some(root) = bin_dir.parent() {
+                    return root.to_path_buf();
+                }
             }
         }
     }
-    // Fallback for `cargo run` from the crate dir.
+    // Cargo-built exe (target/debug|release) or `cargo run`: the crate
+    // manifest dir is plugins/inbox itself.
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 

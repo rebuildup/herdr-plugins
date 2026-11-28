@@ -368,7 +368,9 @@
             "docs/research/git-pr-mutation-verification.md",
             "docs/research/git-pr-merge-verification.md",
             "docs/research/git-issue-verification.md",
-            "docs/research/tui-rc-0-11-0-verification.md"
+            "docs/research/tui-rc-0-11-0-verification.md",
+            "docs/research/git-native-rust.md",
+            "spikes/git-tui/evidence/"
           ],
           "upstream_gap": null,
           "notes": "status view per repo/pane — TUI surface in Git UI pane (#238)"
@@ -386,7 +388,9 @@
             "docs/research/git-pr-mutation-verification.md",
             "docs/research/git-pr-merge-verification.md",
             "docs/research/git-issue-verification.md",
-            "docs/research/tui-rc-0-11-0-verification.md"
+            "docs/research/tui-rc-0-11-0-verification.md",
+            "docs/research/git-native-rust.md",
+            "spikes/git-tui/evidence/"
           ],
           "upstream_gap": null,
           "notes": "changed-file list feeding diff viewer — TUI surface in Git UI pane (#238)"
@@ -404,7 +408,9 @@
             "docs/research/git-pr-mutation-verification.md",
             "docs/research/git-pr-merge-verification.md",
             "docs/research/git-issue-verification.md",
-            "docs/research/tui-rc-0-11-0-verification.md"
+            "docs/research/tui-rc-0-11-0-verification.md",
+            "docs/research/git-native-rust.md",
+            "spikes/git-tui/evidence/"
           ],
           "upstream_gap": null,
           "notes": "bounded patch view; terminal-friendly already — TUI surface in Git UI pane (#238)"
@@ -422,7 +428,9 @@
             "docs/research/git-pr-mutation-verification.md",
             "docs/research/git-pr-merge-verification.md",
             "docs/research/git-issue-verification.md",
-            "docs/research/tui-rc-0-11-0-verification.md"
+            "docs/research/tui-rc-0-11-0-verification.md",
+            "docs/research/git-native-rust.md",
+            "spikes/git-tui/evidence/"
           ],
           "upstream_gap": null,
           "notes": "commit history / compare base — TUI surface in Git UI pane (#238)"
@@ -440,7 +448,9 @@
             "docs/research/git-pr-mutation-verification.md",
             "docs/research/git-pr-merge-verification.md",
             "docs/research/git-issue-verification.md",
-            "docs/research/tui-rc-0-11-0-verification.md"
+            "docs/research/tui-rc-0-11-0-verification.md",
+            "docs/research/git-native-rust.md",
+            "spikes/git-tui/evidence/"
           ],
           "upstream_gap": null,
           "notes": "branch comparison — TUI surface in Git UI pane (#238)"
@@ -458,7 +468,9 @@
             "docs/research/git-pr-mutation-verification.md",
             "docs/research/git-pr-merge-verification.md",
             "docs/research/git-issue-verification.md",
-            "docs/research/tui-rc-0-11-0-verification.md"
+            "docs/research/tui-rc-0-11-0-verification.md",
+            "docs/research/git-native-rust.md",
+            "spikes/git-tui/evidence/"
           ],
           "upstream_gap": null,
           "notes": "per-file stage; needs confirm on bulk — TUI surface in Git UI pane (#238)"
@@ -476,7 +488,9 @@
             "docs/research/git-pr-mutation-verification.md",
             "docs/research/git-pr-merge-verification.md",
             "docs/research/git-issue-verification.md",
-            "docs/research/tui-rc-0-11-0-verification.md"
+            "docs/research/tui-rc-0-11-0-verification.md",
+            "docs/research/git-native-rust.md",
+            "spikes/git-tui/evidence/"
           ],
           "upstream_gap": null,
           "notes": "per-file unstage — TUI surface in Git UI pane (#238)"
@@ -494,7 +508,9 @@
             "docs/research/git-pr-mutation-verification.md",
             "docs/research/git-pr-merge-verification.md",
             "docs/research/git-issue-verification.md",
-            "docs/research/tui-rc-0-11-0-verification.md"
+            "docs/research/tui-rc-0-11-0-verification.md",
+            "docs/research/git-native-rust.md",
+            "spikes/git-tui/evidence/"
           ],
           "upstream_gap": null,
           "notes": "commit editor surface; irreversible-ish -> confirm — TUI surface in Git UI pane (#238)"
@@ -512,7 +528,9 @@
             "docs/research/git-pr-mutation-verification.md",
             "docs/research/git-pr-merge-verification.md",
             "docs/research/git-issue-verification.md",
-            "docs/research/tui-rc-0-11-0-verification.md"
+            "docs/research/tui-rc-0-11-0-verification.md",
+            "docs/research/git-native-rust.md",
+            "spikes/git-tui/evidence/"
           ],
           "upstream_gap": null,
           "notes": "branch ops (create/switch/delete guards) — TUI surface in Git UI pane (#238)"
@@ -530,7 +548,9 @@
             "docs/research/git-pr-mutation-verification.md",
             "docs/research/git-pr-merge-verification.md",
             "docs/research/git-issue-verification.md",
-            "docs/research/tui-rc-0-11-0-verification.md"
+            "docs/research/tui-rc-0-11-0-verification.md",
+            "docs/research/git-native-rust.md",
+            "spikes/git-tui/evidence/"
           ],
           "upstream_gap": null,
           "notes": "set/unset upstream — TUI surface in Git UI pane (#238)"
@@ -548,7 +568,9 @@
             "docs/research/git-pr-mutation-verification.md",
             "docs/research/git-pr-merge-verification.md",
             "docs/research/git-issue-verification.md",
-            "docs/research/tui-rc-0-11-0-verification.md"
+            "docs/research/tui-rc-0-11-0-verification.md",
+            "docs/research/git-native-rust.md",
+            "spikes/git-tui/evidence/"
           ],
           "upstream_gap": null,
           "notes": "fetch remotes — TUI surface in Git UI pane (#238)"
@@ -566,7 +588,9 @@
             "docs/research/git-pr-mutation-verification.md",
             "docs/research/git-pr-merge-verification.md",
             "docs/research/git-issue-verification.md",
-            "docs/research/tui-rc-0-11-0-verification.md"
+            "docs/research/tui-rc-0-11-0-verification.md",
+            "docs/research/git-native-rust.md",
+            "spikes/git-tui/evidence/"
           ],
           "upstream_gap": null,
           "notes": "push; --force guarded, confirm required — TUI surface in Git UI pane (#238)"
@@ -584,7 +608,9 @@
             "docs/research/git-pr-mutation-verification.md",
             "docs/research/git-pr-merge-verification.md",
             "docs/research/git-issue-verification.md",
-            "docs/research/tui-rc-0-11-0-verification.md"
+            "docs/research/tui-rc-0-11-0-verification.md",
+            "docs/research/git-native-rust.md",
+            "spikes/git-tui/evidence/"
           ],
           "upstream_gap": null,
           "notes": "remote list — TUI surface in Git UI pane (#238)"
@@ -602,7 +628,9 @@
             "docs/research/git-pr-mutation-verification.md",
             "docs/research/git-pr-merge-verification.md",
             "docs/research/git-issue-verification.md",
-            "docs/research/tui-rc-0-11-0-verification.md"
+            "docs/research/tui-rc-0-11-0-verification.md",
+            "docs/research/git-native-rust.md",
+            "spikes/git-tui/evidence/"
           ],
           "upstream_gap": null,
           "notes": "forge TUI pane 'forge': list/status/view + comments/reviews/checks/logs reads, confirm-gated create/review/comment/reply/reviewers/merge with fresh --expect-head revalidation; merge keeps release-train guard; repo-status TUI still planned:#230"
@@ -620,7 +648,9 @@
             "docs/research/git-pr-mutation-verification.md",
             "docs/research/git-pr-merge-verification.md",
             "docs/research/git-issue-verification.md",
-            "docs/research/tui-rc-0-11-0-verification.md"
+            "docs/research/tui-rc-0-11-0-verification.md",
+            "docs/research/git-native-rust.md",
+            "spikes/git-tui/evidence/"
           ],
           "upstream_gap": null,
           "notes": "forge TUI pane 'forge': list/view + confirm-gated create/edit/comment/close-reopen with updated_at drift revalidation (no head sha analog); pane link/unlink/links stay CLI-only"
@@ -637,7 +667,9 @@
             "docs/research/git-pr-read-verification.md",
             "docs/research/git-pr-mutation-verification.md",
             "docs/research/git-pr-merge-verification.md",
-            "docs/research/git-issue-verification.md"
+            "docs/research/git-issue-verification.md",
+            "docs/research/git-native-rust.md",
+            "spikes/git-tui/evidence/"
           ],
           "upstream_gap": null,
           "notes": "pane metadata projection refresh; agent-facing, no interactive TUI surface"
@@ -654,7 +686,9 @@
             "docs/research/git-pr-read-verification.md",
             "docs/research/git-pr-mutation-verification.md",
             "docs/research/git-pr-merge-verification.md",
-            "docs/research/git-issue-verification.md"
+            "docs/research/git-issue-verification.md",
+            "docs/research/git-native-rust.md",
+            "spikes/git-tui/evidence/"
           ],
           "upstream_gap": null,
           "notes": "discovery document"

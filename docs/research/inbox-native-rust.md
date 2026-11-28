@@ -25,10 +25,13 @@ the honest scope until binaries for other targets exist and are verified.
 
 Manifest (`herdr-plugin.toml`) entrypoints, `[[actions]]`, `[[events]]`,
 `[[panes]]`, and `[[startup]]` all run `./bin/inbox ...`. Sibling
-plugins that delegated to inbox (`plugins/git/src/inbox.ts`,
-`plugins/projects/src/inbox-source.ts`, `plugins/checkpoints/src/auto.ts`)
-now resolve and spawn `bin/inbox` with a `bun src/cli.ts` fallback for
-any not-yet-migrated checkout.
+plugins that delegate to inbox (`plugins/git/src/inbox.ts` issue
+link/unlink/links, `plugins/projects/src/inbox-source.ts` settle
+triggers) resolve either CLI entrypoint — `bin/inbox` native, or
+`src/cli.ts` under Bun for pre-#291 TS-only checkouts — so an older
+inbox install keeps working (independent plugin lifecycle).
+`plugins/checkpoints/src/auto.ts` is NOT a consumer: it only mirrors
+inbox's organize/generation semantics in comments.
 
 ## 2. Contract parity evidence
 
@@ -130,8 +133,10 @@ path are identical), same harness (`scripts/perf/measure.ts`,
 
 Notes:
 
-- `inbox list` p99 showed one 418 ms outlier under shared-machine load;
-  p50/p95 are the stable signals per the baseline doc's own guidance.
+- `inbox list` tail latency in the committed sample
+  (`30-inbox-list-native.json`): p99 = max = 139 ms — no large
+  outliers; p50/p95 remain the stable signals per the baseline doc's
+  own guidance.
 - TUI numbers are post-fix (the `terminal.clear()` removal in §3.3);
   the pre-fix probe measured data_usable ≈ 2015 ms uniformly (the DSR
   stall), which is why that one-line-class fix matters beyond the
@@ -175,6 +180,10 @@ Notes:
 - `packages/tui` (TS) remains for the other plugins; `crates/tui` is
   currently a safety-helper crate only — the app-shell extraction waits
   for a second native consumer per ADR-0036.
+- The TUI restores the terminal on `q`/Esc exit and on render errors,
+  but a SIGKILL/SIGTERM mid-frame can leave the PTY in raw mode +
+  alternate screen — a known ratatui/crossterm caveat, same class as
+  the TS implementation's behavior.
 
 ## 7. Rollback
 

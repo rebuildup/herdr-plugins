@@ -1137,6 +1137,8 @@ fn spawn_snooze_wake(options: &CliOptions, until: DateTime<Utc>) -> Option<Strin
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
+        // SAFETY: pre_exec runs in the forked child before exec; setsid
+        // only changes session/process-group ids — no memory is touched.
         unsafe {
             cmd.pre_exec(|| {
                 libc::setsid();
