@@ -184,11 +184,7 @@ fn pr_select_item(pr: &Value) -> (String, String) {
     let detail = [
         format!("number: {number}"),
         format!("title: {title}"),
-        format!(
-            "state: {}{}",
-            state,
-            if draft { " (draft)" } else { "" }
-        ),
+        format!("state: {}{}", state, if draft { " (draft)" } else { "" }),
         format!("author: {}", author_of(pr.get("author"))),
         format!(
             "head: {} → base: {}",
@@ -217,7 +213,11 @@ fn issue_select_item(issue: &Value) -> (String, String) {
     } else {
         format!(" [{}]", labels.join(", "))
     };
-    let state_reason = jstr(issue.get("state_reason").or_else(|| issue.get("stateReason")));
+    let state_reason = jstr(
+        issue
+            .get("state_reason")
+            .or_else(|| issue.get("stateReason")),
+    );
     let assignees = str_list(issue.get("assignees"));
     let assignee_text = if issue.get("assignees").and_then(|v| v.as_array()).is_some() {
         if assignees.is_empty() {
@@ -234,9 +234,7 @@ fn issue_select_item(issue: &Value) -> (String, String) {
         format!(
             "state: {}{}",
             state,
-            state_reason
-                .map(|r| format!(" ({r})"))
-                .unwrap_or_default()
+            state_reason.map(|r| format!(" ({r})")).unwrap_or_default()
         ),
         format!("author: {}", author_of(issue.get("author"))),
         format!(
@@ -267,7 +265,11 @@ fn pr_ref(pr: &Value, camel: &str, snake: &str) -> String {
 /// Header + body lines for the PR detail view (`pr view` payload).
 fn format_pr_view(pr: &Value) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
-    lines.push(format!("#{} {}", fmt(pr.get("number")), fmt(pr.get("title"))));
+    lines.push(format!(
+        "#{} {}",
+        fmt(pr.get("number")),
+        fmt(pr.get("title"))
+    ));
     let draft = bool_at(pr, "isDraft") || bool_at(pr, "is_draft");
     lines.push(
         [
@@ -285,11 +287,15 @@ fn format_pr_view(pr: &Value) -> Vec<String> {
             format!("mergeable: {}", fmt(pr.get("mergeable")).to_lowercase()),
             format!(
                 "mergeState: {}",
-                fmt(pr.get("mergeStateStatus").or_else(|| pr.get("merge_state_status")))
+                fmt(pr
+                    .get("mergeStateStatus")
+                    .or_else(|| pr.get("merge_state_status")))
             ),
             format!(
                 "reviewDecision: {}",
-                fmt(pr.get("reviewDecision").or_else(|| pr.get("review_decision")))
+                fmt(pr
+                    .get("reviewDecision")
+                    .or_else(|| pr.get("review_decision")))
             ),
             format!(
                 "diff: +{}/-{} in {} files",
@@ -306,7 +312,10 @@ fn format_pr_view(pr: &Value) -> Vec<String> {
         ]
         .join("\n"),
     );
-    if let Some(checks) = pr.get("statusCheckRollup").or_else(|| pr.get("status_check_rollup")) {
+    if let Some(checks) = pr
+        .get("statusCheckRollup")
+        .or_else(|| pr.get("status_check_rollup"))
+    {
         if checks.is_array() {
             let list = as_records(Some(checks));
             let failing = list
@@ -408,7 +417,6 @@ fn format_pr_reviews_payload(payload: &Value) -> Vec<String> {
     lines
 }
 
-
 /// Format `pr checks` payload.
 fn format_pr_checks_payload(payload: &Value) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
@@ -426,11 +434,15 @@ fn format_pr_checks_payload(payload: &Value) -> Vec<String> {
         return lines;
     }
     for c in &checks {
-        let state = [fmt(c.get("bucket")), fmt(c.get("state")), fmt(c.get("conclusion"))]
-            .into_iter()
-            .filter(|s| s != "unknown" && !s.is_empty())
-            .collect::<Vec<_>>()
-            .join("/");
+        let state = [
+            fmt(c.get("bucket")),
+            fmt(c.get("state")),
+            fmt(c.get("conclusion")),
+        ]
+        .into_iter()
+        .filter(|s| s != "unknown" && !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("/");
         lines.push(format!(
             "{} — {}",
             fmt(c.get("name")),
@@ -463,8 +475,6 @@ fn format_pr_checks_payload(payload: &Value) -> Vec<String> {
     lines
 }
 
-
-
 /// Format `pr logs` mode=job payload (bounded log tail).
 fn format_pr_job_log_payload(payload: &Value) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
@@ -492,9 +502,17 @@ fn format_pr_job_log_payload(payload: &Value) -> Vec<String> {
 /// Header + body lines for the issue detail view (`issue view` payload).
 fn format_issue_view(issue: &Value) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
-    lines.push(format!("#{} {}", fmt(issue.get("number")), fmt(issue.get("title"))));
+    lines.push(format!(
+        "#{} {}",
+        fmt(issue.get("number")),
+        fmt(issue.get("title"))
+    ));
     let state = fmt(issue.get("state")).to_lowercase();
-    let state_reason = jstr(issue.get("state_reason").or_else(|| issue.get("stateReason")));
+    let state_reason = jstr(
+        issue
+            .get("state_reason")
+            .or_else(|| issue.get("stateReason")),
+    );
     let labels = label_names(issue.get("labels"));
     let assignees = str_list(issue.get("assignees"));
     lines.push(
@@ -502,9 +520,7 @@ fn format_issue_view(issue: &Value) -> Vec<String> {
             format!(
                 "state: {}{}",
                 state,
-                state_reason
-                    .map(|r| format!(" ({r})"))
-                    .unwrap_or_default()
+                state_reason.map(|r| format!(" ({r})")).unwrap_or_default()
             ),
             format!("author: {}", author_of(issue.get("author"))),
             format!(
@@ -590,7 +606,11 @@ fn mutation_allowed(capability: Option<&Value>, command: &str) -> (bool, Option<
             Some("capability document unavailable — mutations disabled (fail closed)".to_string()),
         );
     };
-    if cap.get("read_only").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if cap
+        .get("read_only")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         return (false, Some("plugin reports read_only".to_string()));
     }
     let commands: Vec<String> = cap
@@ -1032,7 +1052,9 @@ impl FListScreen {
     }
 
     fn current(&self) -> Option<&FItem> {
-        self.filtered_indices().get(self.cursor).map(|&i| &self.items[i])
+        self.filtered_indices()
+            .get(self.cursor)
+            .map(|&i| &self.items[i])
     }
 
     fn set_items(&mut self, items: Vec<FItem>) {
@@ -1106,7 +1128,9 @@ struct FSelectScreen {
 #[derive(Debug)]
 enum FScreen {
     /// Root: pick the forge surface (3 fixed items).
-    Home { cursor: usize },
+    Home {
+        cursor: usize,
+    },
     List(FListScreen),
     Detail(FDetailScreen),
     Prompt(FPromptScreen),
@@ -1210,13 +1234,22 @@ enum ModalResult {
 /// flow borrow ends).
 #[derive(Debug)]
 enum FlowAction {
-    PushPrompt { label: String, initial: String },
+    PushPrompt {
+        label: String,
+        initial: String,
+    },
     PushConfirm(ConfirmSpec),
     PushSelect(SelectSpec),
-    RunCli { label: String, args: Vec<String>, timeout_ms: u64 },
+    RunCli {
+        label: String,
+        args: Vec<String>,
+        timeout_ms: u64,
+    },
     SetStatus(String),
     /// Re-run the load for the screen that owns this flow.
-    ReloadOwner { screen_id: u64 },
+    ReloadOwner {
+        screen_id: u64,
+    },
     /// Re-run loads for ancestor list screens (post-create).
     ReloadLists,
     OpenPr(i64),
@@ -1255,10 +1288,20 @@ fn forge_args(
 
 #[derive(Debug, Clone)]
 enum PrMutSpec {
-    Comment { body: String },
-    Review { event: String, body: String },
-    Reviewers { add: String, remove: String },
-    Merge { mode: String },
+    Comment {
+        body: String,
+    },
+    Review {
+        event: String,
+        body: String,
+    },
+    Reviewers {
+        add: String,
+        remove: String,
+    },
+    Merge {
+        mode: String,
+    },
     /// Reply to a line comment (review-thread reply).
     Reply {
         comment_id: i64,
@@ -1271,10 +1314,9 @@ impl PrMutSpec {
     fn cli_label(&self) -> String {
         match self {
             PrMutSpec::Comment { .. } => "pr comment".to_string(),
-            PrMutSpec::Review { event, .. } => format!(
-                "pr review ({})",
-                event.to_lowercase().replace('_', "-")
-            ),
+            PrMutSpec::Review { event, .. } => {
+                format!("pr review ({})", event.to_lowercase().replace('_', "-"))
+            }
             PrMutSpec::Reviewers { .. } => "pr reviewers".to_string(),
             PrMutSpec::Merge { mode } => format!("pr merge ({mode})"),
             PrMutSpec::Reply { .. } => "pr reply".to_string(),
@@ -1343,7 +1385,8 @@ impl PrMutSpec {
                 },
                 InputStep::Prompt {
                     key: "remove",
-                    label: "Reviewers to remove (comma-separated logins — empty for none)".to_string(),
+                    label: "Reviewers to remove (comma-separated logins — empty for none)"
+                        .to_string(),
                 },
             ],
             PrMutSpec::Merge { .. } => Vec::new(),
@@ -1447,9 +1490,15 @@ enum PrMutStage {
 
 #[derive(Debug, Clone)]
 enum IssueMutSpec {
-    Comment { body: String },
-    Edit { flags: Vec<String> },
-    Close { reason: String },
+    Comment {
+        body: String,
+    },
+    Edit {
+        flags: Vec<String>,
+    },
+    Close {
+        reason: String,
+    },
     /// Reopen = `issue edit --state open`.
     Reopen,
 }
@@ -1545,8 +1594,6 @@ enum Flow {
     IssueCreate(IssueCreateFlow),
 }
 
-
-
 // ===========================================================================
 // Flow compute functions — pure state transitions returning actions
 // ===========================================================================
@@ -1559,7 +1606,8 @@ fn pr_create_steps() -> Vec<InputStep> {
         },
         InputStep::Prompt {
             key: "body",
-            label: "PR body (optional — single line; use CLI --body-file for long text)".to_string(),
+            label: "PR body (optional — single line; use CLI --body-file for long text)"
+                .to_string(),
         },
         InputStep::Prompt {
             key: "base",
@@ -1580,7 +1628,8 @@ fn issue_create_steps() -> Vec<InputStep> {
         },
         InputStep::Prompt {
             key: "body",
-            label: "Issue body (optional — single line; use CLI --body-file for long text)".to_string(),
+            label: "Issue body (optional — single line; use CLI --body-file for long text)"
+                .to_string(),
         },
         InputStep::Prompt {
             key: "labels",
@@ -1630,7 +1679,11 @@ fn consume_input(
 /// Resolve placeholder spec fields from collected inputs. Returns
 /// actions to emit when input collection completes (confirm push) or an
 /// abort status.
-fn pr_mut_finish_inputs(f: &mut PrMutFlow, forge: &ForgeTarget, target_label: &str) -> Vec<FlowAction> {
+fn pr_mut_finish_inputs(
+    f: &mut PrMutFlow,
+    forge: &ForgeTarget,
+    target_label: &str,
+) -> Vec<FlowAction> {
     // Merge: resolve the pending mode placeholder, then maybe append the
     // auto-merge method step.
     if let Some(PrMutSpec::Merge { mode }) = f.spec.clone() {
@@ -1648,9 +1701,21 @@ fn pr_mut_finish_inputs(f: &mut PrMutFlow, forge: &ForgeTarget, target_label: &s
                     spec: SelectSpec {
                         title: "Auto-merge method".to_string(),
                         items: vec![
-                            SelectOpt { label: "Squash".to_string(), detail: String::new(), value: "squash".to_string() },
-                            SelectOpt { label: "Merge commit".to_string(), detail: String::new(), value: "merge".to_string() },
-                            SelectOpt { label: "Rebase".to_string(), detail: String::new(), value: "rebase".to_string() },
+                            SelectOpt {
+                                label: "Squash".to_string(),
+                                detail: String::new(),
+                                value: "squash".to_string(),
+                            },
+                            SelectOpt {
+                                label: "Merge commit".to_string(),
+                                detail: String::new(),
+                                value: "merge".to_string(),
+                            },
+                            SelectOpt {
+                                label: "Rebase".to_string(),
+                                detail: String::new(),
+                                value: "rebase".to_string(),
+                            },
                         ],
                     },
                 });
@@ -1687,7 +1752,9 @@ fn pr_mut_finish_inputs(f: &mut PrMutFlow, forge: &ForgeTarget, target_label: &s
         Some(PrMutSpec::Comment { .. }) => Some(PrMutSpec::Comment {
             body: f.inputs.get("body").cloned().unwrap_or_default(),
         }),
-        Some(PrMutSpec::Reply { comment_id, loc, .. }) => Some(PrMutSpec::Reply {
+        Some(PrMutSpec::Reply {
+            comment_id, loc, ..
+        }) => Some(PrMutSpec::Reply {
             comment_id,
             body: f.inputs.get("body").cloned().unwrap_or_default(),
             loc,
@@ -1845,10 +1912,7 @@ fn build_pr_mut_confirm(
                 }
             ));
             // current reviewers line (from reviews payload when available)
-            target.push(format!(
-                "current reviewers: {}",
-                f.current_reviewers_text()
-            ));
+            target.push(format!("current reviewers: {}", f.current_reviewers_text()));
             (
                 "Update PR reviewers?".to_string(),
                 "requests/dismisses reviewers on the pull request".to_string(),
@@ -1885,7 +1949,10 @@ fn build_pr_mut_confirm(
             )
         }
         PrMutSpec::Reply {
-            comment_id, body, loc, ..
+            comment_id,
+            body,
+            loc,
+            ..
         } => {
             target = vec![
                 format!("pr: #{}", f.number),
@@ -1969,7 +2036,9 @@ fn pr_mut_on_modal(
                             if let ModalResult::Text(Some(t)) = &result {
                                 if t.trim().is_empty() {
                                     return vec![
-                                        FlowAction::SetStatus("empty comment — cancelled".to_string()),
+                                        FlowAction::SetStatus(
+                                            "empty comment — cancelled".to_string(),
+                                        ),
                                         FlowAction::ClearFlow,
                                     ];
                                 }
@@ -2019,7 +2088,9 @@ fn pr_mut_on_cli(
                 f.fresh_head_sha = head_sha_of(&payload);
                 if f.fresh_head_sha.is_none() {
                     return vec![
-                        FlowAction::SetStatus("revalidate failed: PR head sha unavailable".to_string()),
+                        FlowAction::SetStatus(
+                            "revalidate failed: PR head sha unavailable".to_string(),
+                        ),
                         FlowAction::ClearFlow,
                     ];
                 }
@@ -2209,11 +2280,24 @@ fn resolve_issue_spec(f: &mut IssueMutFlow) -> Result<IssueMutSpec, String> {
     }
     // Edit flow: build flags from inputs.
     let title = f.inputs.get("title").cloned().unwrap_or_default();
-    let state = f.inputs.get("state").cloned().unwrap_or_else(|| "keep".into());
+    let state = f
+        .inputs
+        .get("state")
+        .cloned()
+        .unwrap_or_else(|| "keep".into());
     let a_labels = split_csv(f.inputs.get("add_labels").map(|s| s.as_str()).unwrap_or(""));
-    let r_labels = split_csv(f.inputs.get("remove_labels").map(|s| s.as_str()).unwrap_or(""));
-    let a_assignees =
-        split_csv(f.inputs.get("add_assignees").map(|s| s.as_str()).unwrap_or(""));
+    let r_labels = split_csv(
+        f.inputs
+            .get("remove_labels")
+            .map(|s| s.as_str())
+            .unwrap_or(""),
+    );
+    let a_assignees = split_csv(
+        f.inputs
+            .get("add_assignees")
+            .map(|s| s.as_str())
+            .unwrap_or(""),
+    );
     let r_assignees = split_csv(
         f.inputs
             .get("remove_assignees")
@@ -2252,7 +2336,11 @@ fn resolve_issue_spec(f: &mut IssueMutFlow) -> Result<IssueMutSpec, String> {
     Ok(IssueMutSpec::Edit { flags })
 }
 
-fn issue_mut_advance(f: &mut IssueMutFlow, forge: &ForgeTarget, target_label: &str) -> Vec<FlowAction> {
+fn issue_mut_advance(
+    f: &mut IssueMutFlow,
+    forge: &ForgeTarget,
+    target_label: &str,
+) -> Vec<FlowAction> {
     match f.stage {
         IssueMutStage::Inputs => {
             if f.step_idx < f.steps.len() {
@@ -2277,13 +2365,13 @@ fn issue_mut_advance(f: &mut IssueMutFlow, forge: &ForgeTarget, target_label: &s
                         f.stage = IssueMutStage::Confirm;
                         let spec = f.spec.clone().expect("spec");
                         vec![FlowAction::PushConfirm(build_issue_mut_confirm(
-                            f, &spec, forge, target_label,
+                            f,
+                            &spec,
+                            forge,
+                            target_label,
                         ))]
                     }
-                    Err(msg) => vec![
-                        FlowAction::SetStatus(msg),
-                        FlowAction::ClearFlow,
-                    ],
+                    Err(msg) => vec![FlowAction::SetStatus(msg), FlowAction::ClearFlow],
                 }
             }
         }
@@ -2323,7 +2411,13 @@ fn issue_mut_advance(f: &mut IssueMutFlow, forge: &ForgeTarget, target_label: &s
                     flags.extend(["--state".to_string(), "open".to_string()]);
                 }
             }
-            match forge_args(forge, "issue", spec.action(), &[f.number.to_string()], &flags) {
+            match forge_args(
+                forge,
+                "issue",
+                spec.action(),
+                &[f.number.to_string()],
+                &flags,
+            ) {
                 Some(args) => vec![FlowAction::RunCli {
                     label: spec.cli_label(),
                     args,
@@ -2444,7 +2538,11 @@ fn issue_mut_on_modal(
             ModalResult::Cancel => vec![FlowAction::ClearFlow],
             _ => {
                 // Comment body required.
-                if f.spec.as_ref().map(|s| matches!(s, IssueMutSpec::Comment { .. })).unwrap_or(false) {
+                if f.spec
+                    .as_ref()
+                    .map(|s| matches!(s, IssueMutSpec::Comment { .. }))
+                    .unwrap_or(false)
+                {
                     if let ModalResult::Text(Some(t)) = &result {
                         if t.trim().is_empty() {
                             return vec![
@@ -2501,8 +2599,11 @@ fn issue_mut_on_cli(
                     ];
                 };
                 let issue_v = Value::Object(issue.clone());
-                let fresh_updated_at =
-                    jstr(issue_v.get("updated_at").or_else(|| issue_v.get("updatedAt")));
+                let fresh_updated_at = jstr(
+                    issue_v
+                        .get("updated_at")
+                        .or_else(|| issue_v.get("updatedAt")),
+                );
                 f.fresh_updated_at = fresh_updated_at.clone();
                 let drifted = f.opened_updated_at.is_some()
                     && fresh_updated_at.is_some()
@@ -2568,7 +2669,12 @@ fn issue_mut_on_cli(
 
 // ---- Create flows compute ----------------------------------------------------
 
-fn pr_create_on_modal(f: &mut PrCreateFlow, result: ModalResult, forge: &ForgeTarget, target_label: &str) -> Vec<FlowAction> {
+fn pr_create_on_modal(
+    f: &mut PrCreateFlow,
+    result: ModalResult,
+    forge: &ForgeTarget,
+    target_label: &str,
+) -> Vec<FlowAction> {
     match f.stage {
         PrCreateStage::Inputs => match result {
             ModalResult::Cancel => vec![FlowAction::ClearFlow],
@@ -2618,7 +2724,11 @@ fn pr_create_on_modal(f: &mut PrCreateFlow, result: ModalResult, forge: &ForgeTa
     }
 }
 
-fn pr_create_advance(f: &mut PrCreateFlow, forge: &ForgeTarget, target_label: &str) -> Vec<FlowAction> {
+fn pr_create_advance(
+    f: &mut PrCreateFlow,
+    forge: &ForgeTarget,
+    target_label: &str,
+) -> Vec<FlowAction> {
     match f.stage {
         PrCreateStage::Inputs => {
             if f.step_idx < f.steps.len() {
@@ -2748,7 +2858,12 @@ fn pr_create_on_cli(f: &mut PrCreateFlow, result: Result<Value, CliError>) -> Ve
     }
 }
 
-fn issue_create_on_modal(f: &mut IssueCreateFlow, result: ModalResult, forge: &ForgeTarget, target_label: &str) -> Vec<FlowAction> {
+fn issue_create_on_modal(
+    f: &mut IssueCreateFlow,
+    result: ModalResult,
+    forge: &ForgeTarget,
+    target_label: &str,
+) -> Vec<FlowAction> {
     match f.stage {
         IssueCreateStage::Inputs => match result {
             ModalResult::Cancel => vec![FlowAction::ClearFlow],
@@ -2783,7 +2898,11 @@ fn issue_create_on_modal(f: &mut IssueCreateFlow, result: ModalResult, forge: &F
     }
 }
 
-fn issue_create_advance(f: &mut IssueCreateFlow, forge: &ForgeTarget, target_label: &str) -> Vec<FlowAction> {
+fn issue_create_advance(
+    f: &mut IssueCreateFlow,
+    forge: &ForgeTarget,
+    target_label: &str,
+) -> Vec<FlowAction> {
     match f.stage {
         IssueCreateStage::Inputs => {
             if f.step_idx < f.steps.len() {
@@ -2836,8 +2955,7 @@ fn issue_create_advance(f: &mut IssueCreateFlow, forge: &ForgeTarget, target_lab
             let title = f.inputs.get("title").cloned().unwrap_or_default();
             let body = f.inputs.get("body").cloned().unwrap_or_default();
             let labels = split_csv(f.inputs.get("labels").map(|s| s.as_str()).unwrap_or(""));
-            let assignees =
-                split_csv(f.inputs.get("assignees").map(|s| s.as_str()).unwrap_or(""));
+            let assignees = split_csv(f.inputs.get("assignees").map(|s| s.as_str()).unwrap_or(""));
             let mut flags = vec!["--title".to_string(), title];
             if !body.trim().is_empty() {
                 flags.extend(["--body".to_string(), body.trim().to_string()]);
@@ -2861,7 +2979,10 @@ fn issue_create_advance(f: &mut IssueCreateFlow, forge: &ForgeTarget, target_lab
     }
 }
 
-fn issue_create_on_cli(f: &mut IssueCreateFlow, result: Result<Value, CliError>) -> Vec<FlowAction> {
+fn issue_create_on_cli(
+    f: &mut IssueCreateFlow,
+    result: Result<Value, CliError>,
+) -> Vec<FlowAction> {
     match result {
         Ok(payload) => {
             let url = jstr(payload.get("url"));
@@ -2972,10 +3093,7 @@ impl ForgeTui {
 
     fn load_args_for(&self, screen_id: u64, kind: LoadKind) -> Option<Vec<String>> {
         // Find the owning screen for its filters/number.
-        let screen = self
-            .stack
-            .iter()
-            .find(|s| s.id() == Some(screen_id));
+        let screen = self.stack.iter().find(|s| s.id() == Some(screen_id));
         match kind {
             LoadKind::PrList => {
                 let state = screen
@@ -2989,12 +3107,7 @@ impl ForgeTui {
                     "pr",
                     "list",
                     &[],
-                    &[
-                        "--state".into(),
-                        state,
-                        "--limit".into(),
-                        "50".into(),
-                    ],
+                    &["--state".into(), state, "--limit".into(), "50".into()],
                 )
             }
             LoadKind::IssueList => {
@@ -3006,12 +3119,7 @@ impl ForgeTui {
                         _ => None,
                     })
                     .unwrap_or_else(|| ("open".to_string(), String::new()));
-                let mut flags = vec![
-                    "--state".into(),
-                    state,
-                    "--limit".into(),
-                    "50".into(),
-                ];
+                let mut flags = vec!["--state".into(), state, "--limit".into(), "50".into()];
                 for label in split_csv(&label_filter) {
                     flags.push("--label".into());
                     flags.push(label);
@@ -3020,54 +3128,38 @@ impl ForgeTui {
             }
             LoadKind::PrStatus => forge_args(&self.forge, "pr", "status", &[], &[]),
             LoadKind::PrDetail | LoadKind::IssueDetail => {
-                let number = screen
-                    .and_then(|s| match s {
-                        FScreen::Detail(d) => Some(d.number),
-                        _ => None,
-                    })?;
+                let number = screen.and_then(|s| match s {
+                    FScreen::Detail(d) => Some(d.number),
+                    _ => None,
+                })?;
                 let (family, action) = if kind == LoadKind::PrDetail {
                     ("pr", "view")
                 } else {
                     ("issue", "view")
                 };
-                forge_args(
-                    &self.forge,
-                    family,
-                    action,
-                    &[number.to_string()],
-                    &[],
-                )
+                forge_args(&self.forge, family, action, &[number.to_string()], &[])
             }
             LoadKind::PrComments => {
-                let number = screen
-                    .and_then(|s| match s {
-                        FScreen::List(l) if l.kind == ListKind::Comments => l.pr_number,
-                        _ => None,
-                    })?;
-                forge_args(
-                    &self.forge,
-                    "pr",
-                    "comments",
-                    &[number.to_string()],
-                    &[],
-                )
+                let number = screen.and_then(|s| match s {
+                    FScreen::List(l) if l.kind == ListKind::Comments => l.pr_number,
+                    _ => None,
+                })?;
+                forge_args(&self.forge, "pr", "comments", &[number.to_string()], &[])
             }
             LoadKind::PrLogsRuns => {
-                let number = screen
-                    .and_then(|s| match s {
-                        FScreen::List(l) if l.kind == ListKind::Logs => l.pr_number,
-                        _ => None,
-                    })?;
+                let number = screen.and_then(|s| match s {
+                    FScreen::List(l) if l.kind == ListKind::Logs => l.pr_number,
+                    _ => None,
+                })?;
                 forge_args(&self.forge, "pr", "logs", &[number.to_string()], &[])
             }
             LoadKind::PrLogsJobs => {
-                let (number, run) = screen
-                    .and_then(|s| match s {
-                        FScreen::List(l) if l.kind == ListKind::Logs => {
-                            Some((l.pr_number?, l.current_run_id.clone()?))
-                        }
-                        _ => None,
-                    })?;
+                let (number, run) = screen.and_then(|s| match s {
+                    FScreen::List(l) if l.kind == ListKind::Logs => {
+                        Some((l.pr_number?, l.current_run_id.clone()?))
+                    }
+                    _ => None,
+                })?;
                 forge_args(
                     &self.forge,
                     "pr",
@@ -3132,8 +3224,6 @@ impl ForgeTui {
         self.tasks.last().map(|t| t.label.clone())
     }
 
-
-
     fn apply_task_result(&mut self, result: BgResult) {
         match result {
             BgResult::Load {
@@ -3152,10 +3242,7 @@ impl ForgeTui {
         kind: LoadKind,
         result: Result<Value, CliError>,
     ) {
-        let pos = self
-            .stack
-            .iter()
-            .rposition(|s| s.id() == Some(screen_id));
+        let pos = self.stack.iter().rposition(|s| s.id() == Some(screen_id));
         let Some(pos) = pos else { return };
         match result {
             Ok(payload) => match &mut self.stack[pos] {
@@ -3195,9 +3282,10 @@ impl ForgeTui {
                         format!("pr #{n} — reviews"),
                         format_pr_reviews_payload(&payload),
                     ),
-                    PayloadTag::Checks(n) => {
-                        (format!("pr #{n} — checks"), format_pr_checks_payload(&payload))
-                    }
+                    PayloadTag::Checks(n) => (
+                        format!("pr #{n} — checks"),
+                        format_pr_checks_payload(&payload),
+                    ),
                     PayloadTag::JobLog(job) => (
                         format!("job #{job} log"),
                         format_pr_job_log_payload(&payload),
@@ -3264,8 +3352,7 @@ impl ForgeTui {
                     d.opened_head_sha = Some(sha.clone());
                     if d.phase == DetailPhase::Ready {
                         let line = format!("head sha (expect-head): {sha}");
-                        if let Some(pos) = d.lines.iter().position(|l| l.starts_with("head sha"))
-                        {
+                        if let Some(pos) = d.lines.iter().position(|l| l.starts_with("head sha")) {
                             d.lines[pos] = line;
                         } else {
                             d.lines.push(line);
@@ -3359,10 +3446,8 @@ impl ForgeTui {
                 args,
                 timeout_ms,
             } => {
-                self.spawn_task(BgKind::FlowCli, &label, move || {
-                    BgResult::FlowCli {
-                        result: run_cli(&args, timeout_ms),
-                    }
+                self.spawn_task(BgKind::FlowCli, &label, move || BgResult::FlowCli {
+                    result: run_cli(&args, timeout_ms),
                 });
             }
             FlowAction::SetStatus(s) => self.set_status(s),
@@ -3565,11 +3650,9 @@ impl ForgeTui {
         self.spawn_load(id, LoadKind::PrDetail, "pr view");
         // `pr reviews` feeds head.sha freshness (no pushed view).
         if let Some(args) = forge_args(&self.forge, "pr", "reviews", &[number.to_string()], &[]) {
-            self.spawn_task(BgKind::Payload, "pr reviews", move || {
-                BgResult::Payload {
-                    tag: PayloadTag::HeadSha(number),
-                    result: run_cli(&args, OP_TIMEOUT_MS),
-                }
+            self.spawn_task(BgKind::Payload, "pr reviews", move || BgResult::Payload {
+                tag: PayloadTag::HeadSha(number),
+                result: run_cli(&args, OP_TIMEOUT_MS),
             });
         }
     }
@@ -3701,11 +3784,21 @@ impl ForgeTui {
                 fmt(pr.get("title")),
                 fmt(pr.get("state")),
                 bool_at(&pr, "isDraft") || bool_at(&pr, "is_draft"),
-                fmt(pr.get("mergeStateStatus").or_else(|| pr.get("merge_state_status"))),
-                fmt(pr.get("reviewDecision").or_else(|| pr.get("review_decision"))),
+                fmt(pr
+                    .get("mergeStateStatus")
+                    .or_else(|| pr.get("merge_state_status"))),
+                fmt(pr
+                    .get("reviewDecision")
+                    .or_else(|| pr.get("review_decision"))),
             );
         }
-        (String::new(), String::new(), false, String::new(), String::new())
+        (
+            String::new(),
+            String::new(),
+            false,
+            String::new(),
+            String::new(),
+        )
     }
 
     fn start_pr_mut(
@@ -3726,12 +3819,36 @@ impl ForgeTui {
                 spec: SelectSpec {
                     title: "Merge method".to_string(),
                     items: vec![
-                        SelectOpt { label: "Squash merge".to_string(), detail: "merge now with squash method".to_string(), value: "squash".to_string() },
-                        SelectOpt { label: "Merge commit".to_string(), detail: "merge now with a merge commit".to_string(), value: "merge".to_string() },
-                        SelectOpt { label: "Rebase merge".to_string(), detail: "merge now with rebase method".to_string(), value: "rebase".to_string() },
-                        SelectOpt { label: "Merge (repo default)".to_string(), detail: "merge now, GitHub default method".to_string(), value: "default".to_string() },
-                        SelectOpt { label: "Enable auto-merge".to_string(), detail: "arm GitHub auto-merge (method required)".to_string(), value: "auto".to_string() },
-                        SelectOpt { label: "Disable auto-merge".to_string(), detail: "disarm GitHub auto-merge".to_string(), value: "disable-auto".to_string() },
+                        SelectOpt {
+                            label: "Squash merge".to_string(),
+                            detail: "merge now with squash method".to_string(),
+                            value: "squash".to_string(),
+                        },
+                        SelectOpt {
+                            label: "Merge commit".to_string(),
+                            detail: "merge now with a merge commit".to_string(),
+                            value: "merge".to_string(),
+                        },
+                        SelectOpt {
+                            label: "Rebase merge".to_string(),
+                            detail: "merge now with rebase method".to_string(),
+                            value: "rebase".to_string(),
+                        },
+                        SelectOpt {
+                            label: "Merge (repo default)".to_string(),
+                            detail: "merge now, GitHub default method".to_string(),
+                            value: "default".to_string(),
+                        },
+                        SelectOpt {
+                            label: "Enable auto-merge".to_string(),
+                            detail: "arm GitHub auto-merge (method required)".to_string(),
+                            value: "auto".to_string(),
+                        },
+                        SelectOpt {
+                            label: "Disable auto-merge".to_string(),
+                            detail: "disarm GitHub auto-merge".to_string(),
+                            value: "disable-auto".to_string(),
+                        },
                     ],
                 },
             }]
@@ -3835,11 +3952,7 @@ impl ForgeTui {
             self.set_status("selected comment has no id — cannot reply");
             return;
         };
-        let loc = format!(
-            "{}:{}",
-            fmt(comment.get("path")),
-            fmt(comment.get("line"))
-        );
+        let loc = format!("{}:{}", fmt(comment.get("path")), fmt(comment.get("line")));
         let (opened_updated_at, opened_head_sha) = self.list_freshness(owner_id);
         let (pr_title, pr_state, pr_is_draft, pr_merge_state, pr_review_decision) =
             self.detail_pr_meta_for_reply(number);
@@ -3856,11 +3969,7 @@ impl ForgeTui {
             spec: Some(PrMutSpec::Reply {
                 comment_id: cid,
                 body: String::new(),
-                loc: format!(
-                    "{}:{}",
-                    fmt(comment.get("path")),
-                    fmt(comment.get("line"))
-                ),
+                loc: format!("{}:{}", fmt(comment.get("path")), fmt(comment.get("line"))),
             }),
             stage: PrMutStage::Inputs,
             opened_updated_at,
@@ -3900,7 +4009,13 @@ impl ForgeTui {
                 }
             }
         }
-        (String::new(), String::new(), false, String::new(), String::new())
+        (
+            String::new(),
+            String::new(),
+            false,
+            String::new(),
+            String::new(),
+        )
     }
 
     // ---- Issue mutation starters ----------------------------------------------
@@ -3935,7 +4050,9 @@ impl ForgeTui {
         }
         self.start_issue_mut(
             number,
-            Some(IssueMutSpec::Comment { body: String::new() }),
+            Some(IssueMutSpec::Comment {
+                body: String::new(),
+            }),
             issue_comment_steps(),
             owner_id,
             None,
@@ -3973,7 +4090,13 @@ impl ForgeTui {
         }
         let state = self
             .detail_snapshot(owner_id)
-            .and_then(|(i, is_issue)| if is_issue { Some(fmt(i.get("state")).to_lowercase()) } else { None })
+            .and_then(|(i, is_issue)| {
+                if is_issue {
+                    Some(fmt(i.get("state")).to_lowercase())
+                } else {
+                    None
+                }
+            })
             .unwrap_or_default();
         if state == "closed" {
             self.start_issue_mut(
@@ -4298,7 +4421,8 @@ impl ForgeTui {
         // Phase gate: only actionable detail views (pr/issue view loads)
         // respond to action keys; payload viewers only scroll + R + p/o.
         let actionable = matches!(self.current(), FScreen::Detail(d) if d.load_kind == Some(LoadKind::PrDetail) || d.load_kind == Some(LoadKind::IssueDetail));
-        let phase_ready = matches!(self.current(), FScreen::Detail(d) if d.phase == DetailPhase::Ready);
+        let phase_ready =
+            matches!(self.current(), FScreen::Detail(d) if d.phase == DetailPhase::Ready);
         if !actionable {
             // Payload viewers: R does nothing meaningful; esc/q back.
             return match key.code {
@@ -4333,14 +4457,11 @@ impl ForgeTui {
         // PR detail also refreshes the head-sha feed.
         if let Some(n) = self.detail_number(owner_id) {
             if !self.detail_is_issue(owner_id) {
-                if let Some(args) =
-                    forge_args(&self.forge, "pr", "reviews", &[n.to_string()], &[])
+                if let Some(args) = forge_args(&self.forge, "pr", "reviews", &[n.to_string()], &[])
                 {
-                    self.spawn_task(BgKind::Payload, "pr reviews", move || {
-                        BgResult::Payload {
-                            tag: PayloadTag::HeadSha(n),
-                            result: run_cli(&args, OP_TIMEOUT_MS),
-                        }
+                    self.spawn_task(BgKind::Payload, "pr reviews", move || BgResult::Payload {
+                        tag: PayloadTag::HeadSha(n),
+                        result: run_cli(&args, OP_TIMEOUT_MS),
                     });
                 }
             }
@@ -4362,7 +4483,10 @@ impl ForgeTui {
     }
 
     fn handle_target_key(&mut self, key: KeyEvent) -> bool {
-        if key.modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .contains(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return false;
         }
         match key.code {
@@ -4385,7 +4509,10 @@ impl ForgeTui {
         is_issue: bool,
         owner_id: u64,
     ) -> bool {
-        if key.modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key
+            .modifiers
+            .contains(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return self.handle_target_key(key);
         }
         let KeyCode::Char(c) = key.code else {
@@ -4700,10 +4827,7 @@ impl ForgeTui {
         } else {
             "conversation".to_string()
         };
-        let mut lines = vec![
-            format!("author: {author}"),
-            format!("created: {created}"),
-        ];
+        let mut lines = vec![format!("author: {author}"), format!("created: {created}")];
         if let Some(u) = jstr(comment.get("url")) {
             lines.push(format!("url: {u}"));
         }
@@ -4737,9 +4861,7 @@ impl ForgeTui {
             return;
         }
         let (mode, pr_number, list_id) = match self.current() {
-            FScreen::List(l) if l.kind == ListKind::Logs => {
-                (l.log_mode, l.pr_number, l.id)
-            }
+            FScreen::List(l) if l.kind == ListKind::Logs => (l.log_mode, l.pr_number, l.id),
             _ => return,
         };
         let Some(n) = pr_number else { return };
@@ -4763,7 +4885,12 @@ impl ForgeTui {
                         "pr",
                         "logs",
                         &[n.to_string()],
-                        &["--job".into(), job_id.clone(), "--lines".into(), "500".into()],
+                        &[
+                            "--job".into(),
+                            job_id.clone(),
+                            "--lines".into(),
+                            "500".into(),
+                        ],
                     ) else {
                         return;
                     };
@@ -4973,7 +5100,8 @@ fn apply_detail_payload(detail: &mut FDetailScreen, kind: LoadKind, payload: &Va
                 let pr_v = Value::Object(pr.clone());
                 detail.lines = format_pr_view(&pr_v);
                 detail.pr_snapshot = Some(pr_v.clone());
-                detail.opened_updated_at = jstr(pr_v.get("updatedAt").or_else(|| pr_v.get("updated_at")));
+                detail.opened_updated_at =
+                    jstr(pr_v.get("updatedAt").or_else(|| pr_v.get("updated_at")));
             } else if bool_at(payload, "detached") {
                 let branch = jstr(payload.get("branch")).unwrap_or_else(|| "HEAD".into());
                 detail.lines = vec![
@@ -4994,7 +5122,8 @@ fn apply_detail_payload(detail: &mut FDetailScreen, kind: LoadKind, payload: &Va
             if let Some(pr) = payload.get("pr").and_then(|p| p.as_object()) {
                 let pr_v = Value::Object(pr.clone());
                 let mut lines = format_pr_view(&pr_v);
-                detail.opened_updated_at = jstr(pr_v.get("updatedAt").or_else(|| pr_v.get("updated_at")));
+                detail.opened_updated_at =
+                    jstr(pr_v.get("updatedAt").or_else(|| pr_v.get("updated_at")));
                 detail.pr_snapshot = Some(pr_v);
                 if let Some(sha) = &detail.opened_head_sha {
                     lines.push(format!("head sha (expect-head): {sha}"));
@@ -5016,7 +5145,9 @@ fn apply_detail_payload(detail: &mut FDetailScreen, kind: LoadKind, payload: &Va
                 let issue_v = Value::Object(issue.clone());
                 detail.lines = format_issue_view(&issue_v);
                 detail.opened_updated_at = jstr(
-                    issue_v.get("updated_at").or_else(|| issue_v.get("updatedAt")),
+                    issue_v
+                        .get("updated_at")
+                        .or_else(|| issue_v.get("updatedAt")),
                 );
                 detail.issue_snapshot = Some(issue_v);
             } else {
@@ -5236,8 +5367,14 @@ fn render_forge(app: &mut ForgeTui, frame: &mut ratatui::Frame) {
     match app.current_mut() {
         FScreen::Home { cursor } => {
             let items = [
-                ("Pull requests", "list / view / review / comment / merge (gh-backed)"),
-                ("Issues", "list / view / create / edit / comment / close (gh-backed)"),
+                (
+                    "Pull requests",
+                    "list / view / review / comment / merge (gh-backed)",
+                ),
+                (
+                    "Issues",
+                    "list / view / create / edit / comment / close (gh-backed)",
+                ),
                 (
                     "PR for current branch",
                     "open PR of the pinned pane's current branch, or honest none",
@@ -5287,8 +5424,7 @@ fn render_forge(app: &mut ForgeTui, frame: &mut ratatui::Frame) {
             } else {
                 d.footer.clone()
             };
-            let lines =
-                render_scrollable(&d.title, &source, &mut d.scroll, width, height, &footer);
+            let lines = render_scrollable(&d.title, &source, &mut d.scroll, width, height, &footer);
             frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), chunks[1]);
         }
         FScreen::Prompt(p) => {
@@ -5374,8 +5510,7 @@ fn render_forge(app: &mut ForgeTui, frame: &mut ratatui::Frame) {
                 Style::default().add_modifier(Modifier::DIM),
             )));
             frame.render_widget(
-                Paragraph::new(lines)
-                    .block(Block::default().borders(Borders::ALL).title("select")),
+                Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("select")),
                 chunks[1],
             );
         }
@@ -5408,10 +5543,9 @@ fn render_forge_list(
             let label = match list.kind {
                 ListKind::Prs => format!("loading pull requests ({})…", list.state),
                 ListKind::Issues => format!("loading issues ({})…", list.state),
-                ListKind::Comments => format!(
-                    "loading comments for pr #{}…",
-                    list.pr_number.unwrap_or(0)
-                ),
+                ListKind::Comments => {
+                    format!("loading comments for pr #{}…", list.pr_number.unwrap_or(0))
+                }
                 ListKind::Logs => {
                     if list.log_mode == LogMode::Jobs {
                         format!(
@@ -5590,7 +5724,9 @@ fn open_external(target: &str) -> Result<(), String> {
         "LANG",
         std::env::var("LANG").unwrap_or_else(|_| "C.UTF-8".into()),
     );
-    cmd.spawn().map(|_| ()).map_err(|e| format!("spawn-failed: {e}"))
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| format!("spawn-failed: {e}"))
 }
 
 // ===========================================================================

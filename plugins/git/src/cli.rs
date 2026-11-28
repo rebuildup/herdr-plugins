@@ -101,7 +101,11 @@ pub fn parse_args(argv: &[String]) -> Result<CliOptions, RunError> {
             options.socket_path = Some(v.to_string());
             i += 1;
         } else if arg == "--timeout" {
-            options.timeout_ms = Some(parse_global_timeout(&take_global_value(&args, i, "--timeout")?)?);
+            options.timeout_ms = Some(parse_global_timeout(&take_global_value(
+                &args,
+                i,
+                "--timeout",
+            )?)?);
             i += 2;
         } else if let Some(v) = arg.strip_prefix("--timeout=") {
             options.timeout_ms = Some(parse_global_timeout(v)?);
@@ -162,7 +166,10 @@ pub enum RunError {
     Usage(String),
     /// Handled runtime error (exit 1); `kind` carries the git/gh error
     /// taxonomy (git_error, stale_head, …) when present.
-    Other { message: String, kind: Option<String> },
+    Other {
+        message: String,
+        kind: Option<String>,
+    },
 }
 
 impl RunError {
@@ -354,7 +361,9 @@ fn validate_flags(args: &[String], spec: &HashMap<String, FlagKind>) -> Result<(
         };
         if *kind == FlagKind::Boolean {
             if eq.is_some() {
-                return Err(RunError::usage(format!("option {name} does not take a value")));
+                return Err(RunError::usage(format!(
+                    "option {name} does not take a value"
+                )));
             }
             i += 1;
             continue;
@@ -455,12 +464,8 @@ fn load_config() -> PluginConfig {
     let Ok(parsed) = serde_json::from_str::<Value>(&text) else {
         return PluginConfig::default();
     };
-    let positive_u64 = |key: &str| -> Option<u64> {
-        parsed
-            .get(key)
-            .and_then(|v| v.as_u64())
-            .filter(|v| *v > 0)
-    };
+    let positive_u64 =
+        |key: &str| -> Option<u64> { parsed.get(key).and_then(|v| v.as_u64()).filter(|v| *v > 0) };
     PluginConfig {
         timeout_ms: positive_u64("timeoutMs"),
         remote_timeout_ms: positive_u64("remoteTimeoutMs"),
@@ -474,7 +479,10 @@ fn load_config() -> PluginConfig {
 }
 
 fn effective_timeout_ms(options: &CliOptions, config: &PluginConfig) -> u64 {
-    options.timeout_ms.or(config.timeout_ms).unwrap_or(DEFAULT_TIMEOUT_MS)
+    options
+        .timeout_ms
+        .or(config.timeout_ms)
+        .unwrap_or(DEFAULT_TIMEOUT_MS)
 }
 
 /// Network-facing git ops (fetch/push) get a longer default budget.
@@ -626,7 +634,6 @@ fn diff_flags_spec() -> HashMap<String, FlagKind> {
     ])
 }
 
-
 pub fn cmd_files(options: &mut CliOptions) -> Result<Value, RunError> {
     validate_flags(&options.args, &flags_spec(&[("--path", FlagKind::Value)]))?;
     assert_max_positionals(&options.args, &["--path"], 1, "files <pane_id>")?;
@@ -677,7 +684,12 @@ pub fn cmd_files(options: &mut CliOptions) -> Result<Value, RunError> {
 
 pub fn cmd_diff(options: &mut CliOptions) -> Result<Value, RunError> {
     validate_flags(&options.args, &diff_flags_spec())?;
-    assert_max_positionals(&options.args, DIFF_VALUE_FLAGS, 3, "diff <pane_id> [rev [rev]]")?;
+    assert_max_positionals(
+        &options.args,
+        DIFF_VALUE_FLAGS,
+        3,
+        "diff <pane_id> [rev [rev]]",
+    )?;
     let config = load_config();
     let selection = resolve_pane_selection(&options.args, DIFF_VALUE_FLAGS)?;
     let pane_id = selection.pane_id.clone();
@@ -747,7 +759,11 @@ pub fn cmd_diff(options: &mut CliOptions) -> Result<Value, RunError> {
         paths: paths.clone(),
         max_bytes: Some(max_bytes),
     };
-    let result = git::collect_diff(Path::new(&repo.root), &request, &options.run_options(timeout))?;
+    let result = git::collect_diff(
+        Path::new(&repo.root),
+        &request,
+        &options.run_options(timeout),
+    )?;
     let staged = request.staged;
     let stat_flag = request.stat;
     let format_str = format.map(|f| f.as_str()).unwrap_or("patch");
@@ -836,7 +852,11 @@ pub fn cmd_log(options: &mut CliOptions) -> Result<Value, RunError> {
         until: flag_value(&options.args, "--until"),
         pathspec: pathspec.clone(),
     };
-    let result = git::collect_log(Path::new(&repo.root), &request, &options.run_options(timeout))?;
+    let result = git::collect_log(
+        Path::new(&repo.root),
+        &request,
+        &options.run_options(timeout),
+    )?;
     Ok(json!({
         "contract": CONTRACT,
         "command": "log",
@@ -851,8 +871,16 @@ pub fn cmd_log(options: &mut CliOptions) -> Result<Value, RunError> {
 }
 
 pub fn cmd_compare(options: &mut CliOptions) -> Result<Value, RunError> {
-    validate_flags(&options.args, &flags_spec(&[("--max-bytes", FlagKind::Value)]))?;
-    assert_max_positionals(&options.args, &["--max-bytes"], 3, "compare <pane_id> [base [head]]")?;
+    validate_flags(
+        &options.args,
+        &flags_spec(&[("--max-bytes", FlagKind::Value)]),
+    )?;
+    assert_max_positionals(
+        &options.args,
+        &["--max-bytes"],
+        3,
+        "compare <pane_id> [base [head]]",
+    )?;
     let config = load_config();
     let selection = resolve_pane_selection(&options.args, &["--max-bytes"])?;
     let pane_id = selection.pane_id.clone();
@@ -863,7 +891,9 @@ pub fn cmd_compare(options: &mut CliOptions) -> Result<Value, RunError> {
     let pos = positionals(&options.args, &["--max-bytes"]);
     let revs: Vec<String> = pos.iter().skip(1).cloned().collect();
     if revs.len() > 2 {
-        return Err(RunError::usage("compare accepts at most two revisions (base head)"));
+        return Err(RunError::usage(
+            "compare accepts at most two revisions (base head)",
+        ));
     }
     for rev in &revs {
         if rev.starts_with('-') {
@@ -932,12 +962,7 @@ fn repo_root_for_pane(
     Ok((pane_id, repo.root))
 }
 
-fn mutation_payload(
-    command: &str,
-    pane_id: &str,
-    repo_root: &str,
-    fields: Value,
-) -> Value {
+fn mutation_payload(command: &str, pane_id: &str, repo_root: &str, fields: Value) -> Value {
     let mut payload = json!({
         "contract": CONTRACT,
         "command": command,
@@ -974,7 +999,12 @@ pub fn cmd_stage_or_unstage(options: &mut CliOptions, unstaging: bool) -> Result
     options.mutation = true;
     let command = if unstaging { "unstage" } else { "stage" };
     validate_flags(&options.args, &stage_flags_spec())?;
-    assert_max_positionals(&options.args, &["--path"], 1, &format!("{command} <pane_id>"))?;
+    assert_max_positionals(
+        &options.args,
+        &["--path"],
+        1,
+        &format!("{command} <pane_id>"),
+    )?;
     let paths = pathspec_args(&options.args)?;
     let all = has_flag(&options.args, "--all");
     if all && !paths.is_empty() {
@@ -1008,7 +1038,10 @@ pub fn cmd_commit(options: &mut CliOptions) -> Result<Value, RunError> {
     options.mutation = true;
     validate_flags(
         &options.args,
-        &flags_spec(&[("-m", FlagKind::Value), ("--allow-empty", FlagKind::Boolean)]),
+        &flags_spec(&[
+            ("-m", FlagKind::Value),
+            ("--allow-empty", FlagKind::Boolean),
+        ]),
     )?;
     assert_max_positionals(&options.args, &["-m"], 1, "commit <pane_id>")?;
     let messages = flag_values(&options.args, "-m");
@@ -1052,7 +1085,11 @@ fn resolve_pane_and_value(
             Some(identity),
         )
     } else {
-        (pos.first().cloned().unwrap_or_default(), pos.get(1).cloned(), None)
+        (
+            pos.first().cloned().unwrap_or_default(),
+            pos.get(1).cloned(),
+            None,
+        )
     };
     if pane_id.is_empty() {
         return Err(RunError::usage(format!("pane id required for {what}")));
@@ -1088,11 +1125,9 @@ pub fn cmd_branch(options: &mut CliOptions) -> Result<Value, RunError> {
     let sub = options.args.first().cloned();
     let sub = match sub.as_deref() {
         Some("create") | Some("switch") => sub.unwrap(),
-        _ => {
-            return Err(RunError::usage(
-                "branch requires a subcommand: create <pane> <name> [--switch] | switch <pane> <name>",
-            ))
-        }
+        _ => return Err(RunError::usage(
+            "branch requires a subcommand: create <pane> <name> [--switch] | switch <pane> <name>",
+        )),
     };
     let mut rest = options.clone();
     rest.args = options.args[1..].to_vec();
@@ -1132,11 +1167,8 @@ pub fn cmd_upstream(options: &mut CliOptions) -> Result<Value, RunError> {
     let config = load_config();
     let (pane_id, repo_root, value) = resolve_pane_and_value(options, &config, "upstream")?;
     let timeout = effective_timeout_ms(options, &config);
-    let output = git::collect_upstream(
-        Path::new(&repo_root),
-        &value,
-        &options.run_options(timeout),
-    )?;
+    let output =
+        git::collect_upstream(Path::new(&repo_root), &value, &options.run_options(timeout))?;
     Ok(mutation_payload(
         "upstream",
         &pane_id,
@@ -1147,12 +1179,18 @@ pub fn cmd_upstream(options: &mut CliOptions) -> Result<Value, RunError> {
 
 /// Optional second/third positionals after the pane id (remote/refspec).
 fn extra_positionals(options: &CliOptions, value_flags: &[&str]) -> Vec<String> {
-    positionals(&options.args, value_flags).into_iter().skip(1).collect()
+    positionals(&options.args, value_flags)
+        .into_iter()
+        .skip(1)
+        .collect()
 }
 
 pub fn cmd_fetch(options: &mut CliOptions) -> Result<Value, RunError> {
     options.mutation = true;
-    validate_flags(&options.args, &flags_spec(&[("--prune", FlagKind::Boolean)]))?;
+    validate_flags(
+        &options.args,
+        &flags_spec(&[("--prune", FlagKind::Boolean)]),
+    )?;
     assert_max_positionals(&options.args, &[], 2, "fetch <pane_id> [remote]")?;
     let config = load_config();
     let (pane_id, repo_root) = repo_root_for_pane(options, &config, &[])?;
@@ -1196,7 +1234,9 @@ pub fn cmd_push(options: &mut CliOptions) -> Result<Value, RunError> {
     let (pane_id, repo_root) = repo_root_for_pane(options, &config, &[])?;
     let extra = extra_positionals(options, &[]);
     if extra.len() > 2 {
-        return Err(RunError::usage("push accepts at most remote and refspec arguments"));
+        return Err(RunError::usage(
+            "push accepts at most remote and refspec arguments",
+        ));
     }
     let remote = extra.first().cloned();
     let refspec = extra.get(1).cloned();
@@ -1258,47 +1298,104 @@ pub fn cmd_remote(options: &mut CliOptions) -> Result<Value, RunError> {
 // ---------------------------------------------------------------------------
 
 const PR_VALUE_FLAGS: &[&str] = &[
-    "--repo", "--limit", "--state", "--head", "--title", "--body", "--body-file",
-    "--base", "--run", "--job", "--lines", "--expect-head", "--comments-file",
-    "--add-reviewer", "--remove-reviewer",
+    "--repo",
+    "--limit",
+    "--state",
+    "--head",
+    "--title",
+    "--body",
+    "--body-file",
+    "--base",
+    "--run",
+    "--job",
+    "--lines",
+    "--expect-head",
+    "--comments-file",
+    "--add-reviewer",
+    "--remove-reviewer",
 ];
 
 fn pr_flag_specs() -> HashMap<String, HashMap<String, FlagKind>> {
     let v = FlagKind::Value;
     let b = FlagKind::Boolean;
     let mut m = HashMap::new();
-    m.insert("list".to_string(), flags_spec(&[("--repo", v), ("--limit", v), ("--state", v), ("--head", v)]));
+    m.insert(
+        "list".to_string(),
+        flags_spec(&[("--repo", v), ("--limit", v), ("--state", v), ("--head", v)]),
+    );
     m.insert("status".to_string(), flags_spec(&[("--repo", v)]));
     m.insert("view".to_string(), flags_spec(&[("--repo", v)]));
-    m.insert("create".to_string(), flags_spec(&[
-        ("--repo", v), ("--title", v), ("--body", v), ("--body-file", v),
-        ("--base", v), ("--head", v), ("--draft", b),
-    ]));
+    m.insert(
+        "create".to_string(),
+        flags_spec(&[
+            ("--repo", v),
+            ("--title", v),
+            ("--body", v),
+            ("--body-file", v),
+            ("--base", v),
+            ("--head", v),
+            ("--draft", b),
+        ]),
+    );
     m.insert("reviews".to_string(), flags_spec(&[("--repo", v)]));
     m.insert("comments".to_string(), flags_spec(&[("--repo", v)]));
     m.insert("checks".to_string(), flags_spec(&[("--repo", v)]));
-    m.insert("logs".to_string(), flags_spec(&[
-        ("--repo", v), ("--run", v), ("--job", v), ("--lines", v),
-    ]));
-    m.insert("review".to_string(), flags_spec(&[
-        ("--repo", v), ("--expect-head", v), ("--approve", b),
-        ("--request-changes", b), ("--comment", b), ("--body", v),
-        ("--body-file", v), ("--comments-file", v),
-    ]));
-    m.insert("comment".to_string(), flags_spec(&[
-        ("--repo", v), ("--expect-head", v), ("--body", v), ("--body-file", v),
-    ]));
-    m.insert("reply".to_string(), flags_spec(&[
-        ("--repo", v), ("--expect-head", v), ("--body", v), ("--body-file", v),
-    ]));
-    m.insert("reviewers".to_string(), flags_spec(&[
-        ("--repo", v), ("--expect-head", v), ("--add-reviewer", v),
-        ("--remove-reviewer", v),
-    ]));
-    m.insert("merge".to_string(), flags_spec(&[
-        ("--repo", v), ("--expect-head", v), ("--squash", b), ("--merge", b),
-        ("--rebase", b), ("--auto", b), ("--disable-auto", b),
-    ]));
+    m.insert(
+        "logs".to_string(),
+        flags_spec(&[("--repo", v), ("--run", v), ("--job", v), ("--lines", v)]),
+    );
+    m.insert(
+        "review".to_string(),
+        flags_spec(&[
+            ("--repo", v),
+            ("--expect-head", v),
+            ("--approve", b),
+            ("--request-changes", b),
+            ("--comment", b),
+            ("--body", v),
+            ("--body-file", v),
+            ("--comments-file", v),
+        ]),
+    );
+    m.insert(
+        "comment".to_string(),
+        flags_spec(&[
+            ("--repo", v),
+            ("--expect-head", v),
+            ("--body", v),
+            ("--body-file", v),
+        ]),
+    );
+    m.insert(
+        "reply".to_string(),
+        flags_spec(&[
+            ("--repo", v),
+            ("--expect-head", v),
+            ("--body", v),
+            ("--body-file", v),
+        ]),
+    );
+    m.insert(
+        "reviewers".to_string(),
+        flags_spec(&[
+            ("--repo", v),
+            ("--expect-head", v),
+            ("--add-reviewer", v),
+            ("--remove-reviewer", v),
+        ]),
+    );
+    m.insert(
+        "merge".to_string(),
+        flags_spec(&[
+            ("--repo", v),
+            ("--expect-head", v),
+            ("--squash", b),
+            ("--merge", b),
+            ("--rebase", b),
+            ("--auto", b),
+            ("--disable-auto", b),
+        ]),
+    );
     m
 }
 
@@ -1316,7 +1413,9 @@ fn resolve_pr_body(args: &[String]) -> Result<PrBodyInput, RunError> {
     let body = flag_value(args, "--body");
     let body_file = flag_value(args, "--body-file");
     if body.is_some() && body_file.is_some() {
-        return Err(RunError::usage("--body and --body-file are mutually exclusive"));
+        return Err(RunError::usage(
+            "--body and --body-file are mutually exclusive",
+        ));
     }
     let mut body_text: Option<String> = None;
     let mut effective_body_file = body_file.clone();
@@ -1422,7 +1521,9 @@ fn cmd_pr_inner(options: &mut CliOptions) -> Result<Value, RunError> {
     match action.as_str() {
         "list" | "status" => {
             if !rest.is_empty() {
-                return Err(RunError::usage(format!("pr {action} takes no positional arguments")));
+                return Err(RunError::usage(format!(
+                    "pr {action} takes no positional arguments"
+                )));
             }
         }
         "view" => {
@@ -1443,7 +1544,9 @@ fn cmd_pr_inner(options: &mut CliOptions) -> Result<Value, RunError> {
             if flag_value(&options.args, "--body").is_some()
                 && flag_value(&options.args, "--body-file").is_some()
             {
-                return Err(RunError::usage("--body and --body-file are mutually exclusive"));
+                return Err(RunError::usage(
+                    "--body and --body-file are mutually exclusive",
+                ));
             }
             if !rest.is_empty() {
                 return Err(RunError::usage("pr create takes no positional arguments"));
@@ -1571,19 +1674,22 @@ fn cmd_pr_inner(options: &mut CliOptions) -> Result<Value, RunError> {
             }
             match action.as_str() {
                 "reviews" => {
-                    let data = gh::collect_pr_reviews(Path::new(&repo_root), &repo, number, &gh_opts);
+                    let data =
+                        gh::collect_pr_reviews(Path::new(&repo_root), &repo, number, &gh_opts);
                     let mut payload = forge_base("reviews");
                     merge_json(&mut payload, &data?);
                     Ok(payload)
                 }
                 "comments" => {
-                    let data = gh::collect_pr_comments(Path::new(&repo_root), &repo, number, &gh_opts);
+                    let data =
+                        gh::collect_pr_comments(Path::new(&repo_root), &repo, number, &gh_opts);
                     let mut payload = forge_base("comments");
                     merge_json(&mut payload, &data?);
                     Ok(payload)
                 }
                 "checks" => {
-                    let data = gh::collect_pr_checks(Path::new(&repo_root), &repo, number, &gh_opts);
+                    let data =
+                        gh::collect_pr_checks(Path::new(&repo_root), &repo, number, &gh_opts);
                     let mut payload = forge_base("checks");
                     merge_json(&mut payload, &data?);
                     Ok(payload)
@@ -1609,9 +1715,7 @@ fn cmd_pr_inner(options: &mut CliOptions) -> Result<Value, RunError> {
                     if let Some(raw) = &lines_raw {
                         match raw.parse::<i64>() {
                             Ok(l) if (1..=2000).contains(&l) => lines = Some(l),
-                            _ => {
-                                return Err(RunError::usage(format!("invalid --lines: {raw}")))
-                            }
+                            _ => return Err(RunError::usage(format!("invalid --lines: {raw}"))),
                         }
                         if job_raw.is_none() {
                             return Err(RunError::usage("--lines requires --job"));
@@ -1670,7 +1774,9 @@ fn cmd_pr_inner(options: &mut CliOptions) -> Result<Value, RunError> {
                     }
                     let comments_file = flag_value(&options.args, "--comments-file");
                     let body_input = resolve_pr_body(&options.args)?;
-                    if comments_file.as_deref() == Some("-") && body_input.body_file.as_deref() == Some("-") {
+                    if comments_file.as_deref() == Some("-")
+                        && body_input.body_file.as_deref() == Some("-")
+                    {
                         return Err(RunError::usage(
                             "--body-file - and --comments-file - cannot both read stdin",
                         ));
@@ -1702,10 +1808,21 @@ fn cmd_pr_inner(options: &mut CliOptions) -> Result<Value, RunError> {
                         };
                         for entry in arr {
                             comments.push(gh::PrLineComment {
-                                path: entry.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                path: entry
+                                    .get("path")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
                                 line: entry.get("line").and_then(|v| v.as_i64()).unwrap_or(0),
-                                side: entry.get("side").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                                body: entry.get("body").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                side: entry
+                                    .get("side")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string()),
+                                body: entry
+                                    .get("body")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
                             });
                         }
                     }
@@ -1723,8 +1840,7 @@ fn cmd_pr_inner(options: &mut CliOptions) -> Result<Value, RunError> {
                         pr_body_text(&body_input).as_deref(),
                         &comments,
                         &gh_opts,
-                    )
-                    ?;
+                    )?;
                     let mut payload = forge_base("review");
                     payload["ok"] = json!(true);
                     merge_json(&mut payload, &data);
@@ -1751,8 +1867,7 @@ fn cmd_pr_inner(options: &mut CliOptions) -> Result<Value, RunError> {
                         &expect_head,
                         body.as_deref().unwrap_or(""),
                         &gh_opts,
-                    )
-                    ?;
+                    )?;
                     let mut payload = forge_base("comment");
                     payload["ok"] = json!(true);
                     merge_json(&mut payload, &data);
@@ -1777,9 +1892,7 @@ fn cmd_pr_inner(options: &mut CliOptions) -> Result<Value, RunError> {
                     match &body {
                         Some(b) if !b.trim().is_empty() => {}
                         _ => {
-                            return Err(RunError::usage(
-                                "pr reply requires --body or --body-file",
-                            ))
+                            return Err(RunError::usage("pr reply requires --body or --body-file"))
                         }
                     }
                     let data = gh::submit_pr_reply(
@@ -1790,8 +1903,7 @@ fn cmd_pr_inner(options: &mut CliOptions) -> Result<Value, RunError> {
                         comment_id,
                         body.as_deref().unwrap_or(""),
                         &gh_opts,
-                    )
-                    ?;
+                    )?;
                     let mut payload = forge_base("reply");
                     payload["ok"] = json!(true);
                     merge_json(&mut payload, &data);
@@ -1807,7 +1919,11 @@ fn cmd_pr_inner(options: &mut CliOptions) -> Result<Value, RunError> {
                     let split_logins = |flag: &str| -> Vec<String> {
                         flag_values(&options.args, flag)
                             .into_iter()
-                            .flat_map(|v| v.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>())
+                            .flat_map(|v| {
+                                v.split(',')
+                                    .map(|s| s.trim().to_string())
+                                    .collect::<Vec<_>>()
+                            })
                             .filter(|s| !s.is_empty())
                             .collect()
                     };
@@ -1826,8 +1942,7 @@ fn cmd_pr_inner(options: &mut CliOptions) -> Result<Value, RunError> {
                         &add,
                         &remove,
                         &gh_opts,
-                    )
-                    ?;
+                    )?;
                     let mut payload = forge_base("reviewers");
                     payload["ok"] = json!(true);
                     merge_json(&mut payload, &data);
@@ -1838,9 +1953,7 @@ fn cmd_pr_inner(options: &mut CliOptions) -> Result<Value, RunError> {
         "merge" => {
             let number = match rest.first().and_then(|s| s.parse::<i64>().ok()) {
                 Some(n) if n >= 1 => n,
-                _ => {
-                    return Err(RunError::usage("pr merge requires a positive PR number"))
-                }
+                _ => return Err(RunError::usage("pr merge requires a positive PR number")),
             };
             if rest.len() > 1 {
                 return Err(RunError::usage("pr merge accepts at most one PR number"));
@@ -1877,7 +1990,9 @@ fn cmd_pr_inner(options: &mut CliOptions) -> Result<Value, RunError> {
             let auto = has_flag(&options.args, "--auto");
             let disable_auto = has_flag(&options.args, "--disable-auto");
             if auto && disable_auto {
-                return Err(RunError::usage("--auto and --disable-auto are mutually exclusive"));
+                return Err(RunError::usage(
+                    "--auto and --disable-auto are mutually exclusive",
+                ));
             }
             if auto && method.is_none() {
                 return Err(RunError::usage(
@@ -1944,33 +2059,71 @@ fn merge_json(target: &mut Value, source: &Value) {
 // ---------------------------------------------------------------------------
 
 const ISSUE_VALUE_FLAGS: &[&str] = &[
-    "--repo", "--limit", "--state", "--label", "--assignee", "--author",
-    "--title", "--body", "--body-file", "--add-label", "--remove-label",
-    "--add-assignee", "--remove-assignee", "--reason",
+    "--repo",
+    "--limit",
+    "--state",
+    "--label",
+    "--assignee",
+    "--author",
+    "--title",
+    "--body",
+    "--body-file",
+    "--add-label",
+    "--remove-label",
+    "--add-assignee",
+    "--remove-assignee",
+    "--reason",
 ];
 
 fn issue_flag_specs() -> HashMap<String, HashMap<String, FlagKind>> {
     let v = FlagKind::Value;
     let b = FlagKind::Boolean;
     let mut m = HashMap::new();
-    m.insert("list".to_string(), flags_spec(&[
-        ("--repo", v), ("--limit", v), ("--state", v), ("--label", v),
-        ("--assignee", v), ("--author", v),
-    ]));
+    m.insert(
+        "list".to_string(),
+        flags_spec(&[
+            ("--repo", v),
+            ("--limit", v),
+            ("--state", v),
+            ("--label", v),
+            ("--assignee", v),
+            ("--author", v),
+        ]),
+    );
     m.insert("view".to_string(), flags_spec(&[("--repo", v)]));
-    m.insert("create".to_string(), flags_spec(&[
-        ("--repo", v), ("--title", v), ("--body", v), ("--body-file", v),
-        ("--label", v), ("--assignee", v),
-    ]));
-    m.insert("edit".to_string(), flags_spec(&[
-        ("--repo", v), ("--title", v), ("--body", v), ("--body-file", v),
-        ("--add-label", v), ("--remove-label", v), ("--add-assignee", v),
-        ("--remove-assignee", v), ("--state", v),
-    ]));
-    m.insert("comment".to_string(), flags_spec(&[
-        ("--repo", v), ("--body", v), ("--body-file", v),
-    ]));
-    m.insert("close".to_string(), flags_spec(&[("--repo", v), ("--reason", v)]));
+    m.insert(
+        "create".to_string(),
+        flags_spec(&[
+            ("--repo", v),
+            ("--title", v),
+            ("--body", v),
+            ("--body-file", v),
+            ("--label", v),
+            ("--assignee", v),
+        ]),
+    );
+    m.insert(
+        "edit".to_string(),
+        flags_spec(&[
+            ("--repo", v),
+            ("--title", v),
+            ("--body", v),
+            ("--body-file", v),
+            ("--add-label", v),
+            ("--remove-label", v),
+            ("--add-assignee", v),
+            ("--remove-assignee", v),
+            ("--state", v),
+        ]),
+    );
+    m.insert(
+        "comment".to_string(),
+        flags_spec(&[("--repo", v), ("--body", v), ("--body-file", v)]),
+    );
+    m.insert(
+        "close".to_string(),
+        flags_spec(&[("--repo", v), ("--reason", v)]),
+    );
     m.insert("link".to_string(), flags_spec(&[("--verify", b)]));
     m.insert("unlink".to_string(), HashMap::new());
     m.insert("links".to_string(), HashMap::new());
@@ -1986,10 +2139,7 @@ fn parse_issue_tracker_ref(spec: &str) -> Result<(String, i64), RunError> {
     )
     .unwrap();
     match re.captures(spec) {
-        Some(caps) => Ok((
-            caps[1].to_string(),
-            caps[2].parse::<i64>().unwrap_or(0),
-        )),
+        Some(caps) => Ok((caps[1].to_string(), caps[2].parse::<i64>().unwrap_or(0))),
         None => Err(RunError::usage(format!(
             "invalid issue ref (expected <owner>/<repo>#<number>): {spec}"
         ))),
@@ -2000,7 +2150,11 @@ fn parse_issue_tracker_ref(spec: &str) -> Result<(String, i64), RunError> {
 fn flag_items(args: &[String], flag: &str) -> Vec<String> {
     flag_values(args, flag)
         .into_iter()
-        .flat_map(|v| v.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>())
+        .flat_map(|v| {
+            v.split(',')
+                .map(|s| s.trim().to_string())
+                .collect::<Vec<_>>()
+        })
         .filter(|s| !s.is_empty())
         .collect()
 }
@@ -2204,9 +2358,7 @@ pub fn cmd_issue(options: &mut CliOptions) -> Result<Value, RunError> {
             if let Some(limit_raw) = flag_value(&options.args, "--limit") {
                 match limit_raw.parse::<i64>() {
                     Ok(l) if (1..=1000).contains(&l) => {}
-                    _ => {
-                        return Err(RunError::usage(format!("invalid --limit: {limit_raw}")))
-                    }
+                    _ => return Err(RunError::usage(format!("invalid --limit: {limit_raw}"))),
                 }
             }
             for flag in ["--label", "--assignee", "--author"] {
@@ -2225,10 +2377,14 @@ pub fn cmd_issue(options: &mut CliOptions) -> Result<Value, RunError> {
             if flag_value(&options.args, "--body").is_some()
                 && flag_value(&options.args, "--body-file").is_some()
             {
-                return Err(RunError::usage("--body and --body-file are mutually exclusive"));
+                return Err(RunError::usage(
+                    "--body and --body-file are mutually exclusive",
+                ));
             }
             if !rest.is_empty() {
-                return Err(RunError::usage("issue create takes no positional arguments"));
+                return Err(RunError::usage(
+                    "issue create takes no positional arguments",
+                ));
             }
             for flag in ["--label", "--assignee"] {
                 assert_forge_items(&flag_items(&options.args, flag), flag)?;
@@ -2257,9 +2413,16 @@ pub fn cmd_issue(options: &mut CliOptions) -> Result<Value, RunError> {
             if flag_value(&options.args, "--body").is_some()
                 && flag_value(&options.args, "--body-file").is_some()
             {
-                return Err(RunError::usage("--body and --body-file are mutually exclusive"));
+                return Err(RunError::usage(
+                    "--body and --body-file are mutually exclusive",
+                ));
             }
-            for flag in ["--add-label", "--remove-label", "--add-assignee", "--remove-assignee"] {
+            for flag in [
+                "--add-label",
+                "--remove-label",
+                "--add-assignee",
+                "--remove-assignee",
+            ] {
                 assert_forge_items(&flag_items(&options.args, flag), flag)?;
             }
         }
@@ -2400,8 +2563,7 @@ pub fn cmd_issue(options: &mut CliOptions) -> Result<Value, RunError> {
                 number,
                 body.as_deref().unwrap_or(""),
                 &gh_opts,
-            )
-            ?;
+            )?;
             let mut payload = forge_base("comment");
             payload["ok"] = json!(true);
             merge_json(&mut payload, &data);

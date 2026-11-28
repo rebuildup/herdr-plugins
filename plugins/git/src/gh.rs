@@ -164,7 +164,10 @@ pub fn run_gh(cwd: &Path, args: &[String], opts: &GhOptions) -> Result<GhResult,
     let stderr = String::from_utf8_lossy(&rx_err.recv().unwrap_or_default()).to_string();
     let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
     if stdout.len() > max_buffer {
-        return Err(GhError::new(GhErrorKind::GhError, "gh output exceeded buffer limit"));
+        return Err(GhError::new(
+            GhErrorKind::GhError,
+            "gh output exceeded buffer limit",
+        ));
     }
     Ok(GhResult {
         stdout,
@@ -189,7 +192,10 @@ pub fn gh_ok(cwd: &Path, args: &[String], opts: &GhOptions) -> Result<String, Gh
         // Only the subcommand words go into the message — argv may carry
         // user content that must not be echoed back.
         let sub = args.iter().take(2).cloned().collect::<Vec<_>>().join(" ");
-        return Err(GhError::new(GhErrorKind::GhError, format!("gh {sub}: {detail}")));
+        return Err(GhError::new(
+            GhErrorKind::GhError,
+            format!("gh {sub}: {detail}"),
+        ));
     }
     Ok(result.stdout)
 }
@@ -252,7 +258,14 @@ pub fn ensure_gh(cwd: &Path, opts: &GhOptions) -> Result<(), GhError> {
         };
         return Err(GhError::new(
             GhErrorKind::GhError,
-            format!("gh is not authenticated: {}", if detail.is_empty() { format!("exit {}", auth.code) } else { detail }),
+            format!(
+                "gh is not authenticated: {}",
+                if detail.is_empty() {
+                    format!("exit {}", auth.code)
+                } else {
+                    detail
+                }
+            ),
         ));
     }
     Ok(())
@@ -300,7 +313,10 @@ fn is_owner_repo(repo: &str) -> bool {
     let mut parts = repo.split('/');
     match (parts.next(), parts.next(), parts.next()) {
         (Some(a), Some(b), None) => {
-            !a.is_empty() && !b.is_empty() && !a.chars().any(|c| c.is_whitespace()) && !b.chars().any(|c| c.is_whitespace())
+            !a.is_empty()
+                && !b.is_empty()
+                && !a.chars().any(|c| c.is_whitespace())
+                && !b.chars().any(|c| c.is_whitespace())
         }
         _ => false,
     }
@@ -310,7 +326,8 @@ fn json_string(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_default()
 }
 
-const PR_LIST_FIELDS: &str = "number,title,state,isDraft,author,headRefName,baseRefName,updatedAt,url";
+const PR_LIST_FIELDS: &str =
+    "number,title,state,isDraft,author,headRefName,baseRefName,updatedAt,url";
 
 const PR_VIEW_FIELDS: &str = "number,title,state,isDraft,author,headRefName,baseRefName,mergeable,mergeStateStatus,reviewDecision,url,body,additions,deletions,changedFiles,createdAt,updatedAt,statusCheckRollup,reviews";
 
@@ -345,7 +362,11 @@ fn bound_pr_view(mut raw: Value) -> Value {
         mapped.reverse();
         obj.insert("reviews".into(), json!(mapped));
     }
-    if let Some(rollup) = obj.get("statusCheckRollup").and_then(|v| v.as_array()).cloned() {
+    if let Some(rollup) = obj
+        .get("statusCheckRollup")
+        .and_then(|v| v.as_array())
+        .cloned()
+    {
         let len = rollup.len();
         let mapped: Vec<Value> = rollup
             .iter()
@@ -394,8 +415,12 @@ pub fn collect_pr_list(
         args.push(head.to_string());
     }
     let out = gh_ok(repo_root, &args, opts)?;
-    let parsed: Value = serde_json::from_str(&out)
-        .map_err(|e| GhError::new(GhErrorKind::GhError, format!("gh pr list: invalid JSON: {e}")))?;
+    let parsed: Value = serde_json::from_str(&out).map_err(|e| {
+        GhError::new(
+            GhErrorKind::GhError,
+            format!("gh pr list: invalid JSON: {e}"),
+        )
+    })?;
     Ok(parsed.as_array().cloned().unwrap_or_default())
 }
 
@@ -418,8 +443,12 @@ pub fn collect_pr_view(
         ],
         opts,
     )?;
-    let parsed: Value = serde_json::from_str(&out)
-        .map_err(|e| GhError::new(GhErrorKind::GhError, format!("gh pr view: invalid JSON: {e}")))?;
+    let parsed: Value = serde_json::from_str(&out).map_err(|e| {
+        GhError::new(
+            GhErrorKind::GhError,
+            format!("gh pr view: invalid JSON: {e}"),
+        )
+    })?;
     Ok(bound_pr_view(parsed))
 }
 
@@ -674,8 +703,7 @@ pub fn collect_pr_reviews(
         repo,
         &format!("pulls/{number}/reviews?per_page={GH_API_PAGE}"),
         opts,
-    )
-    ?;
+    )?;
     let Some(arr) = raw.as_array() else {
         return Err(GhError::new(
             GhErrorKind::GhError,
@@ -734,15 +762,13 @@ pub fn collect_pr_comments(
         repo,
         &format!("issues/{number}/comments?per_page={GH_API_PAGE}"),
         opts,
-    )
-    ?;
+    )?;
     let line_raw = gh_api_json(
         repo_root,
         repo,
         &format!("pulls/{number}/comments?per_page={GH_API_PAGE}"),
         opts,
-    )
-    ?;
+    )?;
     let (Some(issue_arr), Some(line_arr)) = (issue_raw.as_array(), line_raw.as_array()) else {
         return Err(GhError::new(
             GhErrorKind::GhError,
@@ -846,8 +872,12 @@ pub fn collect_pr_checks(
             }
         }
     };
-    let parsed: Value = serde_json::from_str(&raw_text)
-        .map_err(|e| GhError::new(GhErrorKind::GhError, format!("gh pr checks: invalid JSON: {e}")))?;
+    let parsed: Value = serde_json::from_str(&raw_text).map_err(|e| {
+        GhError::new(
+            GhErrorKind::GhError,
+            format!("gh pr checks: invalid JSON: {e}"),
+        )
+    })?;
     let arr = parsed.as_array().cloned().unwrap_or_default();
     let checks: Vec<Value> = arr
         .iter()
@@ -1009,15 +1039,23 @@ pub fn collect_pr_logs(
             ],
             opts,
         )?;
-        let parsed: Value = serde_json::from_str(&out)
-            .map_err(|e| GhError::new(GhErrorKind::GhError, format!("gh run view: invalid JSON: {e}")))?;
+        let parsed: Value = serde_json::from_str(&out).map_err(|e| {
+            GhError::new(
+                GhErrorKind::GhError,
+                format!("gh run view: invalid JSON: {e}"),
+            )
+        })?;
         let jobs_raw = parsed
             .get("jobs")
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
         let jobs_len = jobs_raw.len();
-        let bounded: Vec<Value> = jobs_raw.iter().take(PR_RUN_JOBS_MAX).map(map_gh_job).collect();
+        let bounded: Vec<Value> = jobs_raw
+            .iter()
+            .take(PR_RUN_JOBS_MAX)
+            .map(map_gh_job)
+            .collect();
         if let Some(obj) = base.as_object_mut() {
             obj.insert("mode".into(), json!("run"));
             obj.insert("run".into(), map_gh_run(&parsed));
@@ -1050,8 +1088,12 @@ pub fn collect_pr_logs(
         ],
         opts,
     )?;
-    let parsed: Value = serde_json::from_str(&out)
-        .map_err(|e| GhError::new(GhErrorKind::GhError, format!("gh run list: invalid JSON: {e}")))?;
+    let parsed: Value = serde_json::from_str(&out).map_err(|e| {
+        GhError::new(
+            GhErrorKind::GhError,
+            format!("gh run list: invalid JSON: {e}"),
+        )
+    })?;
     let arr = parsed.as_array().cloned().unwrap_or_default();
     let runs: Vec<Value> = arr.iter().take(PR_RUNS_MAX).map(map_gh_run).collect();
     if let Some(obj) = base.as_object_mut() {
@@ -1091,7 +1133,9 @@ fn assert_head_fresh(
     if head_sha != expect_head {
         return Err(GhError::new(
             GhErrorKind::StaleHead,
-            format!("pull request #{number} head moved: expected {expect_head}, current {head_sha}"),
+            format!(
+                "pull request #{number} head moved: expected {expect_head}, current {head_sha}"
+            ),
         ));
     }
     Ok(refs)
@@ -1125,7 +1169,10 @@ pub struct PrLineComment {
 fn validate_line_comments(comments: &[PrLineComment]) -> Result<(), GhError> {
     for (i, c) in comments.iter().enumerate() {
         if c.path.is_empty() || c.path.chars().count() > 4096 {
-            return Err(GhError::new(GhErrorKind::GhError, format!("line comment {i}: invalid path")));
+            return Err(GhError::new(
+                GhErrorKind::GhError,
+                format!("line comment {i}: invalid path"),
+            ));
         }
         if c.line < 1 {
             return Err(GhError::new(
@@ -1211,7 +1258,10 @@ pub fn submit_pr_review(
     let refs = assert_head_fresh(repo_root, repo, number, expect_head, opts)?;
     validate_line_comments(comments)?;
     let mut payload = Map::new();
-    payload.insert("commit_id".into(), refs.head.get("sha").cloned().unwrap_or(Value::Null));
+    payload.insert(
+        "commit_id".into(),
+        refs.head.get("sha").cloned().unwrap_or(Value::Null),
+    );
     payload.insert("event".into(), json!(event.as_str()));
     if let Some(b) = body {
         payload.insert("body".into(), json!(b));
@@ -1239,8 +1289,7 @@ pub fn submit_pr_review(
         "POST",
         Some(&Value::Object(payload)),
         opts,
-    )
-    ?;
+    )?;
     Ok(json!({
         "number": number,
         "head": refs.head,
@@ -1266,8 +1315,7 @@ pub fn submit_pr_comment(
         "POST",
         Some(&json!({ "body": body })),
         opts,
-    )
-    ?;
+    )?;
     Ok(json!({
         "number": number,
         "head": refs.head,
@@ -1294,8 +1342,7 @@ pub fn submit_pr_reply(
         "POST",
         Some(&json!({ "body": body })),
         opts,
-    )
-    ?;
+    )?;
     Ok(json!({
         "number": number,
         "comment_id": comment_id,
@@ -1401,9 +1448,11 @@ pub fn bound_issue_view(raw: &Value) -> Value {
         .map(|arr| {
             arr.iter()
                 .filter_map(|l| {
-                    l.as_str()
-                        .map(|s| s.to_string())
-                        .or_else(|| l.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                    l.as_str().map(|s| s.to_string()).or_else(|| {
+                        l.get("name")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    })
                 })
                 .collect()
         })
@@ -1462,7 +1511,10 @@ pub fn bound_issue_view(raw: &Value) -> Value {
     if let Some(obj) = out.as_object_mut() {
         let start = comments_len.saturating_sub(ISSUE_COMMENTS_MAX);
         obj.insert("comments".into(), json!(comments[start..].to_vec()));
-        obj.insert("comments_truncated".into(), json!(comments_len > ISSUE_COMMENTS_MAX));
+        obj.insert(
+            "comments_truncated".into(),
+            json!(comments_len > ISSUE_COMMENTS_MAX),
+        );
     }
     let reactions_raw = raw
         .get("reactionGroups")
@@ -1539,8 +1591,12 @@ pub fn collect_issue_list(
         args.push(author.to_string());
     }
     let out = gh_ok(repo_root, &args, opts)?;
-    let parsed: Value = serde_json::from_str(&out)
-        .map_err(|e| GhError::new(GhErrorKind::GhError, format!("gh issue list: invalid JSON: {e}")))?;
+    let parsed: Value = serde_json::from_str(&out).map_err(|e| {
+        GhError::new(
+            GhErrorKind::GhError,
+            format!("gh issue list: invalid JSON: {e}"),
+        )
+    })?;
     Ok(parsed.as_array().cloned().unwrap_or_default())
 }
 
@@ -1563,8 +1619,12 @@ pub fn collect_issue_view(
         ],
         opts,
     )?;
-    let parsed: Value = serde_json::from_str(&out)
-        .map_err(|e| GhError::new(GhErrorKind::GhError, format!("gh issue view: invalid JSON: {e}")))?;
+    let parsed: Value = serde_json::from_str(&out).map_err(|e| {
+        GhError::new(
+            GhErrorKind::GhError,
+            format!("gh issue view: invalid JSON: {e}"),
+        )
+    })?;
     Ok(bound_issue_view(&parsed))
 }
 
@@ -1634,8 +1694,7 @@ pub fn submit_issue_comment(
         "POST",
         Some(&json!({ "body": body })),
         opts,
-    )
-    ?;
+    )?;
     Ok(json!({
         "number": number,
         "comment": map_gh_comment(&comment),
@@ -1769,8 +1828,7 @@ pub fn update_issue(
                     request.repo.to_string(),
                 ],
                 opts,
-            )
-            ?;
+            )?;
         }
         _ => {}
     }
@@ -1814,8 +1872,12 @@ fn fetch_pr_merge_state(
         ],
         opts,
     )?;
-    serde_json::from_str(&out)
-        .map_err(|e| GhError::new(GhErrorKind::GhError, format!("gh pr view: invalid JSON: {e}")))
+    serde_json::from_str(&out).map_err(|e| {
+        GhError::new(
+            GhErrorKind::GhError,
+            format!("gh pr view: invalid JSON: {e}"),
+        )
+    })
 }
 
 fn upper_or_null(value: Option<&Value>) -> Option<String> {
@@ -1862,7 +1924,12 @@ pub struct PrMergeRequest<'a> {
 }
 
 const MERGE_STATE_REFUSED: &[&str] = &[
-    "BEHIND", "BLOCKED", "DIRTY", "DRAFT", "HAS_HOOKS", "UNKNOWN",
+    "BEHIND",
+    "BLOCKED",
+    "DIRTY",
+    "DRAFT",
+    "HAS_HOOKS",
+    "UNKNOWN",
 ];
 const AUTO_MERGE_STATE_REFUSED: &[&str] = &["DIRTY", "DRAFT", "UNKNOWN"];
 
@@ -1882,7 +1949,10 @@ fn merge_blocked_message(number: i64, view: &Value, reason: &str) -> String {
             "mergeable={}",
             upper_or_null(get("mergeable")).unwrap_or_else(|| "null".into())
         ),
-        format!("isDraft={}", get("isDraft").and_then(|v| v.as_bool()).unwrap_or(false)),
+        format!(
+            "isDraft={}",
+            get("isDraft").and_then(|v| v.as_bool()).unwrap_or(false)
+        ),
     ];
     if let Some(name) = get("headRefName").and_then(|v| v.as_str()) {
         parts.push(format!("head={name}"));
@@ -1965,7 +2035,10 @@ pub fn merge_pr(
         .to_string();
     let pr_state = upper_or_null(view.get("state"));
     let merge_state = upper_or_null(view.get("mergeStateStatus"));
-    let is_draft = view.get("isDraft").and_then(|v| v.as_bool()).unwrap_or(false);
+    let is_draft = view
+        .get("isDraft")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     // github-delivery boundary: never merge or arm auto-merge on a
     // release-train head branch.
@@ -1994,9 +2067,13 @@ pub fn merge_pr(
 
     if request.disable_auto {
         merge_write(|| {
-            gh_api_delete(repo_root, request.repo, &format!("{endpoint}/auto-merge"), opts)
-        })
-        ?;
+            gh_api_delete(
+                repo_root,
+                request.repo,
+                &format!("{endpoint}/auto-merge"),
+                opts,
+            )
+        })?;
         result = "auto_merge_disabled".to_string();
     } else if request.auto {
         if is_draft {
@@ -2014,19 +2091,16 @@ pub fn merge_pr(
             }
         }
         let payload = json!({ "merge_method": request.method.map(|m| m.as_str()) });
-        merge_echo = Some(
-            merge_write(|| {
-                gh_api_call(
-                    repo_root,
-                    request.repo,
-                    &format!("{endpoint}/auto-merge"),
-                    "POST",
-                    Some(&payload),
-                    opts,
-                )
-            })
-            ?,
-        );
+        merge_echo = Some(merge_write(|| {
+            gh_api_call(
+                repo_root,
+                request.repo,
+                &format!("{endpoint}/auto-merge"),
+                "POST",
+                Some(&payload),
+                opts,
+            )
+        })?);
         result = "auto_merge_enabled".to_string();
     } else {
         if is_draft {
@@ -2064,8 +2138,7 @@ pub fn merge_pr(
                 Some(&Value::Object(payload.clone())),
                 opts,
             )
-        })
-        ?;
+        })?;
         result = if echo.get("merged").and_then(|v| v.as_bool()) == Some(true) {
             "merged".to_string()
         } else {
@@ -2111,4 +2184,3 @@ fn gh_api_delete(
 ) -> Result<Value, GhError> {
     gh_api_call(repo_root, repo, endpoint, "DELETE", None, opts)
 }
-

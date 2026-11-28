@@ -48,8 +48,8 @@ use crate::git::{
 };
 use crate::tui_model::{
     self, branch_label, commit_label, describe_error, diff_scope_for, file_detail, file_label,
-    format_branch_line, format_change_counts, short_sha7, FileDiffScope, HonestError,
-    PinnedTarget, TuiError, TuiTargetSpec,
+    format_branch_line, format_change_counts, short_sha7, FileDiffScope, HonestError, PinnedTarget,
+    TuiError, TuiTargetSpec,
 };
 
 const GIT_TIMEOUT_MS: u64 = 10_000;
@@ -72,11 +72,9 @@ fn pane_cwd_of(snapshot: &SessionSnapshot, pane_id: &str) -> Result<String, TuiE
         .panes
         .iter()
         .find(|p| p.pane_id == pane_id)
-        .ok_or_else(|| {
-            TuiError::Kind {
-                kind: "pane_not_found",
-                message: format!("pane not found in session snapshot: {pane_id}"),
-            }
+        .ok_or_else(|| TuiError::Kind {
+            kind: "pane_not_found",
+            message: format!("pane not found in session snapshot: {pane_id}"),
         })?;
     pane.cwd
         .clone()
@@ -196,18 +194,50 @@ enum HomeAction {
 }
 
 const HOME_ITEMS: &[(HomeAction, &str, &str)] = &[
-    (HomeAction::Files, "Changed files", "per-file stage / unstage / diff"),
-    (HomeAction::Diff, "Diff", "worktree / staged / HEAD patch viewer"),
+    (
+        HomeAction::Files,
+        "Changed files",
+        "per-file stage / unstage / diff",
+    ),
+    (
+        HomeAction::Diff,
+        "Diff",
+        "worktree / staged / HEAD patch viewer",
+    ),
     (HomeAction::Log, "Commit history", "log + per-commit show"),
-    (HomeAction::Compare, "Compare", "branch vs upstream (merge-base diff)"),
-    (HomeAction::Branches, "Branches", "list / switch / create / set upstream"),
-    (HomeAction::Remotes, "Remotes", "fetch/push URLs (credentials stripped)"),
-    (HomeAction::StageAll, "Stage all changes", "git add -A (confirmed)"),
-    (HomeAction::UnstageAll, "Unstage all changes", "git reset (confirmed)"),
+    (
+        HomeAction::Compare,
+        "Compare",
+        "branch vs upstream (merge-base diff)",
+    ),
+    (
+        HomeAction::Branches,
+        "Branches",
+        "list / switch / create / set upstream",
+    ),
+    (
+        HomeAction::Remotes,
+        "Remotes",
+        "fetch/push URLs (credentials stripped)",
+    ),
+    (
+        HomeAction::StageAll,
+        "Stage all changes",
+        "git add -A (confirmed)",
+    ),
+    (
+        HomeAction::UnstageAll,
+        "Unstage all changes",
+        "git reset (confirmed)",
+    ),
     (HomeAction::Commit, "Commit…", "message form + confirm"),
     (HomeAction::Fetch, "Fetch…", "pick remote, run git fetch"),
     (HomeAction::Push, "Push…", "push current branch (confirmed)"),
-    (HomeAction::Upstream, "Set upstream…", "branch --set-upstream-to"),
+    (
+        HomeAction::Upstream,
+        "Set upstream…",
+        "branch --set-upstream-to",
+    ),
     (HomeAction::Refresh, "Refresh", "re-read status (r)"),
 ];
 
@@ -360,14 +390,26 @@ impl DiffCycle {
 #[derive(Debug, Clone)]
 enum PagerLoad {
     /// `diff` for one file; scope cycles worktree/staged/head.
-    FileDiff { file: FileChange, scope: DiffCycle },
+    FileDiff {
+        file: FileChange,
+        scope: DiffCycle,
+    },
     /// Whole-diff pager; scope cycles worktree/staged/HEAD.
-    Diff { scope: DiffCycle },
-    CommitShow { sha: String, subject: String },
-    Compare { base: Option<String> },
+    Diff {
+        scope: DiffCycle,
+    },
+    CommitShow {
+        sha: String,
+        subject: String,
+    },
+    Compare {
+        base: Option<String>,
+    },
     Remotes,
     /// Precomputed lines (notices, honest errors, no-diff messages).
-    Static { lines: Vec<String> },
+    Static {
+        lines: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -410,7 +452,8 @@ impl PagerScreen {
             }
             PagerLoad::Compare { base } => format!(
                 "compare — {}",
-                base.clone().unwrap_or_else(|| "upstream (auto)".to_string())
+                base.clone()
+                    .unwrap_or_else(|| "upstream (auto)".to_string())
             ),
             PagerLoad::Remotes => "remotes".to_string(),
             PagerLoad::Static { .. } => self.static_title.clone().unwrap_or_default(),
@@ -418,7 +461,10 @@ impl PagerScreen {
     }
 
     fn is_diff_scope_pager(&self) -> bool {
-        matches!(self.load, PagerLoad::FileDiff { .. } | PagerLoad::Diff { .. })
+        matches!(
+            self.load,
+            PagerLoad::FileDiff { .. } | PagerLoad::Diff { .. }
+        )
     }
 
     fn is_compare_pager(&self) -> bool {
@@ -439,7 +485,9 @@ enum PromptKind {
     BaseRevision,
     BranchName,
     /// `set upstream` for a specific branch.
-    Upstream { branch: String },
+    Upstream {
+        branch: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -465,13 +513,29 @@ struct PendingMutation {
 /// them through the same domain collectors the CLI uses.
 #[derive(Debug, Clone)]
 enum MutationAction {
-    Stage { all: bool, paths: Vec<String> },
-    Unstage { all: bool, paths: Vec<String> },
-    Commit { messages: Vec<String> },
-    BranchSwitch { name: String },
-    BranchCreate { name: String },
-    SetUpstream { upstream: String },
-    Fetch { remote: String },
+    Stage {
+        all: bool,
+        paths: Vec<String>,
+    },
+    Unstage {
+        all: bool,
+        paths: Vec<String>,
+    },
+    Commit {
+        messages: Vec<String>,
+    },
+    BranchSwitch {
+        name: String,
+    },
+    BranchCreate {
+        name: String,
+    },
+    SetUpstream {
+        upstream: String,
+    },
+    Fetch {
+        remote: String,
+    },
     Push {
         remote: Option<String>,
         refspec: Option<String>,
@@ -679,15 +743,12 @@ impl GitTui {
                     item.disabled = true;
                     item.disabled_reason = Some("nothing to stage".to_string());
                 }
-                if *id == HomeAction::UnstageAll
-                    && changes.map(|c| c.staged == 0).unwrap_or(false)
+                if *id == HomeAction::UnstageAll && changes.map(|c| c.staged == 0).unwrap_or(false)
                 {
                     item.disabled = true;
                     item.disabled_reason = Some("nothing staged".to_string());
                 }
-                if *id == HomeAction::Commit
-                    && changes.map(|c| c.staged == 0).unwrap_or(false)
-                {
+                if *id == HomeAction::Commit && changes.map(|c| c.staged == 0).unwrap_or(false) {
                     item.disabled = true;
                     item.disabled_reason = Some("nothing staged".to_string());
                 }
@@ -824,9 +885,7 @@ impl GitTui {
     fn apply_task_result(&mut self, result: BgResult) {
         match result {
             BgResult::Pager { pager_id, result } => self.apply_pager_result(pager_id, result),
-            BgResult::Mutation { result, action } => {
-                self.apply_mutation_result(result, &action)
-            }
+            BgResult::Mutation { result, action } => self.apply_mutation_result(result, &action),
             BgResult::Status(result) => match result {
                 Ok(mut report) => {
                     // Unborn branch: collectBranch mislabels HEAD as
@@ -999,7 +1058,9 @@ impl GitTui {
     }
 
     fn refresh_status_task(&mut self) {
-        let Some(target) = self.target.clone() else { return };
+        let Some(target) = self.target.clone() else {
+            return;
+        };
         self.spawn_task(BgKind::Status, "refresh status", move |opts| {
             let mut o = opts;
             o.timeout_ms = Some(GIT_TIMEOUT_MS);
@@ -1049,7 +1110,9 @@ impl GitTui {
     }
 
     fn load_pager(&mut self, pager_id: u64, load: &PagerLoad) {
-        let Some(target) = self.target.clone() else { return };
+        let Some(target) = self.target.clone() else {
+            return;
+        };
         let repo = target.repo_root.clone();
         let load = load.clone();
         self.spawn_task(BgKind::Pager, "load", move |opts| {
@@ -1149,7 +1212,9 @@ impl GitTui {
     // --- read views -------------------------------------------------------------------
 
     fn spawn_files_load(&mut self) {
-        let Some(target) = self.target.clone() else { return };
+        let Some(target) = self.target.clone() else {
+            return;
+        };
         self.spawn_task(BgKind::List, "load files", move |opts| {
             let mut o = opts;
             o.timeout_ms = Some(GIT_TIMEOUT_MS);
@@ -1161,7 +1226,9 @@ impl GitTui {
     }
 
     fn spawn_log_load(&mut self) {
-        let Some(target) = self.target.clone() else { return };
+        let Some(target) = self.target.clone() else {
+            return;
+        };
         self.spawn_task(BgKind::List, "load log", move |opts| {
             let mut o = opts;
             o.timeout_ms = Some(GIT_TIMEOUT_MS);
@@ -1177,11 +1244,14 @@ impl GitTui {
     }
 
     fn spawn_branches_load(&mut self) {
-        let Some(target) = self.target.clone() else { return };
+        let Some(target) = self.target.clone() else {
+            return;
+        };
         self.spawn_task(BgKind::List, "load branches", move |opts| {
             let mut o = opts;
             o.timeout_ms = Some(GIT_TIMEOUT_MS);
-            let res = git::collect_branches(Path::new(&target.repo_root), &o).map_err(TuiError::from);
+            let res =
+                git::collect_branches(Path::new(&target.repo_root), &o).map_err(TuiError::from);
             BgResult::Branches(res)
         });
     }
@@ -1198,7 +1268,9 @@ impl GitTui {
         if self.require_target().is_none() {
             return;
         }
-        self.push_pager(PagerLoad::Diff { scope: DiffCycle::Worktree });
+        self.push_pager(PagerLoad::Diff {
+            scope: DiffCycle::Worktree,
+        });
     }
 
     fn show_log(&mut self) {
@@ -1221,7 +1293,10 @@ impl GitTui {
             return;
         }
         self.spawn_branches_load();
-        self.push(Screen::List(ListScreen::new(ListKind::Branches, Vec::new())));
+        self.push(Screen::List(ListScreen::new(
+            ListKind::Branches,
+            Vec::new(),
+        )));
     }
 
     fn show_remotes(&mut self) {
@@ -1243,19 +1318,25 @@ impl GitTui {
         let call = self.call.clone();
         let action = mutation.action.clone();
         let label = mutation.cli_label.clone();
-        self.spawn_task(BgKind::Mutation, &format!("running: {label}"), move |mut opts| {
-            opts.timeout_ms = Some(MUTATION_TIMEOUT_MS);
-            // Fresh-check inside the worker so the UI stays live.
-            let result = assert_target_fresh(&pinned, &call)
-                .and_then(|_| run_mutation_body(&repo, &action, &mut opts));
-            BgResult::Mutation { result, action }
-        });
+        self.spawn_task(
+            BgKind::Mutation,
+            &format!("running: {label}"),
+            move |mut opts| {
+                opts.timeout_ms = Some(MUTATION_TIMEOUT_MS);
+                // Fresh-check inside the worker so the UI stays live.
+                let result = assert_target_fresh(&pinned, &call)
+                    .and_then(|_| run_mutation_body(&repo, &action, &mut opts));
+                BgResult::Mutation { result, action }
+            },
+        );
     }
 
     // --- flows -------------------------------------------------------------------------
 
     fn stage_all(&mut self) {
-        let Some(t) = self.require_target() else { return };
+        let Some(t) = self.require_target() else {
+            return;
+        };
         let n = self
             .status
             .as_ref()
@@ -1273,12 +1354,17 @@ impl GitTui {
             ],
             consequence: "git add -A stages every change including untracked files.".to_string(),
             cli_label: "stage --all".to_string(),
-            action: MutationAction::Stage { all: true, paths: Vec::new() },
+            action: MutationAction::Stage {
+                all: true,
+                paths: Vec::new(),
+            },
         });
     }
 
     fn unstage_all(&mut self) {
-        let Some(t) = self.require_target() else { return };
+        let Some(t) = self.require_target() else {
+            return;
+        };
         self.confirm_mutation(PendingMutation {
             title: "Unstage all changes".to_string(),
             target_lines: vec![
@@ -1290,7 +1376,10 @@ impl GitTui {
             ],
             consequence: "git reset unstages everything; worktree files are untouched.".to_string(),
             cli_label: "unstage --all".to_string(),
-            action: MutationAction::Unstage { all: true, paths: Vec::new() },
+            action: MutationAction::Unstage {
+                all: true,
+                paths: Vec::new(),
+            },
         });
     }
 
@@ -1315,7 +1404,9 @@ impl GitTui {
     }
 
     fn push_flow(&mut self) {
-        let Some(t) = self.require_target() else { return };
+        let Some(t) = self.require_target() else {
+            return;
+        };
         if t.detached || t.branch_name.is_none() {
             self.push_static_pager(
                 "push — detached HEAD".to_string(),
@@ -1327,10 +1418,7 @@ impl GitTui {
             return;
         }
         let branch = t.branch_name.clone().unwrap_or_default();
-        let upstream = self
-            .status
-            .as_ref()
-            .and_then(|s| s.branch.upstream.clone());
+        let upstream = self.status.as_ref().and_then(|s| s.branch.upstream.clone());
         if let Some(upstream) = upstream {
             let remote = upstream.split('/').next().unwrap_or(&upstream).to_string();
             let repo = t.repo_root.clone();
@@ -1357,12 +1445,14 @@ impl GitTui {
     }
 
     fn spawn_remotes_load(&mut self) {
-        let Some(target) = self.target.clone() else { return };
+        let Some(target) = self.target.clone() else {
+            return;
+        };
         self.spawn_task(BgKind::RemotesSelect, "load remotes", move |opts| {
             let mut o = opts;
             o.timeout_ms = Some(GIT_TIMEOUT_MS);
-            let res = git::collect_remotes(Path::new(&target.repo_root), &o)
-                .map_err(TuiError::from);
+            let res =
+                git::collect_remotes(Path::new(&target.repo_root), &o).map_err(TuiError::from);
             BgResult::Remotes(res)
         });
     }
@@ -1384,9 +1474,7 @@ impl GitTui {
                 ),
                 SelectPurpose::PushRemote => (
                     "push — no remotes".to_string(),
-                    vec![
-                        "This repository has no remotes configured; nowhere to push.".to_string(),
-                    ],
+                    vec!["This repository has no remotes configured; nowhere to push.".to_string()],
                 ),
             };
             self.push_static_pager(title, lines);
@@ -1415,7 +1503,9 @@ impl GitTui {
     }
 
     fn set_upstream_for(&mut self, branch: Option<String>) {
-        let Some(t) = self.require_target() else { return };
+        let Some(t) = self.require_target() else {
+            return;
+        };
         let Some(branch) = branch else {
             self.notice = Some("detached HEAD — no branch to set upstream on".to_string());
             self.sync_status_line();
@@ -1427,7 +1517,9 @@ impl GitTui {
             return;
         }
         self.push(Screen::Prompt(PromptState {
-            kind: PromptKind::Upstream { branch: branch.clone() },
+            kind: PromptKind::Upstream {
+                branch: branch.clone(),
+            },
             draft: String::new(),
             placeholder: String::new(),
             label: format!("upstream for {branch} (e.g. origin/main):"),
@@ -1531,7 +1623,9 @@ impl GitTui {
                 } else {
                     vec![subj, body]
                 };
-                let Some(t) = self.require_target() else { return };
+                let Some(t) = self.require_target() else {
+                    return;
+                };
                 let staged = self.status.as_ref().map(|s| s.changes.staged).unwrap_or(0);
                 let subj_show = messages[0].clone();
                 self.confirm_mutation(PendingMutation {
@@ -1559,7 +1653,11 @@ impl GitTui {
                 }
                 if let Screen::Pager(p) = self.current_mut() {
                     if let PagerLoad::Compare { base } = &mut p.load {
-                        *base = if trimmed.is_empty() { None } else { Some(trimmed) };
+                        *base = if trimmed.is_empty() {
+                            None
+                        } else {
+                            Some(trimmed)
+                        };
                     }
                 }
                 self.reload_top_pager();
@@ -1571,7 +1669,9 @@ impl GitTui {
                     self.sync_status_line();
                     return;
                 }
-                let Some(t) = self.require_target() else { return };
+                let Some(t) = self.require_target() else {
+                    return;
+                };
                 let name = trimmed.clone();
                 self.confirm_mutation(PendingMutation {
                     title: "Create and switch branch".to_string(),
@@ -1579,9 +1679,12 @@ impl GitTui {
                         format!("repo: {}", t.repo_root),
                         format!("branch: {trimmed}"),
                     ],
-                    consequence: "git switch -c creates the branch and moves HEAD to it.".to_string(),
+                    consequence: "git switch -c creates the branch and moves HEAD to it."
+                        .to_string(),
                     cli_label: format!("branch create {name}"),
-                    action: MutationAction::BranchCreate { name: trimmed.clone() },
+                    action: MutationAction::BranchCreate {
+                        name: trimmed.clone(),
+                    },
                 });
             }
             PromptKind::Upstream { branch } => {
@@ -1591,7 +1694,9 @@ impl GitTui {
                     self.sync_status_line();
                     return;
                 }
-                let Some(t) = self.require_target() else { return };
+                let Some(t) = self.require_target() else {
+                    return;
+                };
                 self.confirm_mutation(PendingMutation {
                     title: "Set upstream".to_string(),
                     target_lines: vec![
@@ -1599,7 +1704,8 @@ impl GitTui {
                         format!("branch: {branch}"),
                         format!("upstream: {trimmed}"),
                     ],
-                    consequence: "git branch --set-upstream-to records the tracking ref.".to_string(),
+                    consequence: "git branch --set-upstream-to records the tracking ref."
+                        .to_string(),
                     cli_label: format!("upstream {trimmed}"),
                     action: MutationAction::SetUpstream {
                         upstream: trimmed.clone(),
@@ -1663,14 +1769,16 @@ impl GitTui {
                         return true;
                     }
                     '\t' => {
-                        let is_diff = matches!(self.current(), Screen::Pager(p) if p.is_diff_scope_pager());
+                        let is_diff =
+                            matches!(self.current(), Screen::Pager(p) if p.is_diff_scope_pager());
                         if is_diff {
                             self.cycle_top_pager_scope();
                             return true;
                         }
                     }
                     'b' => {
-                        let is_cmp = matches!(self.current(), Screen::Pager(p) if p.is_compare_pager());
+                        let is_cmp =
+                            matches!(self.current(), Screen::Pager(p) if p.is_compare_pager());
                         if is_cmp {
                             self.push(Screen::Prompt(PromptState {
                                 kind: PromptKind::BaseRevision,
@@ -1859,10 +1967,9 @@ impl GitTui {
             (ListKind::Log, ListValue::Commit(commit)) => {
                 self.show_commit(commit.clone());
             }
-            (ListKind::Branches, ListValue::Branch(entry))
-                if !entry.current => {
-                    self.switch_branch(entry.clone());
-                }
+            (ListKind::Branches, ListValue::Branch(entry)) if !entry.current => {
+                self.switch_branch(entry.clone());
+            }
             _ => {}
         }
     }
@@ -1990,9 +2097,14 @@ impl GitTui {
     // --- branch flows ---------------------------------------------------------------------
 
     fn switch_branch(&mut self, entry: BranchEntry) {
-        let Some(t) = self.require_target() else { return };
+        let Some(t) = self.require_target() else {
+            return;
+        };
         let repo = t.repo_root.clone();
-        let from = t.branch_name.clone().unwrap_or_else(|| "HEAD (detached)".to_string());
+        let from = t
+            .branch_name
+            .clone()
+            .unwrap_or_else(|| "HEAD (detached)".to_string());
         let name = entry.name.clone();
         let sha = entry.sha.clone();
         self.confirm_mutation(PendingMutation {
@@ -2011,7 +2123,9 @@ impl GitTui {
     // --- file stage -------------------------------------------------------------------------
 
     fn file_stage(&mut self, file: FileChange, staging: bool) {
-        let Some(t) = self.require_target() else { return };
+        let Some(t) = self.require_target() else {
+            return;
+        };
         if !staging && file.kind == FileChangeKind::Untracked {
             self.notice = Some(format!(
                 "{} is untracked — nothing staged to unstage",
@@ -2034,7 +2148,11 @@ impl GitTui {
         }
         let verb = if staging { "stage" } else { "unstage" };
         self.confirm_mutation(PendingMutation {
-            title: format!("{} {}", if staging { "Stage" } else { "Unstage" }, file.path),
+            title: format!(
+                "{} {}",
+                if staging { "Stage" } else { "Unstage" },
+                file.path
+            ),
             target_lines: vec![
                 format!("repo: {}", t.repo_root),
                 format!(
@@ -2063,7 +2181,9 @@ impl GitTui {
     ) {
         match purpose {
             SelectPurpose::FetchRemote => {
-                let Some(t) = self.require_target() else { return };
+                let Some(t) = self.require_target() else {
+                    return;
+                };
                 let remote = item.remote.name.clone();
                 let url = item.remote.url.clone();
                 self.confirm_mutation(PendingMutation {
@@ -2072,13 +2192,19 @@ impl GitTui {
                         format!("repo: {}", t.repo_root),
                         format!("remote: {remote} ({url})"),
                     ],
-                    consequence: "git fetch downloads objects/refs; it does not touch your worktree.".to_string(),
+                    consequence:
+                        "git fetch downloads objects/refs; it does not touch your worktree."
+                            .to_string(),
                     cli_label: format!("fetch {remote}"),
-                    action: MutationAction::Fetch { remote: remote.clone() },
+                    action: MutationAction::Fetch {
+                        remote: remote.clone(),
+                    },
                 });
             }
             SelectPurpose::PushRemote => {
-                let Some(t) = self.require_target() else { return };
+                let Some(t) = self.require_target() else {
+                    return;
+                };
                 let Some(branch) = branch else { return };
                 let remote = item.remote.name.clone();
                 let url = item.remote.url.clone();
@@ -2091,7 +2217,8 @@ impl GitTui {
                         format!("remote: {remote} ({url})"),
                         format!("refspec: {refspec} (--set-upstream)"),
                     ],
-                    consequence: "creates the remote branch and records upstream tracking.".to_string(),
+                    consequence: "creates the remote branch and records upstream tracking."
+                        .to_string(),
                     cli_label: format!("push -u {remote} {branch}"),
                     action: MutationAction::Push {
                         remote: Some(remote.clone()),
@@ -2134,11 +2261,10 @@ fn commit_list_item(c: &LogCommit) -> ListItem {
 }
 
 fn branch_list_item(b: &BranchEntry) -> ListItem {
-    let detail = [b
-        .upstream
-        .as_ref()
-        .map(|u| format!("upstream {u}")),
-        b.track.clone()]
+    let detail = [
+        b.upstream.as_ref().map(|u| format!("upstream {u}")),
+        b.track.clone(),
+    ]
     .into_iter()
     .flatten()
     .collect::<Vec<_>>()
@@ -2246,7 +2372,8 @@ fn load_pager_lines(
             Ok(lines)
         }
         PagerLoad::Compare { base } => {
-            let res = git::collect_compare(repo, base.as_deref(), None, Some(DIFF_MAX_BYTES), opts)?;
+            let res =
+                git::collect_compare(repo, base.as_deref(), None, Some(DIFF_MAX_BYTES), opts)?;
             let mut lines = vec![
                 format!(
                     "{}...{}  (merge-base {})",
@@ -2340,7 +2467,8 @@ fn run_mutation_body(
         MutationAction::Fetch { remote } => {
             let out = git::collect_fetch(repo, Some(remote), false, opts)?;
             Ok(out
-                .lines().rfind(|l| !l.trim().is_empty())
+                .lines()
+                .rfind(|l| !l.trim().is_empty())
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("fetched {remote}")))
         }
@@ -2358,7 +2486,8 @@ fn run_mutation_body(
                 opts,
             )?;
             Ok(out
-                .lines().rfind(|l| !l.trim().is_empty())
+                .lines()
+                .rfind(|l| !l.trim().is_empty())
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "pushed".to_string()))
         }
@@ -2374,11 +2503,16 @@ fn paint_diff_line(line: &str) -> Line<'static> {
     if line.starts_with("@@") {
         return Line::from(Span::styled(
             safe(),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ));
     }
     if line.starts_with("+++") || line.starts_with("---") {
-        return Line::from(Span::styled(safe(), Style::default().add_modifier(Modifier::DIM)));
+        return Line::from(Span::styled(
+            safe(),
+            Style::default().add_modifier(Modifier::DIM),
+        ));
     }
     if line.starts_with('+') {
         return Line::from(Span::styled(safe(), Style::default().fg(Color::Green)));
@@ -2387,7 +2521,10 @@ fn paint_diff_line(line: &str) -> Line<'static> {
         return Line::from(Span::styled(safe(), Style::default().fg(Color::Red)));
     }
     if line.starts_with("diff ") || line.starts_with("commit ") {
-        return Line::from(Span::styled(safe(), Style::default().add_modifier(Modifier::BOLD)));
+        return Line::from(Span::styled(
+            safe(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
     }
     Line::from(safe())
 }
@@ -2440,7 +2577,11 @@ fn render(app: &mut GitTui, frame: &mut ratatui::Frame) {
     );
 
     // Body
-    let has_head = app.target.as_ref().and_then(|t| t.head_sha.as_ref()).is_some();
+    let has_head = app
+        .target
+        .as_ref()
+        .and_then(|t| t.head_sha.as_ref())
+        .is_some();
     match app.current_mut() {
         Screen::List(list) => render_list(list, frame, chunks[1], has_head),
         Screen::Pager(pager) => render_pager(pager, frame, chunks[1]),
@@ -2580,7 +2721,11 @@ fn render(app: &mut GitTui, frame: &mut ratatui::Frame) {
                 sanitize_display(&list.filter_draft)
             )
         } else {
-            format!(" {}{} · ? help · q quit", sanitize_display(&app.status_left), busy)
+            format!(
+                " {}{} · ? help · q quit",
+                sanitize_display(&app.status_left),
+                busy
+            )
         }
     } else {
         format!(
@@ -2595,12 +2740,7 @@ fn render(app: &mut GitTui, frame: &mut ratatui::Frame) {
     );
 }
 
-fn render_list(
-    list: &mut ListScreen,
-    frame: &mut ratatui::Frame,
-    area: Rect,
-    has_head: bool,
-) {
+fn render_list(list: &mut ListScreen, frame: &mut ratatui::Frame, area: Rect, has_head: bool) {
     let filtered = list.filtered();
     if filtered.is_empty() {
         let msg = if list.items.is_empty() {
@@ -2851,9 +2991,8 @@ fn parse_tui_args(argv: &[String]) -> Result<CliArgs, String> {
 
 /// `--open`: spawn `herdr plugin pane open` and return its exit status.
 fn run_open(surface: &str) -> i32 {
-    let context = tui_model::parse_plugin_context(
-        std::env::var("HERDR_PLUGIN_CONTEXT_JSON").ok().as_deref(),
-    );
+    let context =
+        tui_model::parse_plugin_context(std::env::var("HERDR_PLUGIN_CONTEXT_JSON").ok().as_deref());
     let spec = tui_model::resolve_target_spec(None);
     let entrypoint = if surface == "forge" { "forge" } else { "main" };
     let args = tui_model::build_pane_open_args(

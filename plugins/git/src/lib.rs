@@ -17,9 +17,9 @@
 // one parameter per git/gh flag; grouping them would hurt parity.
 #![allow(clippy::too_many_arguments)]
 
-pub mod gitenv;
-pub mod git;
 pub mod gh;
+pub mod git;
+pub mod gitenv;
 pub mod inboxlink;
 pub mod pluginroot;
 

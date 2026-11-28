@@ -241,7 +241,10 @@ pub fn run_inbox_cli(
         }
     }
     let component = plugin_path_component(INBOX_PLUGIN_ID);
-    let config_dir = herdr_config_dir().join("plugins").join("config").join(&component);
+    let config_dir = herdr_config_dir()
+        .join("plugins")
+        .join("config")
+        .join(&component);
     let state_dir = herdr_state_dir().join("plugins").join(&component);
     command.env("HERDR_PLUGIN_STATE_DIR", &state_dir);
     command.env("HERDR_PLUGIN_CONFIG_DIR", &config_dir);

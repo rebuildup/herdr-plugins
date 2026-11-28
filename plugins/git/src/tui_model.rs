@@ -55,9 +55,7 @@ pub struct TuiTargetSpec {
 }
 
 fn env_nonempty(key: &str) -> Option<String> {
-    std::env::var(key)
-        .ok()
-        .filter(|s| !s.is_empty())
+    std::env::var(key).ok().filter(|s| !s.is_empty())
 }
 
 /// Resolve the pinned target spec from the process environment.
@@ -196,8 +194,16 @@ pub fn file_status_tag(file: &FileChange) -> String {
         FileChangeKind::Conflicted => "UU".to_string(),
         FileChangeKind::Ignored => "!!".to_string(),
         _ => {
-            let x = if file.index == " " { " " } else { file.index.as_str() };
-            let y = if file.worktree == " " { " " } else { file.worktree.as_str() };
+            let x = if file.index == " " {
+                " "
+            } else {
+                file.index.as_str()
+            };
+            let y = if file.worktree == " " {
+                " "
+            } else {
+                file.worktree.as_str()
+            };
             format!("{x}{y}")
         }
     }
@@ -209,7 +215,12 @@ pub fn file_label(file: &FileChange) -> String {
         Some(old) => format!("{old} -> {}", file.path),
         None => file.path.clone(),
     };
-    format!("{} {}  {}", file_status_tag(file), kind_label(file.kind), path)
+    format!(
+        "{} {}  {}",
+        file_status_tag(file),
+        kind_label(file.kind),
+        path
+    )
 }
 
 /// SelectList detail (right pane / wide terminals) for a changed file.
@@ -304,7 +315,14 @@ pub fn branch_label(entry: &git::BranchEntry) -> String {
         .as_ref()
         .map(|t| format!(" {t}"))
         .unwrap_or_default();
-    format!("{}{}{}{}  {}", marker, entry.name, up, track, short_sha7(&entry.sha))
+    format!(
+        "{}{}{}{}  {}",
+        marker,
+        entry.name,
+        up,
+        track,
+        short_sha7(&entry.sha)
+    )
 }
 
 // --- Error classification ---------------------------------------------------------
@@ -329,10 +347,7 @@ pub fn describe_error_kind(kind: &str, message: &str, cwd: Option<&str>) -> Hone
             title: "Not a git repository".to_string(),
             lines: vec![
                 "No git work tree contains the target directory.".to_string(),
-                format!(
-                    "target cwd: {}",
-                    cwd.unwrap_or("(unknown)")
-                ),
+                format!("target cwd: {}", cwd.unwrap_or("(unknown)")),
                 String::new(),
                 "This surface only works inside a git work tree.".to_string(),
             ],
@@ -355,7 +370,10 @@ pub fn describe_error_kind(kind: &str, message: &str, cwd: Option<&str>) -> Hone
         },
         "timeout" => HonestError {
             title: "Timed out".to_string(),
-            lines: vec!["A git operation timed out.".to_string(), message.to_string()],
+            lines: vec![
+                "A git operation timed out.".to_string(),
+                message.to_string(),
+            ],
             cli_fallback: None,
         },
         "ambient_identity_mismatch" | "target_required" | "pane_not_found" | "no_pane_cwd" => {
@@ -400,7 +418,10 @@ pub enum TuiError {
     Target(hoxay_herdr_client::target::TargetResolutionError),
     /// Kind-tagged error (pane_not_found, no_pane_cwd, target_required,
     /// stale_target) classified by `describe_error`.
-    Kind { kind: &'static str, message: String },
+    Kind {
+        kind: &'static str,
+        message: String,
+    },
     /// Pre-mutation revalidation failure (tui-v1 §3.3).
     Stale(String),
     Other(String),
@@ -470,7 +491,13 @@ mod tests {
     use super::*;
     use crate::git::{BranchInfo, ChangeCounts, FileChange, FileChangeKind, LogCommit};
 
-    fn branch(name: &str, detached: bool, upstream: Option<&str>, ahead: Option<i64>, behind: Option<i64>) -> BranchInfo {
+    fn branch(
+        name: &str,
+        detached: bool,
+        upstream: Option<&str>,
+        ahead: Option<i64>,
+        behind: Option<i64>,
+    ) -> BranchInfo {
         BranchInfo {
             name: name.to_string(),
             detached,
@@ -501,13 +528,28 @@ mod tests {
 
     #[test]
     fn format_branch_line_states() {
-        assert_eq!(format_branch_line(&branch("main", true, None, None, None)), "HEAD (detached)");
         assert_eq!(
-            format_branch_line(&branch("main", false, Some("origin/main"), Some(2), Some(0))),
+            format_branch_line(&branch("main", true, None, None, None)),
+            "HEAD (detached)"
+        );
+        assert_eq!(
+            format_branch_line(&branch(
+                "main",
+                false,
+                Some("origin/main"),
+                Some(2),
+                Some(0)
+            )),
             "main -> origin/main ahead 2 up to date"
         );
         assert_eq!(
-            format_branch_line(&branch("main", false, Some("origin/main"), Some(0), Some(0))),
+            format_branch_line(&branch(
+                "main",
+                false,
+                Some("origin/main"),
+                Some(0),
+                Some(0)
+            )),
             "main -> origin/main up to date"
         );
         assert_eq!(
@@ -518,16 +560,33 @@ mod tests {
 
     #[test]
     fn format_change_counts_works() {
-        let c = ChangeCounts { staged: 0, unstaged: 0, untracked: 0, conflicted: 0 };
+        let c = ChangeCounts {
+            staged: 0,
+            unstaged: 0,
+            untracked: 0,
+            conflicted: 0,
+        };
         assert_eq!(format_change_counts(&c), "clean");
-        let c = ChangeCounts { staged: 1, unstaged: 2, untracked: 3, conflicted: 4 };
+        let c = ChangeCounts {
+            staged: 1,
+            unstaged: 2,
+            untracked: 3,
+            conflicted: 4,
+        };
         assert_eq!(
             format_change_counts(&c),
             "staged 1 · unstaged 2 · untracked 3 · CONFLICTS 4"
         );
     }
 
-    fn file(kind: FileChangeKind, index: &str, worktree: &str, staged: bool, unstaged: bool, old: Option<&str>) -> FileChange {
+    fn file(
+        kind: FileChangeKind,
+        index: &str,
+        worktree: &str,
+        staged: bool,
+        unstaged: bool,
+        old: Option<&str>,
+    ) -> FileChange {
         FileChange {
             path: "b.txt".to_string(),
             old_path: old.map(|s| s.to_string()),
@@ -547,18 +606,57 @@ mod tests {
         assert!(file_label(&f).contains("modified"));
         let u = file(FileChangeKind::Untracked, "?", "?", false, false, None);
         assert_eq!(file_status_tag(&u), "??");
-        let r = file(FileChangeKind::Renamed, "R", " ", true, false, Some("a.txt"));
+        let r = file(
+            FileChangeKind::Renamed,
+            "R",
+            " ",
+            true,
+            false,
+            Some("a.txt"),
+        );
         assert!(file_label(&r).contains("a.txt -> b.txt"));
     }
 
     #[test]
     fn diff_scope_for_cases() {
-        assert_eq!(diff_scope_for(&file(FileChangeKind::Untracked, "?", "?", false, false, None)), FileDiffScope::None);
-        assert_eq!(diff_scope_for(&file(FileChangeKind::Ignored, "!", "!", false, false, None)), FileDiffScope::None);
-        assert_eq!(diff_scope_for(&file(FileChangeKind::Conflicted, "U", "U", false, false, None)), FileDiffScope::Worktree);
-        assert_eq!(diff_scope_for(&file(FileChangeKind::Modified, "M", "M", true, true, None)), FileDiffScope::Head);
-        assert_eq!(diff_scope_for(&file(FileChangeKind::Modified, "M", " ", true, false, None)), FileDiffScope::Staged);
-        assert_eq!(diff_scope_for(&file(FileChangeKind::Modified, " ", "M", false, true, None)), FileDiffScope::Worktree);
+        assert_eq!(
+            diff_scope_for(&file(
+                FileChangeKind::Untracked,
+                "?",
+                "?",
+                false,
+                false,
+                None
+            )),
+            FileDiffScope::None
+        );
+        assert_eq!(
+            diff_scope_for(&file(FileChangeKind::Ignored, "!", "!", false, false, None)),
+            FileDiffScope::None
+        );
+        assert_eq!(
+            diff_scope_for(&file(
+                FileChangeKind::Conflicted,
+                "U",
+                "U",
+                false,
+                false,
+                None
+            )),
+            FileDiffScope::Worktree
+        );
+        assert_eq!(
+            diff_scope_for(&file(FileChangeKind::Modified, "M", "M", true, true, None)),
+            FileDiffScope::Head
+        );
+        assert_eq!(
+            diff_scope_for(&file(FileChangeKind::Modified, "M", " ", true, false, None)),
+            FileDiffScope::Staged
+        );
+        assert_eq!(
+            diff_scope_for(&file(FileChangeKind::Modified, " ", "M", false, true, None)),
+            FileDiffScope::Worktree
+        );
     }
 
     #[test]
@@ -609,9 +707,19 @@ mod tests {
         assert_eq!(
             args,
             vec![
-                "plugin", "pane", "open", "--plugin", "rebuildup.git",
-                "--entrypoint", "main", "--placement", "tab",
-                "--workspace", "w1", "--env", "HERDR_TUI_TARGET_PANE_ID=p1",
+                "plugin",
+                "pane",
+                "open",
+                "--plugin",
+                "rebuildup.git",
+                "--entrypoint",
+                "main",
+                "--placement",
+                "tab",
+                "--workspace",
+                "w1",
+                "--env",
+                "HERDR_TUI_TARGET_PANE_ID=p1",
             ]
         );
         let args = build_pane_open_args("rebuildup.git", "forge", "tab", None, None);
