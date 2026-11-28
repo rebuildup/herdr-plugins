@@ -192,6 +192,7 @@ dependencies = [
  "hoxay-herdr-client",
  "hoxay-tui",
  "libc",
+ "memchr",
  "ratatui",
  "regex",
  "rusqlite",

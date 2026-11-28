@@ -42,7 +42,10 @@ pub fn claude_projects_dir() -> PathBuf {
     let configured = env_var("CLAUDE_CONFIG_DIR");
     let home = configured.unwrap_or_else(|| {
         let home = env_var("HOME").unwrap_or_else(|| "/".to_string());
-        Path::new(&home).join(".claude").to_string_lossy().into_owned()
+        Path::new(&home)
+            .join(".claude")
+            .to_string_lossy()
+            .into_owned()
     });
     Path::new(&home).join("projects")
 }
@@ -63,25 +66,23 @@ pub fn encode_claude_cwd(cwd: &str) -> String {
 }
 
 fn file_exists(file: &Path) -> bool {
-    std::fs::metadata(file).map(|m| m.is_file()).unwrap_or(false)
+    std::fs::metadata(file)
+        .map(|m| m.is_file())
+        .unwrap_or(false)
 }
 
 /// Resolve the transcript file for a claude session id. Returns None
 /// when nothing matches — callers must report `missing`, never guess.
 pub fn resolve_claude_transcript(session_id: &str, cwd: Option<&str>) -> Option<String> {
     // Defensive: a value that is already a readable file path.
-    if session_id.contains('/') || session_id.contains('\\') {
-        if file_exists(Path::new(session_id)) {
-            return Some(session_id.to_string());
-        }
+    if (session_id.contains('/') || session_id.contains('\\')) && file_exists(Path::new(session_id)) {
+        return Some(session_id.to_string());
     }
     let projects_dir = claude_projects_dir();
     let file_name = format!("{}.jsonl", session_id);
     if let Some(cwd) = cwd {
         if !cwd.is_empty() {
-            let direct = projects_dir
-                .join(encode_claude_cwd(cwd))
-                .join(&file_name);
+            let direct = projects_dir.join(encode_claude_cwd(cwd)).join(&file_name);
             if file_exists(&direct) {
                 return Some(direct.to_string_lossy().into_owned());
             }
@@ -451,8 +452,9 @@ fn parse_assistant_line(
                 if let Some(name) = b.get("name").and_then(|v| v.as_str()) {
                     event.tool_name = Some(name.to_string());
                 }
-                let input_json = serde_json::to_string(&b.get("input").cloned().unwrap_or(Value::Null))
-                    .unwrap_or_else(|_| "null".to_string());
+                let input_json =
+                    serde_json::to_string(&b.get("input").cloned().unwrap_or(Value::Null))
+                        .unwrap_or_else(|_| "null".to_string());
                 let (input_text, truncated) = bounded(&input_json, MAX_INPUT_CHARS);
                 event.tool_input = Some(
                     serde_json::from_str::<Value>(&input_text)
@@ -509,4 +511,34 @@ fn parse_assistant_line(
     let mut events = vec![message_event];
     events.extend(tool_events);
     events
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encode_claude_cwd_matches_claude_directory_encoding() {
+        assert_eq!(
+            encode_claude_cwd("/Users/rebui/.dotfiles"),
+            "-Users-rebui--dotfiles"
+        );
+        assert_eq!(encode_claude_cwd("/repo/proj"), "-repo-proj");
+        // JS regex semantics run on UTF-16 code units: a non-BMP char is
+        // a surrogate pair → one '-' per half.
+        assert_eq!(encode_claude_cwd("/a\u{1F600}b"), "-a--b");
+        assert_eq!(encode_claude_cwd(""), "");
+    }
+
+    #[test]
+    fn bounded_uses_utf16_code_units() {
+        // "é" is one UTF-16 unit; "😀" is two.
+        assert_eq!(bounded("abc", 2), ("ab".to_string(), true));
+        assert_eq!(bounded("abc", 3), ("abc".to_string(), false));
+        assert_eq!(bounded("a\u{1F600}b", 3), ("a\u{1F600}".to_string(), true));
+        assert_eq!(
+            bounded("a\u{1F600}b", 4),
+            ("a\u{1F600}b".to_string(), false)
+        );
+    }
 }

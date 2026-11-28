@@ -108,7 +108,10 @@ pub fn parse_args(argv: &[String]) -> CliOptions {
 // --- emit / fail ---------------------------------------------------------------
 
 fn emit(payload: &Value) {
-    println!("{}", serde_json::to_string_pretty(payload).unwrap_or_else(|_| "null".into()));
+    println!(
+        "{}",
+        serde_json::to_string_pretty(payload).unwrap_or_else(|_| "null".into())
+    );
 }
 
 /// Handled command failure — mirrors TS `fail()`: the error document
@@ -173,6 +176,16 @@ fn fail(message: &str, code: i32, kind: Option<&str>, extra: Option<Value>) -> R
     e
 }
 
+/// JSON number with JS `JSON.stringify` semantics: integral f64 emits
+/// as an integer (`1`, not serde's `1.0`).
+fn json_num(v: Option<f64>) -> Value {
+    match v {
+        Some(f) if f.is_finite() && f.fract() == 0.0 => json!(f as i64),
+        Some(f) => json!(f),
+        None => Value::Null,
+    }
+}
+
 fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
@@ -207,7 +220,10 @@ fn load_config() -> PluginConfig {
 }
 
 fn effective_timeout_ms(options: &CliOptions, config: &PluginConfig) -> u64 {
-    options.timeout_ms.or(config.timeout_ms).unwrap_or(DEFAULT_TIMEOUT_MS)
+    options
+        .timeout_ms
+        .or(config.timeout_ms)
+        .unwrap_or(DEFAULT_TIMEOUT_MS)
 }
 
 fn call_options(options: &CliOptions, config: &PluginConfig) -> CallOptions {
@@ -219,7 +235,10 @@ fn call_options(options: &CliOptions, config: &PluginConfig) -> CallOptions {
     }
 }
 
-fn snapshot_or_fail(options: &CliOptions, config: &PluginConfig) -> Result<SessionSnapshot, RunError> {
+fn snapshot_or_fail(
+    options: &CliOptions,
+    config: &PluginConfig,
+) -> Result<SessionSnapshot, RunError> {
     commands::session_snapshot(&call_options(options, config)).map_err(|e| {
         fail(
             &format!("herdr session unreachable: {}", command_error_message(&e)),
@@ -281,7 +300,11 @@ fn herdr_session_name(snapshot: &SessionSnapshot, options: &CliOptions) -> Strin
     options
         .session
         .clone()
-        .or_else(|| std::env::var("HERDR_SESSION").ok().filter(|s| !s.is_empty()))
+        .or_else(|| {
+            std::env::var("HERDR_SESSION")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
         .unwrap_or_else(|| "default".to_string())
 }
 
@@ -291,16 +314,12 @@ fn identity_for(
     pane: &PaneInfo,
     agent: &AgentInfo,
 ) -> Value {
-    let agent_name = agent
-        .agent
-        .clone()
-        .filter(|a| !a.is_empty())
-        .or_else(|| {
-            agent_session_ref(agent)
-                .get("agent")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        });
+    let agent_name = agent.agent.clone().filter(|a| !a.is_empty()).or_else(|| {
+        agent_session_ref(agent)
+            .get("agent")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    });
     json!({
         "host": hostname(),
         "herdr_session": herdr_session_name(snapshot, options),
@@ -309,7 +328,7 @@ fn identity_for(
         "pane_id": pane.pane_id,
         "agent": agent_name,
         "agent_session": agent_session_ref(agent),
-        "state_change_seq": agent.state_change_seq,
+        "state_change_seq": json_num(agent.state_change_seq),
     })
 }
 
@@ -357,8 +376,7 @@ fn collect_candidates(snapshot: &SessionSnapshot) -> (Vec<Candidate>, Vec<Value>
             continue;
         };
         let descriptor = provider_descriptor(&provider);
-        if descriptor.map(|d| d.status != "supported").unwrap_or(true) || !is_supported(&provider)
-        {
+        if descriptor.map(|d| d.status != "supported").unwrap_or(true) || !is_supported(&provider) {
             let mut s = base.as_object().cloned().unwrap_or_default();
             s.insert("provider".to_string(), json!(provider));
             s.insert("reason".to_string(), json!("unsupported_provider"));
@@ -413,6 +431,7 @@ fn min_max_timestamps(events: &[ConversationEvent]) -> (Option<String>, Option<S
 
 /// Shared tail of a successful scan: event log write/append + record
 /// bookkeeping. Returns the IndexOutcome JSON fields.
+#[allow(clippy::too_many_arguments)]
 fn apply_scan_result(
     state: &mut crate::model::ConversationsState,
     mut record: SessionRecord,
@@ -425,7 +444,7 @@ fn apply_scan_result(
     reindexed: bool,
     malformed_lines: u64,
     transcript_path: &str,
-    base: &Value,
+    _base: &Value,
 ) -> Result<Value, String> {
     if reindexed {
         write_events_file(key, events)?;
@@ -438,7 +457,12 @@ fn apply_scan_result(
         record.event_count += events.len() as u64;
         for e in events {
             let Some(t) = &e.timestamp else { continue };
-            if record.first_event_at.as_ref().map(|f| t < f).unwrap_or(true) {
+            if record
+                .first_event_at
+                .as_ref()
+                .map(|f| t < f)
+                .unwrap_or(true)
+            {
                 record.first_event_at = Some(t.clone());
             }
             if record.last_event_at.as_ref().map(|l| t > l).unwrap_or(true) {
@@ -464,7 +488,9 @@ fn apply_scan_result(
     let total_events = record.event_count;
     state.sessions.insert(key.to_string(), record.clone());
 
-    let mut out = base.as_object().cloned().unwrap_or_default();
+    // TS IndexOutcome carries exactly these fields — `pane_id` appears
+    // only on skip outcomes (which keep `base`), never on success.
+    let mut out = Map::new();
     out.insert("key".to_string(), json!(key));
     out.insert("provider".to_string(), json!(record.provider));
     out.insert("session_id".to_string(), json!(record.session_id));
@@ -502,18 +528,14 @@ fn index_file_candidate(
     };
 
     let key = format!("{}:{}", candidate.provider, candidate.session_id);
-    let mut record = state
-        .sessions
-        .get(&key)
-        .cloned()
-        .unwrap_or_else(|| {
-            new_session_record(
-                &candidate.provider,
-                &candidate.session_id,
-                &transcript_path,
-                cwd.as_deref(),
-            )
-        });
+    let mut record = state.sessions.get(&key).cloned().unwrap_or_else(|| {
+        new_session_record(
+            &candidate.provider,
+            &candidate.session_id,
+            &transcript_path,
+            cwd.as_deref(),
+        )
+    });
     record.transcript_path = transcript_path.clone();
     if let Some(c) = &cwd {
         record.cwd = Some(c.clone());
@@ -550,33 +572,45 @@ fn index_file_candidate(
     let scan = if candidate.provider == "codex" {
         scan_transcript(
             &transcript_path,
-            cursor.as_ref().map(|c| TranscriptCursor {
-                offset: c.offset,
-                size: c.size,
-                mtime_ms: c.mtime_ms,
-                line_count: c.line_count,
-            }).as_ref(),
+            cursor
+                .as_ref()
+                .map(|c| TranscriptCursor {
+                    offset: c.offset,
+                    size: c.size,
+                    mtime_ms: c.mtime_ms,
+                    line_count: c.line_count,
+                })
+                .as_ref(),
             guard,
             start_turn,
             move |start_turn, _line_base| {
-                Box::new(CodexLineParser::new(&file_name, identity_v.clone(), start_turn))
-                    as Box<dyn crate::indexer::LineParser>
+                Box::new(CodexLineParser::new(
+                    &file_name,
+                    identity_v.clone(),
+                    start_turn,
+                )) as Box<dyn crate::indexer::LineParser>
             },
         )
     } else {
         scan_transcript(
             &transcript_path,
-            cursor.as_ref().map(|c| TranscriptCursor {
-                offset: c.offset,
-                size: c.size,
-                mtime_ms: c.mtime_ms,
-                line_count: c.line_count,
-            }).as_ref(),
+            cursor
+                .as_ref()
+                .map(|c| TranscriptCursor {
+                    offset: c.offset,
+                    size: c.size,
+                    mtime_ms: c.mtime_ms,
+                    line_count: c.line_count,
+                })
+                .as_ref(),
             guard,
             start_turn,
             move |start_turn, _line_base| {
-                Box::new(ClaudeLineParser::new(&file_name, identity_v.clone(), start_turn))
-                    as Box<dyn crate::indexer::LineParser>
+                Box::new(ClaudeLineParser::new(
+                    &file_name,
+                    identity_v.clone(),
+                    start_turn,
+                )) as Box<dyn crate::indexer::LineParser>
             },
         )
     };
@@ -650,9 +684,7 @@ fn index_opencode_candidate(
         OpenCodeResolution::Ok { .. } => {}
     }
     let OpenCodeResolution::Ok {
-        db_path,
-        directory,
-        ..
+        db_path, directory, ..
     } = &resolution
     else {
         unreachable!()
@@ -728,10 +760,7 @@ fn index_candidate(
 
 fn cmd_index(options: &CliOptions) -> Result<Value, RunError> {
     let config = load_config();
-    let snapshot = match snapshot_or_fail(options, &config) {
-        Ok(s) => s,
-        Err(e) => return Err(e),
-    };
+    let snapshot = snapshot_or_fail(options, &config)?;
     let (candidates, skipped) = collect_candidates(&snapshot);
 
     // TS wraps candidate indexing in update_state (single locked
@@ -835,12 +864,13 @@ fn record_identity_pane_id(record: &SessionRecord) -> Option<String> {
 /// responses. `with_events` mirrors the TS split: `sessionReadEntry`
 /// (history/search/show/usage) adds `events_present`; the `sessions`
 /// command entry does not.
-fn session_entry(record: &SessionRecord, live_ctx: Option<&LiveContext>, with_events: bool) -> Value {
-    let live = record_identity_pane_id(record).and_then(|pid| {
-        live_ctx
-            .and_then(|c| c.live_by_pane.get(&pid))
-            .cloned()
-    });
+fn session_entry(
+    record: &SessionRecord,
+    live_ctx: Option<&LiveContext>,
+    with_events: bool,
+) -> Value {
+    let live = record_identity_pane_id(record)
+        .and_then(|pid| live_ctx.and_then(|c| c.live_by_pane.get(&pid)).cloned());
     let (stale, reason) = binding_is_stale(record, live.as_ref());
     let mut entry = json!({
         "key": record.key,
@@ -857,7 +887,7 @@ fn session_entry(record: &SessionRecord, live_ctx: Option<&LiveContext>, with_ev
         "live": live.map(|l| json!({
             "pane_id": l.pane_id,
             "agent_session_value": l.agent_session_value,
-            "state_change_seq": l.state_change_seq,
+            "state_change_seq": json_num(l.state_change_seq),
         })),
         "live_session": live_ctx.and_then(|c| c.live_session.as_deref()),
         "stale": stale,
@@ -870,13 +900,10 @@ fn session_entry(record: &SessionRecord, live_ctx: Option<&LiveContext>, with_ev
         "transcript_present": path_exists(Path::new(&record.transcript_path)),
     });
     if with_events {
-        entry
-            .as_object_mut()
-            .unwrap()
-            .insert(
-                "events_present".to_string(),
-                json!(path_exists(&events_file_path(&record.key))),
-            );
+        entry.as_object_mut().unwrap().insert(
+            "events_present".to_string(),
+            json!(path_exists(&events_file_path(&record.key))),
+        );
     }
     entry
 }
@@ -978,12 +1005,18 @@ fn cmd_history(options: &CliOptions) -> Result<Value, RunError> {
     let (record, note) = match resolve_history_record(&state, options) {
         Ok(v) => v,
         Err(e) => {
-            let code = if e.starts_with("history requires") { 2 } else { 1 };
+            let code = if e.starts_with("history requires") {
+                2
+            } else {
+                1
+            };
             return Err(fail(
                 &e,
                 code,
                 Some("session_not_found"),
-                Some(json!({ "hint": "run `index` to build the transcript index, or check the selector" })),
+                Some(
+                    json!({ "hint": "run `index` to build the transcript index, or check the selector" }),
+                ),
             ));
         }
     };
@@ -998,7 +1031,14 @@ fn cmd_history(options: &CliOptions) -> Result<Value, RunError> {
         // TS `Number(cursor)` + Number.isInteger + >= 0: "1e3" → 1000.
         match cursor.parse::<f64>() {
             Ok(v) if v.is_finite() && v >= 0.0 && v.fract() == 0.0 => offset = v as u64,
-            _ => return Err(fail(&format!("invalid --cursor: {}", cursor), 2, None, None)),
+            _ => {
+                return Err(fail(
+                    &format!("invalid --cursor: {}", cursor),
+                    2,
+                    None,
+                    None,
+                ))
+            }
         }
     }
 
@@ -1092,7 +1132,6 @@ fn read_limit(options: &CliOptions, fallback: usize, max: usize) -> usize {
         .min(max)
 }
 
-
 /// Shared paging driver for `search`/`usage`: resolves records, decodes
 /// the opaque per-session offset cursor, scans, and emits the common
 /// envelope. `matcher` returns the matched field names or null.
@@ -1114,7 +1153,9 @@ fn run_paged_read(
                 &e,
                 1,
                 Some("session_not_found"),
-                Some(json!({ "hint": "run `index` to build the transcript index, or check the selector" })),
+                Some(
+                    json!({ "hint": "run `index` to build the transcript index, or check the selector" }),
+                ),
             ));
         }
     };
@@ -1123,7 +1164,14 @@ fn run_paged_read(
     if let Some(cursor) = &options.cursor {
         match read::decode_offset_cursor(cursor) {
             Some(map) => decoded = map,
-            None => return Err(fail(&format!("invalid --cursor: {}", cursor), 2, None, None)),
+            None => {
+                return Err(fail(
+                    &format!("invalid --cursor: {}", cursor),
+                    2,
+                    None,
+                    None,
+                ))
+            }
         }
     }
 
@@ -1167,7 +1215,10 @@ fn run_paged_read(
     };
     payload.insert("contract".to_string(), json!(CONTRACT));
     payload.insert("command".to_string(), json!(command));
-    payload.insert("selector_note".to_string(), note.map(Value::String).unwrap_or(Value::Null));
+    payload.insert(
+        "selector_note".to_string(),
+        note.map(Value::String).unwrap_or(Value::Null),
+    );
     payload.insert("results".to_string(), json!(results));
     payload.insert(
         "page".to_string(),
@@ -1194,6 +1245,48 @@ fn run_paged_read(
     }
     payload.insert("generated_at".to_string(), json!(now()));
     Ok(Value::Object(payload))
+}
+
+/// Case-insensitive substring check matching TS
+/// `value.toLowerCase().includes(needle)` with `needle` already
+/// lowercased. ASCII needle+haystack takes an allocation-free byte
+/// path (the hot loop scans every event); anything else falls back
+/// to the Unicode-aware lowercase comparison.
+fn field_contains_ci(value: &str, needle_lower: &str) -> bool {
+    if needle_lower.is_ascii() && value.is_ascii() {
+        return ascii_contains_lower(value.as_bytes(), needle_lower.as_bytes());
+    }
+    value.to_lowercase().contains(needle_lower)
+}
+
+/// `hay` contains `needle` ignoring ASCII case. `needle` must already
+/// be lowercase ASCII. `memchr2` on the first byte (both cases) makes
+/// the scan O(n) with SIMD memchr; candidate windows verify with
+/// `eq_ignore_ascii_case`.
+fn ascii_contains_lower(hay: &[u8], needle: &[u8]) -> bool {
+    let n = needle.len();
+    if n == 0 {
+        return true;
+    }
+    if hay.len() < n {
+        return false;
+    }
+    let lo = needle[0].to_ascii_lowercase();
+    let hi = needle[0].to_ascii_uppercase();
+    let mut i = 0usize;
+    // Positions where a match may START: i in 0..=hay.len()-n.
+    while i + n <= hay.len() {
+        let window = &hay[i..=hay.len() - n];
+        let Some(pos) = memchr::memchr2(lo, hi, window) else {
+            return false;
+        };
+        let start = i + pos;
+        if hay[start..start + n].eq_ignore_ascii_case(needle) {
+            return true;
+        }
+        i = start + 1;
+    }
+    false
 }
 
 fn cmd_search(options: &CliOptions) -> Result<Value, RunError> {
@@ -1230,8 +1323,7 @@ fn cmd_search(options: &CliOptions) -> Result<Value, RunError> {
         let mut fields = Vec::new();
         for field in SEARCHABLE_FIELDS {
             if let Some(v) = event.get(field).and_then(|v| v.as_str()) {
-                // TS `value.toLowerCase().includes(needle)`.
-                if v.to_lowercase().contains(&needle) {
+                if field_contains_ci(v, &needle) {
                     fields.push(field.to_string());
                 }
             }
@@ -1297,6 +1389,7 @@ fn cmd_show(options: &CliOptions) -> Result<Value, RunError> {
 
     let turn_re = regex::Regex::new(r"^turn:(\d+)$").unwrap();
     let tool_re = regex::Regex::new(r"^tool:(.+)$").unwrap();
+    #[allow(clippy::type_complexity)]
     let (resolved_kind, matcher): (&str, Box<dyn Fn(&Value) -> Option<Vec<String>>>) =
         if let Some(caps) = turn_re.captures(&reference) {
             let turn_index: i64 = caps[1].parse().unwrap_or(0);
@@ -1306,9 +1399,7 @@ fn cmd_show(options: &CliOptions) -> Result<Value, RunError> {
                     // TS `event.turn_index === turnIndex` — strict number
                     // equality; JSON numbers compare as f64.
                     match event.get("turn_index").and_then(|v| v.as_f64()) {
-                        Some(n) if n == turn_index as f64 => {
-                            Some(vec!["turn_index".to_string()])
-                        }
+                        Some(n) if n == turn_index as f64 => Some(vec!["turn_index".to_string()]),
                         _ => None,
                     }
                 }),
@@ -1333,7 +1424,8 @@ fn cmd_show(options: &CliOptions) -> Result<Value, RunError> {
                     if event.get("event_id").and_then(|v| v.as_str()) == Some(reference.as_str()) {
                         return Some(vec!["event_id".to_string()]);
                     }
-                    if event.get("tool_use_id").and_then(|v| v.as_str()) == Some(reference.as_str()) {
+                    if event.get("tool_use_id").and_then(|v| v.as_str()) == Some(reference.as_str())
+                    {
                         return Some(vec!["tool_use_id".to_string()]);
                     }
                     None
@@ -1352,7 +1444,9 @@ fn cmd_show(options: &CliOptions) -> Result<Value, RunError> {
                 &e,
                 1,
                 Some("session_not_found"),
-                Some(json!({ "hint": "run `index` to build the transcript index, or check the selector" })),
+                Some(
+                    json!({ "hint": "run `index` to build the transcript index, or check the selector" }),
+                ),
             ));
         }
     };
@@ -1415,13 +1509,10 @@ fn cmd_show(options: &CliOptions) -> Result<Value, RunError> {
         "sessions": sessions,
     });
     if state.sessions.is_empty() {
-        payload
-            .as_object_mut()
-            .unwrap()
-            .insert(
-                "hint".to_string(),
-                json!("no indexed sessions; run `index` to build the transcript index"),
-            );
+        payload.as_object_mut().unwrap().insert(
+            "hint".to_string(),
+            json!("no indexed sessions; run `index` to build the transcript index"),
+        );
     }
     payload
         .as_object_mut()

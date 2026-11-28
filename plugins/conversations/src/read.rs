@@ -26,7 +26,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::Path;
 
 use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
@@ -111,34 +111,33 @@ pub fn read_event_page(
     let mut seen: HashSet<String> = HashSet::new();
     let mut malformed = 0u64;
     let mut duplicates = 0u64;
-    let mut pending: Vec<u8> = Vec::new();
-    let mut pending_start = offset;
-    let mut eof = offset >= size;
-    let mut chunk = vec![0u8; READ_CHUNK_BYTES];
+    // Bytes of complete (newline-terminated) lines consumed so far.
+    // `next_offset` only advances past consumed lines — a partial tail
+    // stays for the next page, exactly like the TS lineBuf logic.
+    let mut consumed = 0u64;
+    let mut reader = BufReader::with_capacity(READ_CHUNK_BYTES, handle);
+    let mut buf: Vec<u8> = Vec::with_capacity(8192);
 
     loop {
         if matches.len() >= limit {
             break;
         }
-        // Find a newline in pending, reading more as needed.
-        let mut newline: Option<usize> = pending.iter().position(|&b| b == b'\n');
-        while newline.is_none() && !eof {
-            match handle.read(&mut chunk) {
-                Ok(0) => eof = true,
-                Ok(n) => pending.extend_from_slice(&chunk[..n]),
-                Err(e) => return Err(e.to_string()),
-            }
-            newline = pending.iter().position(|&b| b == b'\n');
+        buf.clear();
+        let n = match reader.read_until(b'\n', &mut buf) {
+            Ok(n) => n,
+            Err(e) => return Err(e.to_string()),
+        };
+        if n == 0 || !buf.ends_with(b"\n") {
+            // EOF, or a partial final line: not consumed this page.
+            break;
         }
-        let Some(nl) = newline else { break };
-        // Strip a trailing \r before decoding (TS lineBuf logic).
-        let mut line_end = nl;
-        if line_end > 0 && pending[line_end - 1] == b'\r' {
+        consumed += n as u64;
+        // Strip the newline, then a trailing \r (TS lineBuf logic).
+        let mut line_end = buf.len() - 1;
+        if line_end > 0 && buf[line_end - 1] == b'\r' {
             line_end -= 1;
         }
-        let line = String::from_utf8_lossy(&pending[..line_end]).into_owned();
-        pending_start += (nl + 1) as u64;
-        pending.drain(..nl + 1);
+        let line = String::from_utf8_lossy(&buf[..line_end]);
         if line.trim().is_empty() {
             continue;
         }
@@ -163,10 +162,11 @@ pub fn read_event_page(
         }
     }
 
+    let next_offset = offset + consumed;
     Ok(EventPage {
         matches,
-        next_offset: pending_start,
-        has_more: pending_start < size,
+        next_offset,
+        has_more: next_offset < size,
         malformed_lines: malformed,
         duplicates_skipped: duplicates,
         present: true,
@@ -184,12 +184,20 @@ pub fn read_event_page(
 /// re-emit every event. The token stays small because offsets are
 /// integers; consumers treat it as opaque.
 pub fn encode_offset_cursor(offsets: &BTreeMap<String, u64>) -> String {
-    let map: serde_json::Map<String, Value> = offsets
-        .iter()
-        .map(|(k, v)| (k.clone(), Value::from(*v)))
-        .collect();
-    let body = serde_json::json!({ "v": 1, "o": Value::Object(map) });
-    URL_SAFE_NO_PAD.encode(body.to_string().as_bytes())
+    // TS `JSON.stringify({v:1,o:offsets})` emits keys in insertion
+    // order (v first); serde_json::Map sorts, so build the bytes
+    // directly for byte-identical cursors.
+    let mut body = String::from("{\"v\":1,\"o\":{");
+    for (i, (k, v)) in offsets.iter().enumerate() {
+        if i > 0 {
+            body.push(',');
+        }
+        body.push_str(&serde_json::to_string(k).unwrap_or_else(|_| "\"\"".to_string()));
+        body.push(':');
+        body.push_str(&v.to_string());
+    }
+    body.push_str("}}");
+    URL_SAFE_NO_PAD.encode(body.as_bytes())
 }
 
 /// Decode an opaque cursor; None when malformed (caller → cursor_invalid).
@@ -286,7 +294,12 @@ pub fn scan_paged_sessions(
                 target.offset = 0;
             }
         }
-        let page = read_event_page(&target.key, target.offset, limit - result.matches.len(), match_)?;
+        let page = read_event_page(
+            &target.key,
+            target.offset,
+            limit - result.matches.len(),
+            match_,
+        )?;
         result.sessions.insert(
             target.key.clone(),
             SessionFileInfo {

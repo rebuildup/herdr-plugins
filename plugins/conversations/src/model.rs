@@ -67,7 +67,11 @@ pub struct ConversationEvent {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<UsageFields>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_f64_js_number"
+    )]
     pub cost_usd: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_use_id: Option<String>,
@@ -206,8 +210,12 @@ pub fn provider_id_of(agent: Option<&AgentInfo>) -> Option<String> {
         .and_then(|s| s.extra.get("provider"))
         .and_then(|v| v.as_str());
     let hints: Vec<Option<&str>> = vec![
-        agent.and_then(|a| a.agent_session.as_ref()).and_then(|s| s.agent.as_deref()),
-        agent.and_then(|a| a.agent_session.as_ref()).and_then(|s| s.kind.as_deref()),
+        agent
+            .and_then(|a| a.agent_session.as_ref())
+            .and_then(|s| s.agent.as_deref()),
+        agent
+            .and_then(|a| a.agent_session.as_ref())
+            .and_then(|s| s.kind.as_deref()),
         agent.and_then(|a| a.agent.as_deref()),
         agent_session_provider,
     ];
@@ -266,4 +274,20 @@ pub fn binding_is_stale(
         return (true, Some("agent_session_changed".to_string()));
     }
     (false, None)
+}
+
+/// Serialize an f64 with JavaScript `JSON.stringify` number semantics:
+/// integral finite values emit without a fraction (`1`, not `1.0`) so
+/// the on-disk event log stays byte-identical to the TS writer.
+fn serialize_f64_js_number<S: serde::Serializer>(
+    value: &Option<f64>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match value {
+        Some(v) if v.is_finite() && v.fract() == 0.0 && v.abs() <= 9.007_199_254_740_992e15 => {
+            serializer.serialize_i64(*v as i64)
+        }
+        Some(v) => serializer.serialize_f64(*v),
+        None => serializer.serialize_none(),
+    }
 }

@@ -111,7 +111,9 @@ fn session_entries(payload: &Value) -> Vec<SessionEntry> {
     for raw in list {
         let Some(s) = raw.as_object() else { continue };
         let get = |k: &str| s.get(k);
-        let Some(key) = str_field(get("key")) else { continue };
+        let Some(key) = str_field(get("key")) else {
+            continue;
+        };
         let identity_cwd = get("identity")
             .and_then(|i| i.get("cwd"))
             .and_then(|c| c.as_str())
@@ -119,9 +121,8 @@ fn session_entries(payload: &Value) -> Vec<SessionEntry> {
         out.push(SessionEntry {
             key,
             provider: str_field(get("provider")).unwrap_or_else(|| "unknown".to_string()),
-            session_id: str_field(get("session_id")).unwrap_or_else(|| {
-                str_field(get("key")).unwrap_or_default()
-            }),
+            session_id: str_field(get("session_id"))
+                .unwrap_or_else(|| str_field(get("key")).unwrap_or_default()),
             status: str_field(get("status")).unwrap_or_else(|| "unknown".to_string()),
             error: str_field(get("error")),
             stale: get("stale").and_then(|v| v.as_bool()) == Some(true),
@@ -176,17 +177,9 @@ fn history_page(payload: &Value) -> EventPage {
     if let Some(hint) = str_field(payload.get("hint")) {
         notes.push(hint);
     }
-    let session_key = str_field(
-        payload
-            .get("session")
-            .and_then(|s| s.get("key")),
-    )
-    .unwrap_or_default();
-    if let Some(err) = str_field(
-        payload
-            .get("session")
-            .and_then(|s| s.get("error")),
-    ) {
+    let session_key =
+        str_field(payload.get("session").and_then(|s| s.get("key"))).unwrap_or_default();
+    if let Some(err) = str_field(payload.get("session").and_then(|s| s.get("error"))) {
         notes.push(format!("session: {}", err));
     }
     let rows = payload
@@ -298,7 +291,9 @@ fn display_width(text: &str) -> usize {
 }
 
 fn ts_short(ts: Option<&str>) -> String {
-    let Some(ts) = ts else { return "----".to_string() };
+    let Some(ts) = ts else {
+        return "----".to_string();
+    };
     // ISO-8601 → "MM-DD HH:MM" (fixed-shape provider data).
     let b = ts.as_bytes();
     if b.len() >= 16
@@ -307,7 +302,13 @@ fn ts_short(ts: Option<&str>) -> String {
         && (b[10] == b'T' || b[10] == b' ')
         && b[13] == b':'
     {
-        return format!("{}-{} {}:{}", &ts[5..7], &ts[8..10], &ts[11..13], &ts[14..16]);
+        return format!(
+            "{}-{} {}:{}",
+            &ts[5..7],
+            &ts[8..10],
+            &ts[11..13],
+            &ts[14..16]
+        );
     }
     bound_text(ts, 16)
 }
@@ -410,8 +411,8 @@ fn event_detail_lines(row: &EventRow) -> Vec<String> {
         }
     }
     if let Some(tool_input) = e.get("tool_input").filter(|v| !v.is_null()) {
-        let rendered = serde_json::to_string_pretty(tool_input)
-            .unwrap_or_else(|_| tool_input.to_string());
+        let rendered =
+            serde_json::to_string_pretty(tool_input).unwrap_or_else(|_| tool_input.to_string());
         lines.push(String::new());
         lines.push("tool_input:".to_string());
         lines.push(bound_text(&rendered, 4000));
@@ -578,7 +579,9 @@ enum Screen {
         scroll: usize,
     },
     /// Search query input.
-    Prompt { draft: String },
+    Prompt {
+        draft: String,
+    },
     /// Confirm-gated `index` re-run.
     ConfirmIndex,
     Help,
@@ -699,9 +702,8 @@ impl App {
                 self.clamp_cursor();
             }
             other => {
-                self.state = ViewState::Error(
-                    other.error.unwrap_or_else(|| "sessions failed".to_string()),
-                );
+                self.state =
+                    ViewState::Error(other.error.unwrap_or_else(|| "sessions failed".to_string()));
             }
         }
     }
@@ -711,9 +713,7 @@ impl App {
         self.screen = Screen::Events(EventList::new(
             format!("history — {}", key),
             format!("no events for {} (status: {})", key, entry.status),
-            Loader::History {
-                session_key: key,
-            },
+            Loader::History { session_key: key },
         ));
     }
 
@@ -740,7 +740,9 @@ impl App {
         if !self.caps_ok {
             self.notice = format!(
                 "reindex unavailable: capability check failed ({})",
-                self.caps_error.clone().unwrap_or_else(|| "unknown".to_string())
+                self.caps_error
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string())
             );
             return;
         }
@@ -841,9 +843,7 @@ impl App {
                     draft.pop();
                     true
                 }
-                KeyCode::Char(c)
-                    if !key.modifiers.contains(KeyModifiers::CONTROL) =>
-                {
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                     draft.push(c);
                     true
                 }
@@ -888,9 +888,7 @@ impl App {
                 KeyCode::Backspace => {
                     self.filter_draft.pop();
                 }
-                KeyCode::Char(c)
-                    if !key.modifiers.contains(KeyModifiers::CONTROL) =>
-                {
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.filter_draft.push(c);
                 }
                 _ => {}
@@ -1014,7 +1012,6 @@ impl App {
         }
         true
     }
-
 }
 
 // --- render -----------------------------------------------------------------------
@@ -1064,7 +1061,11 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
     match &mut app.screen {
         Screen::Sessions => render_sessions(app, frame, chunks[1]),
         Screen::Events(list) => render_events(list, frame, chunks[1]),
-        Screen::Detail { title, lines, scroll } => {
+        Screen::Detail {
+            title,
+            lines,
+            scroll,
+        } => {
             // Clamp scroll into range, then render a window of lines.
             let max_scroll = lines.len().saturating_sub(1);
             *scroll = (*scroll).min(max_scroll);
@@ -1108,7 +1109,9 @@ fn render(app: &mut App, frame: &mut ratatui::Frame) {
                     .style(Style::default().add_modifier(Modifier::BOLD)),
                 Line::from(""),
                 Line::from("scope: every agent pane transcript visible to herdr in this session"),
-                Line::from("writes: <stateDir>/events/*.jsonl + state.json (opencode logs are rewritten)"),
+                Line::from(
+                    "writes: <stateDir>/events/*.jsonl + state.json (opencode logs are rewritten)",
+                ),
                 Line::from(""),
                 Line::from(
                     "Re-scans provider transcripts and rewrites normalized event logs. \
@@ -1238,9 +1241,7 @@ fn render_sessions(app: &mut App, frame: &mut ratatui::Frame, area: Rect) {
             let text = vec![
                 Line::from(Span::styled(
                     "  error: ",
-                    Style::default()
-                        .add_modifier(Modifier::BOLD)
-                        .fg(Color::Red),
+                    Style::default().add_modifier(Modifier::BOLD).fg(Color::Red),
                 )),
                 Line::from(format!("  {}", sanitize_display(e))),
                 Line::from("  R — retry · q — quit"),
@@ -1372,7 +1373,10 @@ fn render_events(list: &mut EventList, frame: &mut ratatui::Frame, area: Rect) {
                 width.saturating_sub(display_width(&left) + 4).max(10),
             );
             out.push(Line::from(vec![
-                Span::styled("  ".to_string(), Style::default().add_modifier(Modifier::DIM)),
+                Span::styled(
+                    "  ".to_string(),
+                    Style::default().add_modifier(Modifier::DIM),
+                ),
                 Span::styled(
                     sanitize_display(&left),
                     Style::default().add_modifier(Modifier::DIM),
@@ -1471,11 +1475,6 @@ const NON_TTY_NOTICE: [&str; 2] = [
 fn tui_main(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--open") {
         return open_pane();
-    }
-    if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("rebuildup.conversations TUI (herdr-plugins.tui/v1)");
-        println!("Usage: conversations tui [main|--open]");
-        return 0;
     }
 
     // Non-TTY stdin → honest plain notice, exit 0 (mirrors TS main()).

@@ -41,8 +41,12 @@ pub const OPENCODE_MAX_INPUT_CHARS: usize = 8_192;
 #[derive(Debug)]
 pub enum OpenCodeResolution {
     Missing,
-    UnsupportedLayout { data_dir: String },
-    SessionNotFound { db_path: String },
+    UnsupportedLayout {
+        data_dir: String,
+    },
+    SessionNotFound {
+        db_path: String,
+    },
     Ok {
         db_path: String,
         session_id: String,
@@ -95,7 +99,9 @@ pub fn opencode_data_dirs() -> Vec<String> {
 }
 
 fn file_exists(file: &Path) -> bool {
-    std::fs::metadata(file).map(|m| m.is_file()).unwrap_or(false)
+    std::fs::metadata(file)
+        .map(|m| m.is_file())
+        .unwrap_or(false)
 }
 
 fn dir_exists(dir: &Path) -> bool {
@@ -113,7 +119,11 @@ fn is_db_name(name: &str) -> bool {
     stem.is_empty()
         || (stem
             .strip_prefix('-')
-            .map(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+            .map(|s| {
+                !s.is_empty()
+                    && s.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            })
             .unwrap_or(false))
 }
 
@@ -149,7 +159,8 @@ fn open_db(db_path: &str) -> Option<Connection> {
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .ok()?;
-    conn.busy_timeout(std::time::Duration::from_millis(250)).ok()?;
+    conn.busy_timeout(std::time::Duration::from_millis(250))
+        .ok()?;
     Some(conn)
 }
 
@@ -163,7 +174,11 @@ fn table_names(conn: &Connection) -> std::collections::HashSet<String> {
         .unwrap_or_default()
 }
 
-fn find_session(conn: &Connection, tables: &std::collections::HashSet<String>, session_id: &str) -> Option<SessionRow> {
+fn find_session(
+    conn: &Connection,
+    tables: &std::collections::HashSet<String>,
+    session_id: &str,
+) -> Option<SessionRow> {
     for table in ["session_v2", "session"] {
         if !tables.contains(table) {
             continue;
@@ -189,7 +204,8 @@ fn find_session(conn: &Connection, tables: &std::collections::HashSet<String>, s
 /// database, and `directory` is reported for consumers.
 pub fn resolve_opencode_transcript(session_id: &str, _cwd: Option<&str>) -> OpenCodeResolution {
     // Defensive: a value that is already a readable SQLite file.
-    if (session_id.ends_with(".db") || session_id.contains('/')) && file_exists(Path::new(session_id))
+    if (session_id.ends_with(".db") || session_id.contains('/'))
+        && file_exists(Path::new(session_id))
     {
         let Some(db) = open_db(session_id) else {
             return OpenCodeResolution::Missing;
@@ -226,7 +242,8 @@ pub fn resolve_opencode_transcript(session_id: &str, _cwd: Option<&str>) -> Open
             };
             let tables = table_names(&db);
             if let Some(session) = find_session(&db, &tables, session_id) {
-                let schema = if tables.contains("session_v2") && tables.contains("session_message") {
+                let schema = if tables.contains("session_v2") && tables.contains("session_message")
+                {
                     OpenCodeSchema::V2
                 } else {
                     OpenCodeSchema::V1
@@ -283,8 +300,7 @@ fn epoch_iso(ms: Option<&Value>, fallback: Option<&Value>) -> Option<String> {
                 .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
         }
     }
-    let created = as_record(as_record(fallback?)?.get("time")?)
-        .and_then(|t| t.get("created"));
+    let created = as_record(as_record(fallback?)?.get("time")?).and_then(|t| t.get("created"));
     if let Some(Value::Number(n)) = created {
         let f = n.as_f64().unwrap_or(0.0);
         if f.is_finite() && f > 0.0 {
@@ -411,16 +427,9 @@ fn tool_result_from(state: Option<&Map<String, Value>>) -> ToolResult {
         return empty;
     };
     let status = state.get("status").and_then(|s| s.as_str()).unwrap_or("");
-    let is_error = status == "error"
-        || state
-            .get("error")
-            .map(|e| !e.is_null())
-            .unwrap_or(false);
+    let is_error = status == "error" || state.get("error").map(|e| !e.is_null()).unwrap_or(false);
     if status != "completed" && status != "error" {
-        return ToolResult {
-            is_error,
-            ..empty
-        };
+        return ToolResult { is_error, ..empty };
     }
     let output = state.get("output").or_else(|| state.get("content"));
     let (text, truncated) = content_text(output);
@@ -712,11 +721,7 @@ fn emit_tool(
         .unwrap_or_else(|| format!("{}:tool:{}", message_id, index));
     let state = tool.get("state").and_then(as_record);
 
-    let mut call = ctx.base_event(
-        "tool_call",
-        timestamp.clone(),
-        format!("{}:call", call_id),
-    );
+    let mut call = ctx.base_event("tool_call", timestamp.clone(), format!("{}:call", call_id));
     call.tool_use_id = Some(call_id.clone());
     let name = tool
         .get("name")
@@ -858,9 +863,7 @@ fn scan_v1(
     let rows: Vec<MessageRow> = rows.collect::<Result<_, _>>().map_err(|e| e.to_string())?;
 
     let mut part_stmt = db
-        .prepare(
-            "SELECT data FROM part WHERE message_id = ?1 ORDER BY time_created ASC, rowid ASC",
-        )
+        .prepare("SELECT data FROM part WHERE message_id = ?1 ORDER BY time_created ASC, rowid ASC")
         .map_err(|e| e.to_string())?;
 
     for row in rows {

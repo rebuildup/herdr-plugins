@@ -5,7 +5,6 @@ import http from "node:http";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { encodeClaudeCwd } from "../plugins/conversations/src/claude";
 import { computeModelCosts } from "../plugins/usage/src/cost";
 import type { BreakdownEntry } from "../plugins/usage/src/model";
 import {
@@ -19,7 +18,13 @@ import {
 import { collectQuota } from "../plugins/usage/src/quota";
 import { pluginRoot } from "../plugins/usage/src/source";
 import { gcPluginStateCache, PLUGIN_CACHE_RETENTION_SECONDS } from "../plugins/usage/src/state";
+import { conversationsBinary } from "./helpers/conversations-bin";
 import { herdrSocketEndpoint, testEnv } from "./helpers/test-env";
+
+/** Claude project-dir encoding (was plugins/conversations/src/claude.ts). */
+function encodeClaudeCwd(cwd: string): string {
+  return cwd.replace(/[^A-Za-z0-9]/g, "-");
+}
 
 const dirs: string[] = [];
 const savedEnv: Record<string, string | undefined> = {};
@@ -56,7 +61,7 @@ afterAll(() => {
 });
 
 const USAGE_CLI = path.join(__dirname, "..", "plugins", "usage", "src", "cli.ts");
-const CONV_CLI = path.join(__dirname, "..", "plugins", "conversations", "src", "cli.ts");
+const CONV_CLI = conversationsBinary();
 const CONV_ROOT = path.join(__dirname, "..", "plugins", "conversations");
 
 const CLAUDE_SESSION = "3bc481ff-60ac-491a-abd0-07c408c85e71";
@@ -124,7 +129,7 @@ function runConversationsAsync(
   extraEnv?: Record<string, string>,
 ): Promise<CliResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [CONV_CLI, ...args], {
+    const child = spawn(CONV_CLI, args, {
       env: baseEnv(extraEnv),
     });
     let stdout = "";

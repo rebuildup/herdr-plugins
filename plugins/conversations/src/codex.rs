@@ -56,16 +56,16 @@ pub fn codex_home_dir() -> PathBuf {
         if p.is_absolute() {
             return p;
         }
-        return std::env::current_dir()
-            .map(|cwd| cwd.join(&p))
-            .unwrap_or(p);
+        return std::env::current_dir().map(|cwd| cwd.join(&p)).unwrap_or(p);
     }
     let home = env_var("HOME").unwrap_or_else(|| "/".to_string());
     Path::new(&home).join(".codex")
 }
 
 fn file_exists(file: &Path) -> bool {
-    std::fs::metadata(file).map(|m| m.is_file()).unwrap_or(false)
+    std::fs::metadata(file)
+        .map(|m| m.is_file())
+        .unwrap_or(false)
 }
 
 fn find_session_file(
@@ -86,9 +86,10 @@ fn find_session_file(
     for entry in entries.flatten() {
         match entry.file_type() {
             Ok(ft) if ft.is_dir() => dirs.push(entry.path()),
-            Ok(ft) if ft.is_file() => {
-                files.push((entry.file_name().to_string_lossy().into_owned(), entry.path()))
-            }
+            Ok(ft) if ft.is_file() => files.push((
+                entry.file_name().to_string_lossy().into_owned(),
+                entry.path(),
+            )),
             _ => {}
         }
     }
@@ -117,10 +118,8 @@ fn find_session_file(
 /// nothing matches — callers must report `missing`, never guess.
 pub fn resolve_codex_transcript(session_id: &str, _cwd: Option<&str>) -> Option<String> {
     // Defensive: a value that is already a readable file path.
-    if session_id.contains('/') || session_id.contains('\\') {
-        if file_exists(Path::new(session_id)) {
-            return Some(session_id.to_string());
-        }
+    if (session_id.contains('/') || session_id.contains('\\')) && file_exists(Path::new(session_id)) {
+        return Some(session_id.to_string());
     }
     let home = codex_home_dir();
     let mut budget = MAX_WALK_DIRS;

@@ -65,5 +65,7 @@ pub fn provider_descriptor(id: &str) -> Option<&'static ProviderDescriptor> {
 }
 
 pub fn is_supported(id: &str) -> bool {
-    provider_descriptor(id).map(|p| p.status == "supported").unwrap_or(false)
+    provider_descriptor(id)
+        .map(|p| p.status == "supported")
+        .unwrap_or(false)
 }

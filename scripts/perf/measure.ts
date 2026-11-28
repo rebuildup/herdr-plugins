@@ -6,7 +6,7 @@
  * wall-clock latency per run, and reports p50/p95/p99 plus min/max/mean.
  *
  *   bun scripts/perf/measure.ts --runs 30 --warmup 3 --label "search" -- \
- *     env XDG_STATE_HOME=... bun run plugins/conversations/src/cli.ts search deploy --offline
+ *     env XDG_STATE_HOME=... ./plugins/conversations/bin/conversations search deploy --offline
  *
  * Options:
  *   --runs N        measured runs (default 30)

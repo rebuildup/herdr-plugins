@@ -131,8 +131,10 @@ pub fn scan_transcript(
         .modified()
         .ok()
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        // TS `info.mtimeMs` is a float with sub-ms precision.
-        .map(|d| d.as_secs_f64() * 1000.0)
+        // TS `info.mtimeMs`: `sec*1000 + nsec/1e6` in f64 — NOT
+        // `as_secs_f64()*1000`, which rounds differently at the last
+        // bits and breaks state.json byte parity.
+        .map(|d| d.as_secs() as f64 * 1000.0 + f64::from(d.subsec_nanos()) / 1_000_000.0)
         .unwrap_or(0.0);
 
     // Resume requires: prior cursor, file not shrunk, and the guard hash
@@ -147,18 +149,16 @@ pub fn scan_transcript(
                 reindexed = true;
             } else {
                 match File::open(path) {
-                    Ok(mut probe) => {
-                        match guard_hash_at(&mut probe, c.offset) {
-                            Some(guard)
-                                if expected_guard_hash.is_some()
-                                    && expected_guard_hash == Some(guard) =>
-                            {
-                                offset = c.offset;
-                                line_base = c.line_count;
-                            }
-                            _ => reindexed = true,
+                    Ok(mut probe) => match guard_hash_at(&mut probe, c.offset) {
+                        Some(guard)
+                            if expected_guard_hash.is_some()
+                                && expected_guard_hash == Some(guard) =>
+                        {
+                            offset = c.offset;
+                            line_base = c.line_count;
                         }
-                    }
+                        _ => reindexed = true,
+                    },
                     Err(_) => reindexed = true,
                 }
             }
@@ -241,5 +241,172 @@ pub fn scan_transcript(
         guard_hash,
         turn_index: parser.turn_index(),
         error: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::claude::ClaudeLineParser;
+    use serde_json::json;
+    use std::io::Write;
+
+    fn identity() -> Value {
+        json!({
+            "host": "h",
+            "herdr_session": "s",
+            "workspace_id": null,
+            "tab_id": null,
+            "pane_id": "p1",
+            "agent": "claude",
+            "agent_session": { "value": "sid" },
+            "state_change_seq": 1,
+        })
+    }
+
+    fn user_line(uuid: &str, text: &str, ts: &str) -> String {
+        json!({
+            "type": "user",
+            "uuid": uuid,
+            "timestamp": ts,
+            "message": { "role": "user", "content": text },
+        })
+        .to_string()
+    }
+
+    fn assistant_line(uuid: &str, ts: &str) -> String {
+        json!({
+            "type": "assistant",
+            "uuid": uuid,
+            "timestamp": ts,
+            "message": {
+                "role": "assistant",
+                "model": "m",
+                "content": [{ "type": "text", "text": "yo" }],
+                "usage": { "input_tokens": 1, "output_tokens": 2 },
+            },
+        })
+        .to_string()
+    }
+
+    fn types(events: &[ConversationEvent]) -> Vec<String> {
+        events.iter().map(|e| e.kind.clone()).collect()
+    }
+
+    #[test]
+    fn scan_is_incremental_and_detects_rewrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("s.jsonl");
+        let lines = [
+            user_line("u1", "hi", "2026-01-01T00:00:00Z"),
+            assistant_line("a1", "2026-01-01T00:00:01Z"),
+        ];
+        std::fs::write(&file, format!("{}\n", lines.join("\n"))).unwrap();
+
+        let factory = |start_turn: i64, _base: u64| -> Box<dyn LineParser> {
+            Box::new(ClaudeLineParser::new("s.jsonl", identity(), start_turn))
+        };
+
+        let first = scan_transcript(file.to_str().unwrap(), None, None, 0, factory);
+        assert!(first.error.is_none());
+        assert_eq!(
+            types(&first.events),
+            vec!["turn", "user_message", "assistant_message"]
+        );
+        assert_eq!(first.cursor.as_ref().unwrap().line_count, 2);
+        assert_eq!(first.turn_index, 1);
+
+        // Append one more user line → resume picks up only the new line.
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&file)
+                .unwrap();
+            writeln!(f, "{}", user_line("u2", "again", "2026-01-01T00:00:02Z")).unwrap();
+        }
+        let second = scan_transcript(
+            file.to_str().unwrap(),
+            first.cursor.as_ref(),
+            first.guard_hash,
+            first.turn_index,
+            |start_turn, _base| Box::new(ClaudeLineParser::new("s.jsonl", identity(), start_turn)),
+        );
+        assert_eq!(types(&second.events), vec!["turn", "user_message"]);
+        assert_eq!(second.events[0].turn_index, Some(2));
+        assert!(!second.reindexed);
+
+        // In-place rewrite of earlier bytes → guard mismatch → rescan.
+        let rewritten = format!(
+            "{}\n{}\n{}\n{}\n{}",
+            user_line("uX", "rewritten", "2026-01-01T00:00:00Z"),
+            lines[0],
+            lines[1],
+            user_line("u2", "again", "2026-01-01T00:00:02Z"),
+            ""
+        );
+        std::fs::write(&file, rewritten).unwrap();
+        let third = scan_transcript(
+            file.to_str().unwrap(),
+            second.cursor.as_ref(),
+            second.guard_hash,
+            second.turn_index,
+            |start_turn, _base| Box::new(ClaudeLineParser::new("s.jsonl", identity(), start_turn)),
+        );
+        assert!(third.reindexed);
+        assert!(third.events.len() > second.events.len());
+    }
+
+    #[test]
+    fn unterminated_tail_waits_for_next_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("s.jsonl");
+        let complete = user_line("u1", "hi", "2026-01-01T00:00:00Z");
+        // File ends without a newline: the partial line must not commit.
+        std::fs::write(&file, format!("{}\n{}", complete, "{\"type\":\"user\"")).unwrap();
+        let scan = scan_transcript(
+            file.to_str().unwrap(),
+            None,
+            None,
+            0,
+            |start_turn, _base| Box::new(ClaudeLineParser::new("s.jsonl", identity(), start_turn)),
+        );
+        assert_eq!(types(&scan.events), vec!["turn", "user_message"]);
+        let cursor = scan.cursor.unwrap();
+        assert_eq!(cursor.offset, (complete.len() + 1) as u64);
+    }
+
+    #[test]
+    fn malformed_json_line_is_counted() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("s.jsonl");
+        std::fs::write(
+            &file,
+            format!(
+                "{}\n{}\n",
+                user_line("u1", "hi", "2026-01-01T00:00:00Z"),
+                "{not valid json"
+            ),
+        )
+        .unwrap();
+        let scan = scan_transcript(
+            file.to_str().unwrap(),
+            None,
+            None,
+            0,
+            |start_turn, _base| Box::new(ClaudeLineParser::new("s.jsonl", identity(), start_turn)),
+        );
+        assert_eq!(scan.malformed_lines, 1);
+    }
+
+    #[test]
+    fn missing_file_is_transcript_missing() {
+        let scan = scan_transcript(
+            "/nonexistent/definitely-missing.jsonl",
+            None,
+            None,
+            0,
+            |_s, _b| Box::new(ClaudeLineParser::new("x", identity(), 0)) as Box<dyn LineParser>,
+        );
+        assert_eq!(scan.error.as_deref(), Some("transcript_missing"));
     }
 }

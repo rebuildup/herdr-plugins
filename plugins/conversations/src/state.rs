@@ -9,9 +9,10 @@
 //! lock file and committed via tmp+rename; event appends happen inside
 //! the same locked section (AGENTS §4).
 //!
-//! Issue #293 adds a derived search index (`index.sqlite`, see
-//! `indexdb.rs`) next to these files. It is a rebuildable cache — the
-//! JSONL event log + state.json remain the canonical on-disk contract.
+//! `state.json` + `events/*.jsonl` are the canonical on-disk contract;
+//! reads page the JSONL logs directly (no derived index — the #293
+//! `index.sqlite` experiment was dropped in favor of byte-offset
+//! cursors, see `read.rs`).
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -30,7 +31,9 @@ const LOCK_TIMEOUT_MS: u64 = 60_000;
 const LOCK_RETRY_MS: u64 = 25;
 
 fn state_file_path() -> PathBuf {
-    plugin_dirs(PLUGIN_ID, None, None).state_dir.join("state.json")
+    plugin_dirs(PLUGIN_ID, None, None)
+        .state_dir
+        .join("state.json")
 }
 
 fn lock_path() -> PathBuf {
@@ -105,7 +108,7 @@ fn file_mtime_ms(path: &Path) -> u64 {
 }
 
 /// Acquire the exclusive state lock (mirrors the TS `acquireLock`).
-fn acquire_lock() -> Result<Box<dyn FnOnce() -> () + Send>, String> {
+fn acquire_lock() -> Result<Box<dyn FnOnce() + Send>, String> {
     let file = lock_path();
     if let Some(parent) = file.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -157,8 +160,7 @@ pub fn update_state<T, F: FnOnce(&mut ConversationsState) -> Result<T, String>>(
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         let tmp = PathBuf::from(format!("{}.tmp-{}", file.display(), std::process::id()));
-        let body = serde_json::to_string_pretty(&state)
-            .map_err(|e| e.to_string())?;
+        let body = serde_json::to_string_pretty(&state).map_err(|e| e.to_string())?;
         fs::write(&tmp, format!("{}\n", body)).map_err(|e| e.to_string())?;
         fs::rename(&tmp, &file).map_err(|e| e.to_string())?;
         Ok(out)

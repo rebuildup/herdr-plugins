@@ -5,12 +5,17 @@ import http from "node:http";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { encodeClaudeCwd } from "../plugins/conversations/src/claude";
 import { buildCacheTokens } from "../plugins/usage/src/aggregate";
 import { buildDivergence } from "../plugins/usage/src/divergence";
 import { hubBaseUrl } from "../plugins/usage/src/hub";
 import type { BreakdownEntry, QuotaProviderResult, QuotaWindow } from "../plugins/usage/src/model";
+import { conversationsBinary } from "./helpers/conversations-bin";
 import { herdrSocketEndpoint, testEnv } from "./helpers/test-env";
+
+/** Claude project-dir encoding (was plugins/conversations/src/claude.ts). */
+function encodeClaudeCwd(cwd: string): string {
+  return cwd.replace(/[^A-Za-z0-9]/g, "-");
+}
 
 const dirs: string[] = [];
 const savedEnv: Record<string, string | undefined> = {};
@@ -51,7 +56,7 @@ afterAll(() => {
 });
 
 const USAGE_CLI = path.join(__dirname, "..", "plugins", "usage", "src", "cli.ts");
-const CONV_CLI = path.join(__dirname, "..", "plugins", "conversations", "src", "cli.ts");
+const CONV_CLI = conversationsBinary();
 const CONV_ROOT = path.join(__dirname, "..", "plugins", "conversations");
 
 // Fake credential material — must never appear in any CLI output.
@@ -120,7 +125,7 @@ function runConversationsAsync(
   extraEnv?: Record<string, string>,
 ): Promise<CliResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [CONV_CLI, ...args], { env: baseEnv(extraEnv) });
+    const child = spawn(CONV_CLI, args, { env: baseEnv(extraEnv) });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk: Buffer) => {
