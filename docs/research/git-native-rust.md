@@ -58,6 +58,21 @@ not-yet-migrated checkouts:
   spawns the native binary; `target_conflict` behavior unchanged.
 - `bun run validate:fast` — typecheck + lint + 1233 tests, 0 fail.
 - `cargo check`/`clippy`/`fmt` — clean on the `git` crate.
+- `bun scripts/diff-git.ts` — TS↔Rust output-parity harness (modeled on
+  `scripts/diff-inbox.ts` from #291). It `git archive`s `plugins/git` +
+  `packages` at the pre-removal commit (`bc005f7`, parent of the TS
+  deletion), runs `bun <tmp>/plugins/git/src/cli.ts` (and `src/tui.ts` /
+  `src/tui-forge.ts` for the TUI fallbacks) against the shipped
+  `plugins/git/bin/git` on the same fake herdr socket, the same stub
+  `gh`, and two identical repo clones (TS pane `w1:p1`, Rust pane
+  `w1:p2`, so mutations cannot cross-contaminate). **37/37 checks
+  identical** across usage errors, capability, git reads, git mutations
+  (stage/commit/branch/upstream/fetch/push), forge reads, forge
+  mutations, and both non-TTY TUI fallbacks. Documented intentional
+  divergences normalized by the harness: `version` (0.6.0 → 0.7.0) and
+  the non-TTY hint's CLI invocation name (`bun run src/cli.ts` →
+  `git`). Volatile fields (timestamps, SHAs, pane ids, tmp paths) are
+  normalized; everything else is byte-compared after key sorting.
 
 ## 3. Bugs found by the port (all fixed)
 
@@ -98,12 +113,37 @@ touched):
   `compare`, `project` (pane metadata `git_branch=292`,
   `git_ahead_behind=+3/-0` applied) all returned contract JSON.
 - Non-TTY `tui` fallback covered by contract tests; interactive keys
-  exercised only via the real-PTY pane renders above (same evidence
-  level as #291).
+  exercised via the real-PTY evidence spike below (same evidence level
+  as #291/#293).
+- `spikes/git-tui/drive.py` — pyte PTY driver producing screen snapshots
+  + ANSI typescripts under `spikes/git-tui/evidence/` (28 files):
+  - `main-*` (15): `git tui --cwd <scratch-fixture>` — home, selection,
+    changed-files list, per-file diff, commit history, commit detail,
+    `/` filter draft/apply/clear, `?` help, and a confirm-gated
+    stage-file mutation (`y` on the confirm dialog; verified `git
+    status` shows `app.ts` staged in the fixture repo afterwards).
+    The fixture repo is created fresh in a tmp dir by the driver; the
+    TUI never touches the real worktree.
+  - `forge-*` (11): `git tui forge` pinned to np292 pane `w2:p1`
+    (`HERDR_TUI_PANE_ID` + `HERDR_SOCKET_PATH`), with `gh` intercepted
+    by the committed stub `spikes/git-tui/gh-stub/` (canned
+    `pr/issue/repo/api` responses — no real GitHub calls). Covers home,
+    PR list, PR detail (incl. `expect-head` sha), issue list/detail,
+    state-filter cycle, reload, and the label-filter prompt.
+  - Reproduce: `GIT_TUI_SOCKET=<np292 sock> GIT_TUI_FORGE_PANE=w2:p1
+    XDG_*=<np292 dirs> /tmp/pyte-venv/bin/python spikes/git-tui/drive.py
+    [main|forge]` (requires `pyte`).
 
 Not exercised live: forge mutations and `gh`-backed lists against the
-real GitHub API (covered by stub-`gh` contract tests; reads are
-non-destructive but were not needed for the port gate).
+real GitHub API (covered by stub-`gh` contract tests + the stubbed PTY
+evidence; reads are non-destructive but were not needed for the port
+gate).
+
+**Human visual review is a separate gate.** The pyte snapshots are the
+machine-checkable record; a maintainer should still eyeball
+`spikes/git-tui/evidence/*.txt` (and ideally one live `plugin pane
+open`) before this Draft PR leaves draft. This is the same gate #291
+and #293 carried.
 
 ## 5. Performance re-measurement (#287 baseline comparison)
 
