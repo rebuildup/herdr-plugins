@@ -14,6 +14,7 @@ import {
   type TargetErrorCode,
   TargetResolutionError,
 } from "../packages/herdr-client/src/index";
+import { gitBinary } from "./helpers/git-bin";
 import { inboxBinary } from "./helpers/inbox-bin";
 import { herdrSocketEndpoint, testEnv } from "./helpers/test-env";
 
@@ -436,7 +437,8 @@ describe("CLI target isolation (fake herdr sessions)", () => {
   // rebuildup.inbox is native since #291: spawn the shipped binary
   // directly (plugins/inbox/bin/inbox, cargo target fallback).
   const INBOX_BIN = inboxBinary();
-  const GIT_CLI = path.join(import.meta.dir, "..", "plugins", "git", "src", "cli.ts");
+  // rebuildup.git is native since #292: spawn the shipped binary.
+  const GIT_CLI = gitBinary();
 
   const servers: FakeHerdr[] = [];
   const baseEnv = () => ({

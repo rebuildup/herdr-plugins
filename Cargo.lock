@@ -535,6 +535,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "git"
+version = "0.7.0"
+dependencies = [
+ "chrono",
+ "crossterm",
+ "hoxay-herdr-client",
+ "hoxay-tui",
+ "libc",
+ "ratatui",
+ "regex",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "tempfile",
+ "unicode-width",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
