@@ -1,0 +1,32 @@
+[package]
+name = "artifacts"
+version = "0.2.0"
+edition.workspace = true
+license.workspace = true
+description = "rebuildup.artifacts — artifact registry (native Rust port)"
+
+[lib]
+name = "artifacts"
+path = "src/lib.rs"
+
+[[bin]]
+name = "artifacts"
+path = "src/main.rs"
+
+[dependencies]
+hoxay-herdr-client = { path = "../../crates/herdr-client" }
+hoxay-tui = { path = "../../crates/tui" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1"
+sha2 = "0.10"
+rand = "0.8"
+ratatui = "0.30"
+crossterm = "0.29"
+unicode-width = "0.2"
+signal-hook = "0.3"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
