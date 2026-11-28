@@ -1,0 +1,17 @@
+{
+  "label": "70-np295rc-git-diff-stat",
+  "command": "plugins/git/bin/git diff --stat w2:p1 --session np295rc",
+  "runs": 30,
+  "warmup": 5,
+  "failures": 0,
+  "wall_ms": {
+    "n": 30,
+    "min": 460,
+    "p50": 644,
+    "p95": 864,
+    "p99": 972,
+    "max": 972,
+    "mean": 654.8,
+    "stdev": 119.1
+  }
+}

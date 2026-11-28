@@ -1,0 +1,17 @@
+{
+  "label": "73-np295rc-usage-full",
+  "command": "plugins/usage/bin/usage usage --offline",
+  "runs": 30,
+  "warmup": 5,
+  "failures": 0,
+  "wall_ms": {
+    "n": 30,
+    "min": 575,
+    "p50": 733,
+    "p95": 1405,
+    "p99": 1714,
+    "max": 1714,
+    "mean": 787.2,
+    "stdev": 243.2
+  }
+}

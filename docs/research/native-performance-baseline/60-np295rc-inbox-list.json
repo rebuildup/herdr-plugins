@@ -1,0 +1,17 @@
+{
+  "label": "60-np295rc-inbox-list",
+  "command": "plugins/inbox/bin/inbox list",
+  "runs": 40,
+  "warmup": 5,
+  "failures": 0,
+  "wall_ms": {
+    "n": 40,
+    "min": 10,
+    "p50": 19,
+    "p95": 219,
+    "p99": 273,
+    "max": 273,
+    "mean": 48.4,
+    "stdev": 73.3
+  }
+}

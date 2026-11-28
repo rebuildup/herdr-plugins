@@ -1,0 +1,17 @@
+{
+  "label": "71-np295rc-usage-capability",
+  "command": "plugins/usage/bin/usage capability",
+  "runs": 30,
+  "warmup": 5,
+  "failures": 0,
+  "wall_ms": {
+    "n": 30,
+    "min": 14,
+    "p50": 17,
+    "p95": 24,
+    "p99": 29,
+    "max": 29,
+    "mean": 18.4,
+    "stdev": 3.2
+  }
+}

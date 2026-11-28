@@ -1,0 +1,46 @@
+{
+  "label": "76-np295rc-tui-conv",
+  "command": "plugins/conversations/bin/conversations tui main",
+  "runs": 10,
+  "warmup": 2,
+  "pty": "120x40",
+  "first_byte_ms": {
+    "n": 10,
+    "min": 6.9,
+    "p50": 14.4,
+    "p95": 72.6,
+    "p99": 72.6,
+    "max": 72.6,
+    "mean": 20.4,
+    "stdev": 18.0
+  },
+  "advance_ms": {
+    "n": 0
+  },
+  "data_usable_ms": {
+    "n": 10,
+    "min": 7.7,
+    "p50": 15.8,
+    "p95": 73.9,
+    "p99": 73.9,
+    "max": 73.9,
+    "mean": 21.6,
+    "stdev": 18.1
+  },
+  "marker_found": 10,
+  "exit_codes": [0],
+  "maxrss_kb": {
+    "n": 0
+  },
+  "pgid_peak_rss_kb": {
+    "n": 10,
+    "min": 7792,
+    "p50": 7904,
+    "p95": 8032,
+    "p99": 8032,
+    "max": 8032,
+    "mean": 7900.8,
+    "stdev": 59.4
+  },
+  "note": "first_byte = first PTY output; data_usable = first output matching --marker regex (post-load content); maxrss = top-level child only; pgid_peak_rss = summed RSS of process group sampled ~30ms (includes TUI-spawned CLI children, double-counts shared pages)"
+}
