@@ -220,15 +220,35 @@ fn load_config() -> PluginConfig {
                     Some(QuotaHubConfig {
                         id: id.to_string(),
                         url: url.to_string(),
-                        key_env: str_field(h.get("keyEnv")),
+                        // Preserve an explicit `keyEnv: ""` verbatim —
+                        // TS `??` keeps "" (→ key_env "", key_configured
+                        // false) while only an absent key falls back to
+                        // the default env name downstream.
+                        key_env: h
+                            .get("keyEnv")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
                     })
                 })
                 .collect()
         })
         .unwrap_or_default();
 
+    // Per-entry parse: one malformed override drops only that entry,
+    // matching the TS `Object.entries` + try/catch-per-value behavior —
+    // a single bad value must not discard every valid override.
     let model_prices = get("modelPrices")
-        .and_then(|v| serde_json::from_value::<HashMap<String, ModelPriceOverride>>(v.clone()).ok());
+        .and_then(|v| v.as_object())
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|(k, val)| {
+                    serde_json::from_value::<ModelPriceOverride>(val.clone())
+                        .ok()
+                        .map(|p| (k.clone(), p))
+                })
+                .collect::<HashMap<String, ModelPriceOverride>>()
+        });
 
     PluginConfig {
         timeout_ms: get("timeoutMs").and_then(|v| v.as_f64()),
@@ -463,7 +483,6 @@ fn cmd_capability() -> Result<Value, RunError> {
             let key_env = h
                 .key_env
                 .clone()
-                .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| DEFAULT_HUB_KEY_ENV.to_string());
             json!({
                 "id": h.id,

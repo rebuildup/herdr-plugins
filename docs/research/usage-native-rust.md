@@ -193,6 +193,10 @@ Notes:
 - `cost`/`divergence`/`quota` network paths are exercised only via
   fixtures/mocks in tests; live provider probing was verified manually
   in np294 (§4) but is not in the automated suite (external I/O).
+- `--from`/`--to` date parsing is ISO-8601-strict (`parse_js_date`),
+  not full `Date.parse` semantics — the contract documents ISO-8601
+  input, so non-ISO forms that JS would accept return a usage error
+  here. Defensible divergence; widen only if the contract changes.
 - ~~Managed-install verification~~ — recorded post-push in the PR body.
 
 ## 7. Rollback

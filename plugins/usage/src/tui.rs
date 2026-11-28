@@ -25,7 +25,7 @@ use std::io::{self, IsTerminal, Write};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -43,6 +43,10 @@ use hoxay_tui::safety::sanitize_display;
 const PLUGIN_ID: &str = "rebuildup.usage";
 const ENTRYPOINT_ID: &str = "main";
 const HERDR_BIN: &str = "herdr";
+/// Wall-clock bound for one report load — parity with the TS TUI's
+/// 90 s SIGKILL + 120 s task deadline. The worker thread is detached
+/// on expiry; only the UI state is bounded.
+const LOAD_TIMEOUT: Duration = Duration::from_secs(120);
 
 // --- CLI bridge -----------------------------------------------------------------
 
@@ -404,6 +408,9 @@ struct ReportView {
     error: Option<String>,
     loading: bool,
     rx: Option<Receiver<CliResult>>,
+    /// When the in-flight load started; enforces the wall-clock bound
+    /// the TS version had via its 90 s SIGKILL + task deadline.
+    load_started: Option<Instant>,
     scroll: usize,
     /// Selection index for list-mode views (quota / divergence).
     sel: usize,
@@ -426,6 +433,7 @@ impl ReportView {
             error: None,
             loading: false,
             rx: None,
+            load_started: None,
             scroll: 0,
             sel: 0,
             query: String::new(),
@@ -476,6 +484,7 @@ impl ReportView {
         }
         self.loading = true;
         self.error = None;
+        self.load_started = Some(Instant::now());
         let args = self.args(refresh);
         let (tx, rx) = channel();
         self.rx = Some(rx);
@@ -488,17 +497,35 @@ impl ReportView {
     /// Non-blocking: pick up a finished load, if any. A single
     /// `try_recv` — probing with one call and re-receiving would
     /// consume the result and misreport every success as a failure.
+    /// A load that outlives `LOAD_TIMEOUT` is reported as timed out;
+    /// the worker thread keeps running detached and its result is
+    /// discarded (Rust cannot kill a thread).
     fn poll_load(&mut self) {
+        if self.loading
+            && self
+                .load_started
+                .map(|t| t.elapsed() >= LOAD_TIMEOUT)
+                .unwrap_or(false)
+        {
+            self.rx = None;
+            self.load_started = None;
+            self.loading = false;
+            self.error = Some("load timed out".to_string());
+            self.payload = None;
+            return;
+        }
         let Some(rx) = &self.rx else { return };
         match rx.try_recv() {
             Ok(res) => {
                 self.rx = None;
+                self.load_started = None;
                 self.finish_load(res);
             }
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
                 // Sender dropped without a value: treat as failure.
                 self.rx = None;
+                self.load_started = None;
                 self.loading = false;
                 self.error = Some("load failed".to_string());
                 self.payload = None;
@@ -2033,5 +2060,59 @@ mod tests {
         for l in &wrapped {
             assert!(display_width(l) <= 10, "line too wide: {:?}", l);
         }
+    }
+
+    #[test]
+    fn poll_load_times_out_a_stalled_load() {
+        // A load older than LOAD_TIMEOUT reports an honest timeout and
+        // clears the loading state; the detached worker's late result
+        // is discarded (rx dropped).
+        let mut view = ReportView {
+            kind: ReportKind::Usage,
+            windowed: true,
+            refreshable: false,
+            provider: String::new(),
+            window: WindowPreset::All,
+            provider_ids: Vec::new(),
+            payload: None,
+            error: None,
+            loading: true,
+            rx: None,
+            load_started: Some(Instant::now() - LOAD_TIMEOUT - Duration::from_secs(1)),
+            scroll: 0,
+            sel: 0,
+            query: String::new(),
+            filter_mode: false,
+            items: Vec::new(),
+        };
+        view.poll_load();
+        assert!(!view.loading);
+        assert_eq!(view.error.as_deref(), Some("load timed out"));
+        assert!(view.payload.is_none());
+    }
+
+    #[test]
+    fn poll_load_keeps_waiting_within_the_deadline() {
+        let mut view = ReportView {
+            kind: ReportKind::Usage,
+            windowed: true,
+            refreshable: false,
+            provider: String::new(),
+            window: WindowPreset::All,
+            provider_ids: Vec::new(),
+            payload: None,
+            error: None,
+            loading: true,
+            rx: None,
+            load_started: Some(Instant::now()),
+            scroll: 0,
+            sel: 0,
+            query: String::new(),
+            filter_mode: false,
+            items: Vec::new(),
+        };
+        view.poll_load();
+        assert!(view.loading);
+        assert!(view.error.is_none());
     }
 }

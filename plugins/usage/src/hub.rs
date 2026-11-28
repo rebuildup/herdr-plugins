@@ -569,10 +569,11 @@ fn quota_for_hub(
         return result;
     };
 
+    // `keyEnv: ""` is preserved verbatim (TS `??` semantics): only an
+    // absent key_env falls back to the default env name.
     let key_env = config
         .key_env
         .clone()
-        .filter(|s| !s.is_empty())
         .unwrap_or_else(|| DEFAULT_HUB_KEY_ENV.to_string());
     let key = env_get(&key_env).unwrap_or_default();
     if key.is_empty() {

@@ -261,68 +261,34 @@ fn read_claude_credential() -> CredentialResult {
 }
 
 /// `security find-generic-password -s "Claude Code-credentials" -w` →
-/// parsed JSON, or None. 5s timeout, stdout only.
+/// parsed JSON, or None. 5s timeout, stdout only. The deadline is
+/// enforced by `run_with_timeout` (reader threads drain the pipe while
+/// `try_wait` polls) — a plain blocking `read` would park forever if
+/// macOS shows a keychain authorization dialog and the child produces
+/// no output.
 #[cfg(target_os = "macos")]
 fn run_security_find() -> Option<Value> {
-    use std::io::Read;
     use std::process::{Command, Stdio};
-    use std::time::Instant;
 
-    let mut child = Command::new("security")
-        .args([
-            "find-generic-password",
-            "-s",
-            CLAUDE_CREDENTIALS_SERVICE,
-            "-w",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut out = Vec::new();
-    let mut buf = [0u8; 8192];
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                if !status.success() {
-                    return None;
-                }
-                // Drain remaining stdout.
-                if let Some(mut stdout) = child.stdout.take() {
-                    let _ = stdout.read_to_end(&mut out);
-                }
-                let text = String::from_utf8_lossy(&out);
-                if text.trim().is_empty() {
-                    return None;
-                }
-                return serde_json::from_str::<Value>(text.trim()).ok();
-            }
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return None;
-                }
-                if let Some(mut stdout) = child.stdout.take() {
-                    // Non-blocking-ish: read what's available.
-                    match stdout.read(&mut buf) {
-                        Ok(0) => {}
-                        Ok(n) => out.extend_from_slice(&buf[..n]),
-                        Err(_) => {}
-                    }
-                    child.stdout = Some(stdout);
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
+    let mut cmd = Command::new("security");
+    cmd.args([
+        "find-generic-password",
+        "-s",
+        CLAUDE_CREDENTIALS_SERVICE,
+        "-w",
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null());
+    let output = crate::source::run_with_timeout(cmd, Duration::from_secs(5))?;
+    if !output.status.success() {
+        return None;
     }
+    let text = String::from_utf8_lossy(&output.stdout);
+    if text.trim().is_empty() {
+        return None;
+    }
+    serde_json::from_str::<Value>(text.trim()).ok()
 }
 
 /// Decode a JWT payload without verifying; returns whitelisted claims
