@@ -111,29 +111,66 @@ fn emit(payload: &Value) {
     println!("{}", serde_json::to_string_pretty(payload).unwrap_or_else(|_| "null".into()));
 }
 
-/// Write the error envelope to stderr and return the exit code.
-fn fail(message: &str, code: i32, kind: Option<&str>, extra: Option<Value>) -> i32 {
-    let mut error = Map::new();
-    error.insert(
-        "code".to_string(),
-        Value::String(if code == 2 { "usage" } else { "error" }.to_string()),
-    );
-    error.insert("message".to_string(), Value::String(message.to_string()));
-    if let Some(k) = kind {
-        error.insert("kind".to_string(), Value::String(k.to_string()));
-    }
-    if let Some(Value::Object(map)) = extra {
-        for (k, v) in map {
-            error.insert(k, v);
+/// Handled command failure — mirrors TS `fail()`: the error document
+/// goes to stderr, the exit code is 0/1/2 mapped by `code`.
+#[derive(Debug)]
+pub struct RunError {
+    pub code: i32,
+    pub message: String,
+    pub kind: Option<String>,
+    pub extra: Option<Value>,
+}
+
+impl RunError {
+    pub fn new(message: impl Into<String>, code: i32) -> Self {
+        RunError {
+            code,
+            message: message.into(),
+            kind: None,
+            extra: None,
         }
     }
-    let payload = json!({
-        "contract": CONTRACT,
-        "ok": false,
-        "error": Value::Object(error),
-    });
-    eprintln!("{}", serde_json::to_string(&payload).unwrap_or_default());
-    code
+    pub fn kind(mut self, kind: &str) -> Self {
+        self.kind = Some(kind.to_string());
+        self
+    }
+    pub fn extra(mut self, extra: Value) -> Self {
+        self.extra = Some(extra);
+        self
+    }
+    /// The stderr JSON document (TS `fail` payload shape).
+    pub fn stderr_doc(&self) -> String {
+        let mut error = Map::new();
+        error.insert(
+            "code".to_string(),
+            Value::String(if self.code == 2 { "usage" } else { "error" }.to_string()),
+        );
+        error.insert("message".to_string(), Value::String(self.message.clone()));
+        if let Some(k) = &self.kind {
+            error.insert("kind".to_string(), Value::String(k.clone()));
+        }
+        if let Some(Value::Object(map)) = &self.extra {
+            for (k, v) in map {
+                error.insert(k.clone(), v.clone());
+            }
+        }
+        serde_json::to_string(&json!({
+            "contract": CONTRACT,
+            "ok": false,
+            "error": Value::Object(error),
+        }))
+        .unwrap_or_default()
+    }
+}
+
+/// Write the error envelope to stderr and return the exit code.
+fn fail(message: &str, code: i32, kind: Option<&str>, extra: Option<Value>) -> RunError {
+    let mut e = RunError::new(message, code);
+    if let Some(k) = kind {
+        e.kind = Some(k.to_string());
+    }
+    e.extra = extra;
+    e
 }
 
 fn now() -> String {
@@ -182,7 +219,7 @@ fn call_options(options: &CliOptions, config: &PluginConfig) -> CallOptions {
     }
 }
 
-fn snapshot_or_fail(options: &CliOptions, config: &PluginConfig) -> Result<SessionSnapshot, i32> {
+fn snapshot_or_fail(options: &CliOptions, config: &PluginConfig) -> Result<SessionSnapshot, RunError> {
     commands::session_snapshot(&call_options(options, config)).map_err(|e| {
         fail(
             &format!("herdr session unreachable: {}", command_error_message(&e)),
@@ -689,11 +726,11 @@ fn index_candidate(
     }
 }
 
-fn cmd_index(options: &CliOptions) -> i32 {
+fn cmd_index(options: &CliOptions) -> Result<Value, RunError> {
     let config = load_config();
     let snapshot = match snapshot_or_fail(options, &config) {
         Ok(s) => s,
-        Err(code) => return code,
+        Err(e) => return Err(e),
     };
     let (candidates, skipped) = collect_candidates(&snapshot);
 
@@ -727,7 +764,7 @@ fn cmd_index(options: &CliOptions) -> i32 {
     });
     let (indexed, extra_misses) = match result {
         Ok(pair) => pair,
-        Err(e) => return fail(&e, 1, Some("state_error"), None),
+        Err(e) => return Err(fail(&e, 1, Some("state_error"), None)),
     };
     // `skipped` from collect_candidates precede index misses (TS order).
     let mut misses = skipped;
@@ -737,7 +774,7 @@ fn cmd_index(options: &CliOptions) -> i32 {
         .iter()
         .filter_map(|o| o.get("events_appended").and_then(|v| v.as_u64()))
         .sum();
-    emit(&json!({
+    Ok(json!({
         "contract": CONTRACT,
         "command": options.command,
         "indexed": indexed,
@@ -745,8 +782,7 @@ fn cmd_index(options: &CliOptions) -> i32 {
         "sessions_indexed": indexed.len(),
         "events_appended": events_appended,
         "generated_at": now(),
-    }));
-    0
+    }))
 }
 
 // --- sessions ---------------------------------------------------------------------
@@ -833,10 +869,10 @@ fn session_entry(record: &SessionRecord, live_ctx: Option<&LiveContext>) -> Valu
     })
 }
 
-fn cmd_sessions(options: &CliOptions) -> i32 {
+fn cmd_sessions(options: &CliOptions) -> Result<Value, RunError> {
     let state = match load_state() {
         Ok(s) => s,
-        Err(e) => return fail(&e, 1, Some("state_error"), None),
+        Err(e) => return Err(fail(&e, 1, Some("state_error"), None)),
     };
     let live_ctx = live_context(options);
 
@@ -850,14 +886,13 @@ fn cmd_sessions(options: &CliOptions) -> i32 {
         .map(|r| session_entry(r, live_ctx.as_ref()))
         .collect();
     let count = sessions.len();
-    emit(&json!({
+    Ok(json!({
         "contract": CONTRACT,
         "command": "sessions",
         "sessions": sessions,
         "count": count,
         "generated_at": now(),
-    }));
-    0
+    }))
 }
 
 // --- read APIs: history / search / show / usage -------------------------------
@@ -923,21 +958,21 @@ fn resolve_history_record<'a>(
 }
 
 /// Session block shared by history/search/show/usage responses.
-fn cmd_history(options: &CliOptions) -> i32 {
+fn cmd_history(options: &CliOptions) -> Result<Value, RunError> {
     let state = match load_state() {
         Ok(s) => s,
-        Err(e) => return fail(&e, 1, Some("state_error"), None),
+        Err(e) => return Err(fail(&e, 1, Some("state_error"), None)),
     };
     let (record, note) = match resolve_history_record(&state, options) {
         Ok(v) => v,
         Err(e) => {
             let code = if e.starts_with("history requires") { 2 } else { 1 };
-            return fail(
+            return Err(fail(
                 &e,
                 code,
                 Some("session_not_found"),
                 Some(json!({ "hint": "run `index` to build the transcript index, or check the selector" })),
-            );
+            ));
         }
     };
 
@@ -951,18 +986,18 @@ fn cmd_history(options: &CliOptions) -> i32 {
         // TS `Number(cursor)` + Number.isInteger + >= 0: "1e3" → 1000.
         match cursor.parse::<f64>() {
             Ok(v) if v.is_finite() && v >= 0.0 && v.fract() == 0.0 => offset = v as u64,
-            _ => return fail(&format!("invalid --cursor: {}", cursor), 2, None, None),
+            _ => return Err(fail(&format!("invalid --cursor: {}", cursor), 2, None, None)),
         }
     }
 
     let live_ctx = live_context(options);
     let page = match read::read_event_page(&record.key, offset, limit, &|e| read::match_all(e)) {
         Ok(p) => p,
-        Err(e) => return fail(&e, 1, Some("cursor_invalid"), None),
+        Err(e) => return Err(fail(&e, 1, Some("cursor_invalid"), None)),
     };
 
     let events: Vec<Value> = page.matches.iter().map(|m| m.event.clone()).collect();
-    emit(&json!({
+    Ok(json!({
         "contract": CONTRACT,
         "command": "history",
         "session": session_entry(record, live_ctx.as_ref()),
@@ -980,8 +1015,7 @@ fn cmd_history(options: &CliOptions) -> i32 {
             "events_size": page.size,
         },
         "generated_at": now(),
-    }));
-    0
+    }))
 }
 
 // --- search / usage / show ---------------------------------------------------
@@ -1056,20 +1090,20 @@ fn run_paged_read(
     extra: Value,
     matcher: &EventMatcher,
     limit: usize,
-) -> i32 {
+) -> Result<Value, RunError> {
     let state = match load_state() {
         Ok(s) => s,
-        Err(e) => return fail(&e, 1, Some("state_error"), None),
+        Err(e) => return Err(fail(&e, 1, Some("state_error"), None)),
     };
     let (records, note) = match select_records(&state, options) {
         Ok(v) => v,
         Err(e) => {
-            return fail(
+            return Err(fail(
                 &e,
                 1,
                 Some("session_not_found"),
                 Some(json!({ "hint": "run `index` to build the transcript index, or check the selector" })),
-            );
+            ));
         }
     };
 
@@ -1077,7 +1111,7 @@ fn run_paged_read(
     if let Some(cursor) = &options.cursor {
         match read::decode_offset_cursor(cursor) {
             Some(map) => decoded = map,
-            None => return fail(&format!("invalid --cursor: {}", cursor), 2, None, None),
+            None => return Err(fail(&format!("invalid --cursor: {}", cursor), 2, None, None)),
         }
     }
 
@@ -1091,7 +1125,7 @@ fn run_paged_read(
         .collect();
     let scan = match read::scan_paged_sessions(&targets, limit, matcher) {
         Ok(s) => s,
-        Err(e) => return fail(&e, 1, Some("read_failed"), None),
+        Err(e) => return Err(fail(&e, 1, Some("read_failed"), None)),
     };
 
     let sessions: Vec<Value> = records
@@ -1147,19 +1181,18 @@ fn run_paged_read(
         );
     }
     payload.insert("generated_at".to_string(), json!(now()));
-    emit(&Value::Object(payload));
-    0
+    Ok(Value::Object(payload))
 }
 
-fn cmd_search(options: &CliOptions) -> i32 {
+fn cmd_search(options: &CliOptions) -> Result<Value, RunError> {
     let query = positional_args(options).join(" ");
     let query = query.trim().to_string();
     if query.is_empty() {
-        return fail("search requires a query", 2, None, None);
+        return Err(fail("search requires a query", 2, None, None));
     }
     if let Some(t) = &options.event_type {
         if !EVENT_TYPES.contains(&t.as_str()) {
-            return fail(
+            return Err(fail(
                 &format!(
                     "invalid --type: {} (expected one of {})",
                     t,
@@ -1168,7 +1201,7 @@ fn cmd_search(options: &CliOptions) -> i32 {
                 2,
                 None,
                 None,
-            );
+            ));
         }
     }
     let needle = query.to_lowercase();
@@ -1214,7 +1247,7 @@ fn cmd_search(options: &CliOptions) -> i32 {
     )
 }
 
-fn cmd_usage(options: &CliOptions) -> i32 {
+fn cmd_usage(options: &CliOptions) -> Result<Value, RunError> {
     // Read surface for #28: pages only events carrying provider-reported
     // usage; aggregation stays consumer-side.
     let matcher = |event: &Value| -> Option<Vec<String>> {
@@ -1238,16 +1271,16 @@ fn cmd_usage(options: &CliOptions) -> i32 {
     )
 }
 
-fn cmd_show(options: &CliOptions) -> i32 {
+fn cmd_show(options: &CliOptions) -> Result<Value, RunError> {
     let reference = positional_args(options).join(" ");
     let reference = reference.trim().to_string();
     if reference.is_empty() {
-        return fail(
+        return Err(fail(
             "show requires a reference (event id, tool:<id>, or turn:<n>)",
             2,
             None,
             None,
-        );
+        ));
     }
 
     let turn_re = regex::Regex::new(r"^turn:(\d+)$").unwrap();
@@ -1298,17 +1331,17 @@ fn cmd_show(options: &CliOptions) -> i32 {
 
     let state = match load_state() {
         Ok(s) => s,
-        Err(e) => return fail(&e, 1, Some("state_error"), None),
+        Err(e) => return Err(fail(&e, 1, Some("state_error"), None)),
     };
     let (records, note) = match select_records(&state, options) {
         Ok(v) => v,
         Err(e) => {
-            return fail(
+            return Err(fail(
                 &e,
                 1,
                 Some("session_not_found"),
                 Some(json!({ "hint": "run `index` to build the transcript index, or check the selector" })),
-            );
+            ));
         }
     };
 
@@ -1322,7 +1355,7 @@ fn cmd_show(options: &CliOptions) -> i32 {
         .collect();
     let scan = match read::scan_paged_sessions(&targets, MAX_SHOW_RESULTS, &*matcher) {
         Ok(s) => s,
-        Err(e) => return fail(&e, 1, Some("read_failed"), None),
+        Err(e) => return Err(fail(&e, 1, Some("read_failed"), None)),
     };
 
     // A bare ref may match tool_use_id when no event_id matched; report
@@ -1382,14 +1415,30 @@ fn cmd_show(options: &CliOptions) -> i32 {
         .as_object_mut()
         .unwrap()
         .insert("generated_at".to_string(), json!(now()));
-    emit(&payload);
-    0
+    Ok(payload)
 }
 
 // --- entrypoint -------------------------------------------------------------------
 
-pub fn run(argv: &[String]) -> i32 {
-    let options = parse_args(argv);
+fn emit_or_fail(result: Result<Value, RunError>) -> i32 {
+    match result {
+        Ok(value) => {
+            emit(&value);
+            0
+        }
+        Err(e) => {
+            eprintln!("{}", e.stderr_doc());
+            e.code
+        }
+    }
+}
+
+/// Dispatch a domain command in-process — the same `cmd_*` cores the
+/// CLI entrypoint uses. The TUI calls this for reads; index/refresh
+/// are reachable but pane-scoped commands always carry explicit
+/// selectors so ambient HERDR_* context can never become a target.
+pub fn run_domain(args: &[String]) -> Result<Value, RunError> {
+    let options = parse_args(args);
     match options.command.as_str() {
         "capability" => cmd_capability(),
         "index" | "refresh" => cmd_index(&options),
@@ -1398,21 +1447,22 @@ pub fn run(argv: &[String]) -> i32 {
         "search" => cmd_search(&options),
         "show" => cmd_show(&options),
         "usage" => cmd_usage(&options),
-        "help" | "--help" | "-h" => {
-            emit(&json!({
-                "contract": CONTRACT,
-                "plugin": PLUGIN_ID,
-                "version": PLUGIN_VERSION,
-                "usage": "conversations <capability|index|refresh|sessions|history|search|show|usage> [--session NAME] [--session-id ID] [--pane PANE] [--provider ID] [--type TYPE] [--limit N] [--cursor CUR] [--socket PATH] [--timeout MS] [--offline]",
-            }));
-            0
-        }
-        other => fail(&format!("unknown command: {}", other), 2, None, None),
+        "help" | "--help" | "-h" => Ok(json!({
+            "contract": CONTRACT,
+            "plugin": PLUGIN_ID,
+            "version": PLUGIN_VERSION,
+            "usage": "conversations <capability|index|refresh|sessions|history|search|show|usage> [--session NAME] [--session-id ID] [--pane PANE] [--provider ID] [--type TYPE] [--limit N] [--cursor CUR] [--socket PATH] [--timeout MS] [--offline]",
+        })),
+        other => Err(RunError::new(format!("unknown command: {}", other), 2)),
     }
 }
 
-fn cmd_capability() -> i32 {
-    emit(&json!({
+pub fn run(argv: &[String]) -> i32 {
+    emit_or_fail(run_domain(argv))
+}
+
+fn cmd_capability() -> Result<Value, RunError> {
+    Ok(json!({
         "contract": CONTRACT,
         "command": "capability",
         "plugin": PLUGIN_ID,
@@ -1429,6 +1479,5 @@ fn cmd_capability() -> i32 {
             "opencode sessions are fully rescanned and their event log rewritten on each index (SQLite rows are mutable); file-backed providers scan incrementally.",
         ],
         "generated_at": now(),
-    }));
-    0
+    }))
 }
