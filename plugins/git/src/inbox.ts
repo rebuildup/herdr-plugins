@@ -11,8 +11,10 @@
  * the inbox plugin's public CLI — the ADR-0013 sibling-plugin pattern
  * already used by usage→conversations and textgen→git/usage: resolve the
  * plugin root (explicit override → sibling `../inbox` →
- * `herdr plugin list --json`), invoke `<root>/src/cli.ts`, and never
- * touch the inbox plugin's state file directly.
+ * `herdr plugin list --json`), invoke its CLI entrypoint — `bin/inbox`
+ * for the native build (ADR-0035), `src/cli.ts` under Bun for pre-#291
+ * TS-only checkouts — and never touch the inbox plugin's state file
+ * directly.
  */
 
 import { spawn } from "node:child_process";
@@ -45,13 +47,25 @@ async function isPluginRoot(dir: string, pluginId: string): Promise<boolean> {
     const tomlPath = path.join(dir, "herdr-plugin.toml");
     const toml = await stat(tomlPath);
     if (!toml.isFile()) return false;
-    const cli = await stat(path.join(dir, "src", "cli.ts"));
-    if (!cli.isFile()) return false;
+    // Native distribution (ADR-0035) ships bin/inbox; pre-#291 TS-only
+    // checkouts keep src/cli.ts — accept either CLI entrypoint so an
+    // older inbox install still resolves (independent plugin lifecycle).
+    const bin = await stat(path.join(dir, "bin", "inbox")).catch(() => null);
+    const cli =
+      bin?.isFile() === true ? bin : await stat(path.join(dir, "src", "cli.ts")).catch(() => null);
+    if (cli === null || !cli.isFile()) return false;
     const text = await readFile(tomlPath, "utf8");
     return text.includes(`id = "${pluginId}"`);
   } catch {
     return false;
   }
+}
+
+/** Prefer the native `bin/inbox`; fall back to `src/cli.ts` (pre-#291 checkouts). */
+async function inboxCliPath(root: string): Promise<string> {
+  const bin = path.join(root, "bin", "inbox");
+  const info = await stat(bin).catch(() => null);
+  return info?.isFile() === true ? bin : path.join(root, "src", "cli.ts");
 }
 
 /** `herdr plugin list --json` → plugin_root for the given plugin id. */
@@ -140,7 +154,8 @@ export interface InboxCliRunResult {
 }
 
 /**
- * Run one inbox CLI command (`bun <root>/src/cli.ts …`). The child env is
+ * Run one inbox CLI command (`<root>/bin/inbox …` — the native binary;
+ * ADR-0035). The child env is
  * scrubbed of this plugin's HERDR_PLUGIN_* values (they belong to
  * rebuildup.git and must never redirect the child's state resolution)
  * and pinned to the inbox plugin's own dirs — the same env-pin rule as
@@ -149,12 +164,17 @@ export interface InboxCliRunResult {
  * target stays consistent; explicit `--session`/`--socket` flags are
  * forwarded as argv.
  */
-export function runInboxCli(
+export async function runInboxCli(
   root: string,
   args: string[],
   call: InboxCliCallOptions,
 ): Promise<InboxCliRunResult> {
-  const cliArgs = [path.join(root, "src", "cli.ts"), ...args];
+  // `.ts` entrypoints run under Bun (process.execPath); a native bin/
+  // path spawns directly — mirrors pluginroot.rs run_plugin_cli and the
+  // usage→conversations source.ts pattern.
+  const cliPath = await inboxCliPath(root);
+  const isTs = cliPath.endsWith(".ts");
+  const cliArgs = [...args];
   if (call.session !== undefined) cliArgs.push("--session", call.session);
   if (call.socketPath !== undefined) cliArgs.push("--socket", call.socketPath);
   if (call.timeoutMs !== undefined) cliArgs.push("--timeout", String(call.timeoutMs));
@@ -187,7 +207,9 @@ export function runInboxCli(
   env.HERDR_PLUGIN_ID = INBOX_PLUGIN_ID;
 
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, cliArgs, {
+    const argv = isTs ? [cliPath, ...cliArgs] : cliArgs;
+    const command = isTs ? process.execPath : cliPath;
+    const child = spawn(command, argv, {
       cwd: root,
       env,
       stdio: ["ignore", "pipe", "pipe"],

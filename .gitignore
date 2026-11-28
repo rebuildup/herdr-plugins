@@ -8,3 +8,4 @@ dist/
 coverage/
 spikes/*/target/
 spikes/tui/.venv/
+target/
