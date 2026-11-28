@@ -361,6 +361,8 @@ pub fn session_key_for(options: &ResolveTargetOptions) -> Result<String, TargetR
 pub fn hostname() -> String {
     #[cfg(unix)]
     {
+        // SAFETY: gethostname writes at most buf.len() bytes into buf and
+        // reports the length via rc; the buffer is only read when rc==0.
         unsafe {
             let mut buf = [0i8; 256];
             let rc = libc::gethostname(buf.as_mut_ptr(), buf.len());

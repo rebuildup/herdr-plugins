@@ -531,4 +531,20 @@ describe("git issue CLI (fake herdr + fake gh)", () => {
     expect(run.status).toBe(1);
     expect(run.error).not.toBeNull();
   }, 60_000);
+
+  test("delegation falls back to src/cli.ts on a pre-#291 inbox checkout", async () => {
+    const { resolveInboxPluginRoot, runInboxCli } = await import("../plugins/git/src/inbox");
+    const root = path.join(workdir, "inbox-ts-only");
+    mkdirSync(path.join(root, "src"), { recursive: true });
+    writeFileSync(path.join(root, "herdr-plugin.toml"), 'id = "rebuildup.inbox"\n');
+    writeFileSync(
+      path.join(root, "src", "cli.ts"),
+      'console.log(JSON.stringify({ ok: true, via: "ts-fallback" }));\n',
+    );
+    const resolution = await resolveInboxPluginRoot(root);
+    expect(resolution.ok).toBe(true);
+    const run = await runInboxCli(root, ["links", "w1:p1"], {});
+    expect(run.status).toBe(0);
+    expect(run.json?.via).toBe("ts-fallback");
+  }, 60_000);
 });
