@@ -339,11 +339,11 @@ platforms that were never claimed (`platforms=["macos"]` is honest).
 
 ## 8. Validation record
 
-- `bun run validate:fast` (this branch, final state): **see PR body /
-  CI** — first full run: typecheck ✓ lint ✓ tests 1180 pass / 1
-  load-flake timeout (§6.3); second run failed lint only on this
-  PR's unformatted evidence JSONs (fixed via `biome check --write`);
-  third run recorded at push time.
+- `bun run validate:fast` (this branch, final state): **GREEN —
+  typecheck ✓, lint ✓, tests 1181 pass / 0 fail** (351 s). An earlier
+  full run had one load-flake timeout (§6.3); a second run failed lint
+  only on this PR's unformatted evidence JSONs (fixed via `biome check
+  --write`); CI `check` job green on the pushed commit.
 - `cargo build --workspace`, `cargo test --workspace` (56 tests),
   `cargo clippy --workspace --all-targets`: all clean on this branch.
 - `cargo fmt --check`: fails on pre-existing `plugins/usage` drift →
