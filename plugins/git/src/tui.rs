@@ -2803,6 +2803,8 @@ struct CliArgs {
     cwd: Option<String>,
     help: bool,
     surface: String,
+    /// Extra positionals forwarded to the forge entrypoint (e.g. `open`).
+    rest: Vec<String>,
 }
 
 fn parse_tui_args(argv: &[String]) -> Result<CliArgs, String> {
@@ -2811,6 +2813,7 @@ fn parse_tui_args(argv: &[String]) -> Result<CliArgs, String> {
         cwd: None,
         help: false,
         surface: "main".to_string(),
+        rest: Vec::new(),
     };
     let mut i = 0;
     while i < argv.len() {
@@ -2834,6 +2837,8 @@ fn parse_tui_args(argv: &[String]) -> Result<CliArgs, String> {
             out.cwd = Some(v.to_string());
         } else if arg == "main" || arg == "forge" {
             out.surface = arg.clone();
+        } else if arg == "open" {
+            out.rest.push(arg.clone());
         } else if arg == "--" {
             // separator — ignored
         } else {
@@ -2916,15 +2921,21 @@ fn tui_main(args: &[String]) -> i32 {
             return 2;
         }
     };
+    if parsed.surface == "forge" {
+        if parsed.help {
+            return crate::tui_forge::run_forge_tui(&["--help".to_string()]);
+        }
+        if parsed.open {
+            return run_open(&parsed.surface);
+        }
+        return crate::tui_forge::run_forge_tui(&parsed.rest);
+    }
     if parsed.help {
         print!("{USAGE}");
         return 0;
     }
     if parsed.open {
         return run_open(&parsed.surface);
-    }
-    if parsed.surface == "forge" {
-        return crate::tui_forge::run_forge_tui(parsed.cwd.as_deref());
     }
 
     let spec = tui_model::resolve_target_spec(parsed.cwd.as_deref());
