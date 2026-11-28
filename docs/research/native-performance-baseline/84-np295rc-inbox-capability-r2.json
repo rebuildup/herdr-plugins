@@ -1,0 +1,17 @@
+{
+  "label": "84-np295rc-inbox-capability-r2",
+  "command": "plugins/inbox/bin/inbox capability",
+  "runs": 40,
+  "warmup": 5,
+  "failures": 0,
+  "wall_ms": {
+    "n": 40,
+    "min": 10,
+    "p50": 15,
+    "p95": 27,
+    "p99": 33,
+    "max": 33,
+    "mean": 15.8,
+    "stdev": 5.2
+  }
+}

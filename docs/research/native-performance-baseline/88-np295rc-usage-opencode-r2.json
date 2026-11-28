@@ -1,0 +1,17 @@
+{
+  "label": "88-np295rc-usage-opencode-r2",
+  "command": "plugins/usage/bin/usage usage --offline --provider opencode",
+  "runs": 30,
+  "warmup": 5,
+  "failures": 0,
+  "wall_ms": {
+    "n": 30,
+    "min": 186,
+    "p50": 240,
+    "p95": 260,
+    "p99": 281,
+    "max": 281,
+    "mean": 238.1,
+    "stdev": 18.2
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "label": "63-np295rc-conv-search-hit",
+  "command": "plugins/conversations/bin/conversations search database migration --offline",
+  "runs": 40,
+  "warmup": 5,
+  "failures": 0,
+  "wall_ms": {
+    "n": 40,
+    "min": 16,
+    "p50": 36,
+    "p95": 66,
+    "p99": 94,
+    "max": 94,
+    "mean": 39.6,
+    "stdev": 17.7
+  }
+}

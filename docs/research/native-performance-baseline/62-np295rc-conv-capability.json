@@ -1,0 +1,17 @@
+{
+  "label": "62-np295rc-conv-capability",
+  "command": "plugins/conversations/bin/conversations capability",
+  "runs": 40,
+  "warmup": 5,
+  "failures": 0,
+  "wall_ms": {
+    "n": 40,
+    "min": 14,
+    "p50": 17,
+    "p95": 31,
+    "p99": 114,
+    "max": 114,
+    "mean": 21.7,
+    "stdev": 15.7
+  }
+}

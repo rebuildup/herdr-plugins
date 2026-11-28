@@ -1,0 +1,17 @@
+{
+  "label": "65-np295rc-conv-sessions",
+  "command": "plugins/conversations/bin/conversations sessions --offline",
+  "runs": 40,
+  "warmup": 5,
+  "failures": 0,
+  "wall_ms": {
+    "n": 40,
+    "min": 11,
+    "p50": 20,
+    "p95": 36,
+    "p99": 41,
+    "max": 41,
+    "mean": 21.8,
+    "stdev": 7
+  }
+}

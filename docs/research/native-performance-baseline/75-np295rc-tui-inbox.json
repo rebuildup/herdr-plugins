@@ -1,0 +1,46 @@
+{
+  "label": "75-np295rc-tui-inbox",
+  "command": "plugins/inbox/bin/inbox tui",
+  "runs": 10,
+  "warmup": 2,
+  "pty": "120x40",
+  "first_byte_ms": {
+    "n": 10,
+    "min": 7.6,
+    "p50": 12.8,
+    "p95": 18.8,
+    "p99": 18.8,
+    "max": 18.8,
+    "mean": 13.9,
+    "stdev": 3.8
+  },
+  "advance_ms": {
+    "n": 0
+  },
+  "data_usable_ms": {
+    "n": 10,
+    "min": 8.0,
+    "p50": 14.0,
+    "p95": 19.9,
+    "p99": 19.9,
+    "max": 19.9,
+    "mean": 14.7,
+    "stdev": 4.1
+  },
+  "marker_found": 10,
+  "exit_codes": [0],
+  "maxrss_kb": {
+    "n": 0
+  },
+  "pgid_peak_rss_kb": {
+    "n": 10,
+    "min": 7616,
+    "p50": 7680,
+    "p95": 7776,
+    "p99": 7776,
+    "max": 7776,
+    "mean": 7692.8,
+    "stdev": 46.8
+  },
+  "note": "first_byte = first PTY output; data_usable = first output matching --marker regex (post-load content); maxrss = top-level child only; pgid_peak_rss = summed RSS of process group sampled ~30ms (includes TUI-spawned CLI children, double-counts shared pages)"
+}

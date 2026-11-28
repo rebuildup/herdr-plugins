@@ -1,0 +1,17 @@
+{
+  "label": "67-np295rc-git-capability",
+  "command": "plugins/git/bin/git capability",
+  "runs": 40,
+  "warmup": 5,
+  "failures": 0,
+  "wall_ms": {
+    "n": 40,
+    "min": 10,
+    "p50": 17,
+    "p95": 43,
+    "p99": 56,
+    "max": 56,
+    "mean": 21.6,
+    "stdev": 11
+  }
+}
