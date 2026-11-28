@@ -50,10 +50,6 @@
       "name": "@hoxay-plugins/inbox",
       "version": "0.8.0",
     },
-    "plugins/machines": {
-      "name": "@hoxay-plugins/machines",
-      "version": "0.1.0",
-    },
     "plugins/mcp": {
       "name": "@hoxay-plugins/mcp",
       "version": "0.1.0",
@@ -111,8 +107,6 @@
     "@hoxay-plugins/handoff": ["@hoxay-plugins/handoff@workspace:plugins/handoff"],
 
     "@hoxay-plugins/inbox": ["@hoxay-plugins/inbox@workspace:plugins/inbox"],
-
-    "@hoxay-plugins/machines": ["@hoxay-plugins/machines@workspace:plugins/machines"],
 
     "@hoxay-plugins/mcp": ["@hoxay-plugins/mcp@workspace:plugins/mcp"],
 

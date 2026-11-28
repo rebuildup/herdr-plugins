@@ -25,7 +25,7 @@ herdr plugin install rebuildup/hoxay-plugins/plugins/machines
 An external client resolves the CLI as follows:
 
 1. `herdr plugin list` → installed plugin entry with `plugin_root`.
-2. Run `<plugin_root>/src/cli.ts` with `bun run` from any cwd.
+2. Run `<plugin_root>/bin/machines` from any cwd (committed prebuilt native binary, ADR-0035; no Bun required).
 3. `capability` returns machine-readable discovery:
 
 ```json
@@ -58,7 +58,7 @@ Exit codes: `0` success, `1` handled error, `2` usage.
 Every command accepts the shared plugin target flags:
 
 ```bash
-bun run src/cli.ts <command> [--socket PATH] [--session NAME]
+./bin/machines <command> [--socket PATH] [--session NAME]
 ```
 
 They select the **local** herdr instance whose saved machines are
@@ -78,7 +78,7 @@ which names the session on the probed remote host.
 Live enumeration merged with last-known probe metadata. Never probes.
 
 ```bash
-bun run src/cli.ts list
+./bin/machines list
 ```
 
 Output:
@@ -132,8 +132,8 @@ an inventory that cannot enumerate fails honestly.
 Live probe of one machine or all machines.
 
 ```bash
-bun run src/cli.ts probe <machine-id|label>
-bun run src/cli.ts probe --all
+./bin/machines probe <machine-id|label>
+./bin/machines probe --all
 ```
 
 Selector resolution: exact `id` match, then case-insensitive `label`
