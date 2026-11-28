@@ -1,0 +1,28 @@
+[package]
+name = "machines"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "rebuildup.machines — saved-machine inventory/probe over the herdr CLI bridge (native Rust port)"
+
+[lib]
+name = "machines"
+path = "src/lib.rs"
+
+[[bin]]
+name = "machines"
+path = "src/main.rs"
+
+[dependencies]
+hoxay-herdr-client = { path = "../../crates/herdr-client" }
+hoxay-tui = { path = "../../crates/tui" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+ratatui = "0.30"
+crossterm = "0.29"
+unicode-width = "0.2"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
