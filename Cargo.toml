@@ -6,6 +6,7 @@ members = [
     "plugins/conversations",
     "plugins/inbox",
     "plugins/git",
+    "plugins/usage",
 ]
 
 [workspace.package]

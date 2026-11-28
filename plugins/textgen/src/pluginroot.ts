@@ -144,7 +144,7 @@ export interface PluginCliCallOptions {
  * resolution) and pinned to the *target* plugin's dirs — the same
  * cross-plugin pattern as usage→conversations (ADR-0013).
  */
-export function runPluginCli(
+export async function runPluginCli(
   root: string,
   pluginId: string,
   args: string[],
