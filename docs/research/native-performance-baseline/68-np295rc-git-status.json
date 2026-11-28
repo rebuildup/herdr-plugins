@@ -1,0 +1,17 @@
+{
+  "label": "68-np295rc-git-status",
+  "command": "plugins/git/bin/git status w2:p1 --session np295rc",
+  "runs": 30,
+  "warmup": 5,
+  "failures": 0,
+  "wall_ms": {
+    "n": 30,
+    "min": 547,
+    "p50": 617,
+    "p95": 638,
+    "p99": 639,
+    "max": 639,
+    "mean": 612.1,
+    "stdev": 23.7
+  }
+}

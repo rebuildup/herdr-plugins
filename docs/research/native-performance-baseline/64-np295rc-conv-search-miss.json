@@ -1,0 +1,17 @@
+{
+  "label": "64-np295rc-conv-search-miss",
+  "command": "plugins/conversations/bin/conversations search zzzqqq-nomatch --offline",
+  "runs": 40,
+  "warmup": 5,
+  "failures": 0,
+  "wall_ms": {
+    "n": 40,
+    "min": 55,
+    "p50": 305,
+    "p95": 619,
+    "p99": 668,
+    "max": 668,
+    "mean": 360.5,
+    "stdev": 163.4
+  }
+}
