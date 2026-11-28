@@ -38,6 +38,14 @@ import { herdrSocketEndpoint, testEnv } from "../tests/helpers/test-env";
 
 const REPO_ROOT = path.join(import.meta.dir, "..");
 
+function git(...argv: string[]): string {
+  const r = spawnSync("git", argv, { cwd: REPO_ROOT, encoding: "utf8" });
+  if (r.status !== 0) {
+    throw new Error(`git ${argv.join(" ")} failed: ${r.stderr}`);
+  }
+  return r.stdout.trim();
+}
+
 // --- args -----------------------------------------------------------------
 
 const args = process.argv.slice(2);
@@ -47,10 +55,10 @@ function argValue(flag: string): string | undefined {
 }
 const keepTmp = args.includes("--keep");
 
-// The last commit that still ships plugins/conversations/src/*.ts.
-// Updated by the TS-removal commit; override with --ts-commit.
-const TS_REMOVAL = "HEAD";
-const tsCommit = argValue("--ts-commit") ?? TS_REMOVAL;
+// The last commit that still ships plugins/conversations/src/*.ts —
+// parent of the TS-removal commit (4d6e08c~1 = 8ddb7db). Override with
+// --ts-commit.
+const tsCommit = argValue("--ts-commit") ?? git("rev-parse", "4d6e08c~1");
 
 // --- extract TS snapshot ----------------------------------------------------
 
