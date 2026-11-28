@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { resolveInboxSource } from "../plugins/projects/src/inbox-source";
 import { loadRuns, updateRuns } from "../plugins/projects/src/runs";
 import { inboxBinary, inboxPluginRootFixture } from "./helpers/inbox-bin";
 import { herdrSocketEndpoint, normalizePath, testEnv } from "./helpers/test-env";
@@ -844,4 +845,22 @@ describe("settle triggers: runOnSettle / stopOnSettle (#182)", () => {
       await fx.close();
     }
   }, 30_000);
+});
+
+describe("inbox source resolution — pre-#291 TS-only checkout", () => {
+  test("resolveInboxSource accepts src/cli.ts when bin/inbox is absent", async () => {
+    const root = tempDir();
+    mkdirSync(path.join(root, "src"), { recursive: true });
+    writeFileSync(path.join(root, "herdr-plugin.toml"), 'id = "rebuildup.inbox"\n');
+    writeFileSync(path.join(root, "src", "cli.ts"), "// pre-#291 TS entrypoint stub\n");
+    const resolved = await resolveInboxSource(root);
+    expect(resolved.ok).toBe(true);
+    if (resolved.ok) {
+      expect(resolved.source.cli_path).toBe(path.join(root, "src", "cli.ts"));
+    }
+    // A root with neither entrypoint still fails closed.
+    const empty = tempDir();
+    const rejected = await resolveInboxSource(empty);
+    expect(rejected.ok).toBe(false);
+  });
 });

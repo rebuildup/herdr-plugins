@@ -1440,6 +1440,10 @@ fn tui_main(args: &[String]) -> i32 {
     let mut terminal = match Terminal::new(backend) {
         Ok(t) => t,
         Err(err) => {
+            // Raw mode and the alternate screen are already active —
+            // restore the terminal before reporting the failure.
+            let _ = crossterm::execute!(io::stdout(), crossterm::terminal::LeaveAlternateScreen);
+            crossterm::terminal::disable_raw_mode().ok();
             eprintln!("inbox tui failed: {}", err);
             return 1;
         }
@@ -1458,9 +1462,6 @@ fn tui_main(args: &[String]) -> i32 {
                         break;
                     }
                 }
-            }
-            if event::poll(Duration::from_millis(0))? {
-                // drain additional events cheaply on next loop
             }
         }
         Ok(())
