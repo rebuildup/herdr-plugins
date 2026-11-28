@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/herdr-client",
     "crates/tui",
+    "plugins/conversations",
     "plugins/inbox",
 ]
 
