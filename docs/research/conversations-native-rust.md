@@ -19,7 +19,7 @@ the honest scope until binaries for other targets exist and are verified.
 | domain + CLI | `plugins/conversations/src/{model,state,indexer,claude,codex,opencode,providers,read,cli}.rs` | contract `herdr-plugins.conversations/v1` stable; version `0.7.0` |
 | TUI | `plugins/conversations/src/tui.rs` | contract `herdr-plugins.tui/v1`; in-process `cli::run_domain` calls (no self-respawn), same pattern as `plugins/inbox` |
 | shared crates | `crates/herdr-client`, `crates/tui` (`safety`) | reused unchanged from #291 |
-| TS implementation | deleted (`plugins/conversations/src/*.ts`, 4 retired test files) | recoverable at `0680de0~1` |
+| TS implementation | deleted (`plugins/conversations/src/*.ts`, 4 retired test files) | recoverable at `4d6e08c~1` |
 
 Manifest (`herdr-plugin.toml`) entrypoints: `[[panes]] main` →
 `./bin/conversations tui main`, `[[actions]] open` →
@@ -109,6 +109,19 @@ current` resolves the attached session differently):
   quit cleanly.
 - `herdr plugin disable`/`enable rebuildup.conversations` toggled
   cleanly.
+- **PTY visual evidence** (`spikes/conversations-tui/drive.py`,
+  pyte screen snapshots in `spikes/conversations-tui/evidence/`,
+  same driver pattern as `spikes/inbox-tui/` on #291): the np293
+  plugin state dir was seeded with a read-only copy of the np287
+  perf fixture (25 sessions / 10k events), provider roots pinned to
+  empty dirs, `HERDR_SOCKET_PATH` pinned to the np293 socket. The
+  `main` scenario captured: populated sessions list, cursor
+  selection, session event log (`history` loader), scroll, event
+  detail overlay, `s` search prompt + results, `/` filter
+  draft/applied/cleared, `?` help overlay, and the confirm-gated
+  `i` → dialog → `y` → post-index screens; clean `q` quit (exit 0).
+  Human visual review of these snapshots remains a separate
+  acceptance gate — the PR stays Draft until then.
 - **Not exercised live:** a real indexed session. `agent_session` is
   not populated by `pane.report_agent_session` on herdr 0.9.5 (known
   upstream gap, ADR-0012 / herdr-socket-findings §agent_session) — it
@@ -187,14 +200,14 @@ Notes:
 - First-build index cost (§5) — candidate for parallel per-session
   scans or cheaper event materialization.
 - ~~Managed-install verification~~ — done post-push (§4).
-- `state.rs` doc comment still references a planned `index.sqlite`
-  search index (`indexdb.rs`) that the shipped design does not have —
-  the derived-index experiment was dropped; JSONL+state.json remain
-  canonical. Comment cleanup tracked here.
+- ~~`state.rs` doc comment referencing a planned `index.sqlite`
+  search index (`indexdb.rs`)~~ — resolved: the comment already
+  records that the derived-index experiment was dropped in favor of
+  byte-offset cursors over canonical `state.json` + `events/*.jsonl`.
 
 ## 7. Rollback
 
-The TS implementation is intact at `0680de0~1` (`d5d74ce`). To roll a
+The TS implementation is intact at `4d6e08c~1` (`8ddb7db`). To roll a
 user installation back: `herdr plugin install
 rebuildup/hoxay-plugins/plugins/conversations --ref <previous-release-sha>`.
 `state.json` + `events/*.jsonl` are byte-format compatible in both
