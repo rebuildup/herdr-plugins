@@ -12,6 +12,10 @@
 //! Domain modules mirror the frozen TypeScript implementation
 //! (`plugins/git/src/*.ts`) one-to-one so the wire contract stays
 //! compatible.
+//
+// CLI-domain functions mirror the TS collectors, whose signatures carry
+// one parameter per git/gh flag; grouping them would hurt parity.
+#![allow(clippy::too_many_arguments)]
 
 pub mod gitenv;
 pub mod git;
@@ -21,3 +25,5 @@ pub mod pluginroot;
 
 pub mod cli;
 pub mod tui;
+pub mod tui_forge;
+pub mod tui_model;

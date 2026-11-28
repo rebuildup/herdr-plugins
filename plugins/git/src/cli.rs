@@ -1525,7 +1525,7 @@ fn cmd_pr_inner(options: &mut CliOptions) -> Result<Value, RunError> {
             )?;
             let mut payload = forge_base("list");
             payload["prs"] = json!(prs);
-            return Ok(payload);
+            Ok(payload)
         }
         "status" => {
             let branch = git::git_ok(
@@ -1546,14 +1546,14 @@ fn cmd_pr_inner(options: &mut CliOptions) -> Result<Value, RunError> {
             let mut payload = forge_base("status");
             payload["branch"] = json!(branch);
             payload["pr"] = pr.unwrap_or(Value::Null);
-            return Ok(payload);
+            Ok(payload)
         }
         "view" => {
             let number = rest[0].parse::<i64>().unwrap_or(0);
             let pr = gh::collect_pr_view(Path::new(&repo_root), &repo, number, &gh_opts)?;
             let mut payload = forge_base("view");
             payload["pr"] = pr;
-            return Ok(payload);
+            Ok(payload)
         }
         "reviews" | "comments" | "checks" | "logs" => {
             let number = match rest.first().and_then(|s| s.parse::<i64>().ok()) {
@@ -1574,19 +1574,19 @@ fn cmd_pr_inner(options: &mut CliOptions) -> Result<Value, RunError> {
                     let data = gh::collect_pr_reviews(Path::new(&repo_root), &repo, number, &gh_opts);
                     let mut payload = forge_base("reviews");
                     merge_json(&mut payload, &data?);
-                    return Ok(payload);
+                    Ok(payload)
                 }
                 "comments" => {
                     let data = gh::collect_pr_comments(Path::new(&repo_root), &repo, number, &gh_opts);
                     let mut payload = forge_base("comments");
                     merge_json(&mut payload, &data?);
-                    return Ok(payload);
+                    Ok(payload)
                 }
                 "checks" => {
                     let data = gh::collect_pr_checks(Path::new(&repo_root), &repo, number, &gh_opts);
                     let mut payload = forge_base("checks");
                     merge_json(&mut payload, &data?);
-                    return Ok(payload);
+                    Ok(payload)
                 }
                 _ => {
                     // logs
@@ -1627,7 +1627,7 @@ fn cmd_pr_inner(options: &mut CliOptions) -> Result<Value, RunError> {
                     let data = gh::collect_pr_logs(Path::new(&repo_root), &req, &gh_opts);
                     let mut payload = forge_base("logs");
                     merge_json(&mut payload, &data?);
-                    return Ok(payload);
+                    Ok(payload)
                 }
             }
         }
@@ -1728,7 +1728,7 @@ fn cmd_pr_inner(options: &mut CliOptions) -> Result<Value, RunError> {
                     let mut payload = forge_base("review");
                     payload["ok"] = json!(true);
                     merge_json(&mut payload, &data);
-                    return Ok(payload);
+                    Ok(payload)
                 }
                 "comment" => {
                     if rest.len() > 1 {
@@ -1756,7 +1756,7 @@ fn cmd_pr_inner(options: &mut CliOptions) -> Result<Value, RunError> {
                     let mut payload = forge_base("comment");
                     payload["ok"] = json!(true);
                     merge_json(&mut payload, &data);
-                    return Ok(payload);
+                    Ok(payload)
                 }
                 "reply" => {
                     if rest.len() != 2 {
@@ -1795,7 +1795,7 @@ fn cmd_pr_inner(options: &mut CliOptions) -> Result<Value, RunError> {
                     let mut payload = forge_base("reply");
                     payload["ok"] = json!(true);
                     merge_json(&mut payload, &data);
-                    return Ok(payload);
+                    Ok(payload)
                 }
                 _ => {
                     // reviewers
@@ -1831,7 +1831,7 @@ fn cmd_pr_inner(options: &mut CliOptions) -> Result<Value, RunError> {
                     let mut payload = forge_base("reviewers");
                     payload["ok"] = json!(true);
                     merge_json(&mut payload, &data);
-                    return Ok(payload);
+                    Ok(payload)
                 }
             }
         }
@@ -1901,7 +1901,7 @@ fn cmd_pr_inner(options: &mut CliOptions) -> Result<Value, RunError> {
             let mut payload = forge_base("merge");
             payload["ok"] = json!(true);
             merge_json(&mut payload, &data);
-            return Ok(payload);
+            Ok(payload)
         }
         "create" => {
             let title = flag_value(&options.args, "--title").unwrap_or_default();
@@ -1925,7 +1925,7 @@ fn cmd_pr_inner(options: &mut CliOptions) -> Result<Value, RunError> {
             payload["ok"] = json!(true);
             payload["url"] = json!(created.0);
             payload["number"] = created.1.map(Value::from).unwrap_or(Value::Null);
-            return Ok(payload);
+            Ok(payload)
         }
         _ => unreachable!(),
     }
@@ -2327,14 +2327,14 @@ pub fn cmd_issue(options: &mut CliOptions) -> Result<Value, RunError> {
             let issues = gh::collect_issue_list(Path::new(&repo_root), &req, &gh_opts)?;
             let mut payload = forge_base("list");
             payload["issues"] = json!(issues);
-            return Ok(payload);
+            Ok(payload)
         }
         "view" => {
             let number = rest[0].parse::<i64>().unwrap_or(0);
             let issue = gh::collect_issue_view(Path::new(&repo_root), &repo, number, &gh_opts)?;
             let mut payload = forge_base("view");
             payload["issue"] = issue;
-            return Ok(payload);
+            Ok(payload)
         }
         "create" => {
             let title = flag_value(&options.args, "--title").unwrap_or_default();
@@ -2354,7 +2354,7 @@ pub fn cmd_issue(options: &mut CliOptions) -> Result<Value, RunError> {
             payload["ok"] = json!(true);
             payload["url"] = json!(created.0);
             payload["number"] = created.1.map(Value::from).unwrap_or(Value::Null);
-            return Ok(payload);
+            Ok(payload)
         }
         "edit" => {
             let number = rest[0].parse::<i64>().unwrap_or(0);
@@ -2380,7 +2380,7 @@ pub fn cmd_issue(options: &mut CliOptions) -> Result<Value, RunError> {
             let mut payload = forge_base("edit");
             payload["ok"] = json!(true);
             merge_json(&mut payload, &data);
-            return Ok(payload);
+            Ok(payload)
         }
         "comment" => {
             let number = rest[0].parse::<i64>().unwrap_or(0);
@@ -2405,7 +2405,7 @@ pub fn cmd_issue(options: &mut CliOptions) -> Result<Value, RunError> {
             let mut payload = forge_base("comment");
             payload["ok"] = json!(true);
             merge_json(&mut payload, &data);
-            return Ok(payload);
+            Ok(payload)
         }
         _ => {
             // close
@@ -2428,7 +2428,7 @@ pub fn cmd_issue(options: &mut CliOptions) -> Result<Value, RunError> {
             let mut payload = forge_base("close");
             payload["ok"] = json!(true);
             merge_json(&mut payload, &data);
-            return Ok(payload);
+            Ok(payload)
         }
     }
 }

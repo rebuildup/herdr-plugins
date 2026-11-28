@@ -7,6 +7,8 @@
 //! text (ADR-0006). The child env is sanitized by `gitenv` (issue #96).
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -23,6 +25,9 @@ pub enum GitErrorKind {
     GitError,
     NotARepo,
     BareRepo,
+    /// TUI task cancellation: the child was killed on user request.
+    /// Never produced by the CLI surface (no cancel flag is set there).
+    Cancelled,
 }
 
 impl GitErrorKind {
@@ -33,6 +38,7 @@ impl GitErrorKind {
             GitErrorKind::GitError => "git_error",
             GitErrorKind::NotARepo => "not_a_repo",
             GitErrorKind::BareRepo => "bare_repo",
+            GitErrorKind::Cancelled => "cancelled",
         }
     }
 }
@@ -78,6 +84,9 @@ pub struct RunOptions {
     pub env: Vec<(String, String)>,
     /// Bytes piped to the child's stdin (`gh api --input -`, `--body-file -`).
     pub input: Option<String>,
+    /// Cooperative cancellation (TUI task runner): when set, the wait
+    /// loop kills the child and returns GitErrorKind::Cancelled.
+    pub cancel: Option<Arc<AtomicBool>>,
 }
 
 const DEFAULT_TIMEOUT_MS: u64 = 10_000;
@@ -155,6 +164,22 @@ fn spawn_bounded(
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {
+                if opts
+                    .cancel
+                    .as_ref()
+                    .map(|c| c.load(Ordering::SeqCst))
+                    .unwrap_or(false)
+                {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(GitError::new(
+                        GitErrorKind::Cancelled,
+                        format!(
+                            "git {} cancelled",
+                            args.first().map(|s| s.as_str()).unwrap_or("")
+                        ),
+                    ));
+                }
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
@@ -371,6 +396,7 @@ fn run_stream_bounded(
     max_bytes: usize,
     timeout_prefix: &str,
     argv_label: &str,
+    cancel: Option<Arc<AtomicBool>>,
 ) -> Result<BoundedResult, GitError> {
     let mut command = Command::new(program);
     command
@@ -470,6 +496,20 @@ fn run_stream_bounded(
                         }
                     }
                     Ok(None) => {
+                        if cancel
+                            .as_ref()
+                            .map(|c| c.load(Ordering::SeqCst))
+                            .unwrap_or(false)
+                        {
+                            unsafe {
+                                libc::kill(child_id as i32, libc::SIGKILL);
+                            }
+                            let _ = child.wait();
+                            return Err(GitError::new(
+                                GitErrorKind::Cancelled,
+                                format!("{argv_label} cancelled"),
+                            ));
+                        }
                         if Instant::now() >= deadline {
                             timed_out = true;
                             unsafe {
@@ -537,6 +577,7 @@ pub fn run_git_bounded(
         max_bytes,
         &format!("git {}", args.first().map(|s| s.as_str()).unwrap_or("")),
         &format!("git {}", args.join(" ")),
+        opts.cancel.clone(),
     )
 }
 
@@ -697,12 +738,11 @@ pub fn parse_porcelain_z(output: &str) -> Vec<FileChange> {
         let y = chars[1];
         let path: String = chars[3..].iter().collect();
         let mut old_path: Option<String> = None;
-        if x == 'R' || y == 'R' || x == 'C' || y == 'C' {
-            if i < tokens.len() {
+        if (x == 'R' || y == 'R' || x == 'C' || y == 'C')
+            && i < tokens.len() {
                 old_path = Some(tokens[i].to_string());
                 i += 1;
             }
-        }
         let kind = file_kind(x, y);
         let tracked = !matches!(
             kind,
@@ -1160,7 +1200,7 @@ pub fn collect_compare(
     let mut behind = 0i64;
     let mut ahead = 0i64;
     if counts.code == 0 {
-        let mut parts = counts.stdout.trim().split_whitespace();
+        let mut parts = counts.stdout.split_whitespace();
         if let (Some(b), Some(a)) = (parts.next(), parts.next()) {
             behind = b.parse().unwrap_or(0);
             ahead = a.parse().unwrap_or(0);
@@ -1542,10 +1582,173 @@ pub fn collect_diff(
         max_bytes,
         "git diff",
         "git diff",
+        opts.cancel.clone(),
     )?;
     Ok(DiffResult {
         output: result.stdout,
         truncated: result.truncated,
         bytes: result.bytes,
     })
+}
+
+// ---------------------------------------------------------------------------
+// TUI-only collectors (port of tui/repo.ts)
+// ---------------------------------------------------------------------------
+
+const BRANCH_FORMAT: &str =
+    "%(refname:short)%09%(HEAD)%09%(upstream:short)%09%(upstream:track)%09%(objectname)";
+
+/// One local branch row from `git for-each-ref` (see tui/model parseBranches).
+#[derive(Debug, Clone)]
+pub struct BranchEntry {
+    pub name: String,
+    pub sha: String,
+    pub current: bool,
+    pub upstream: Option<String>,
+    pub track: Option<String>,
+}
+
+/// List local branches (`refs/heads`), newest first, with current marker,
+/// upstream, and `[ahead/behind]` track info when available.
+pub fn collect_branches(repo_root: &Path, opts: &RunOptions) -> Result<Vec<BranchEntry>, GitError> {
+    let out = git_ok(
+        repo_root,
+        &[
+            "for-each-ref".to_string(),
+            format!("--format={BRANCH_FORMAT}"),
+            "--sort=-committerdate".to_string(),
+            "refs/heads".to_string(),
+        ],
+        opts,
+    )?;
+    Ok(parse_branches(&out))
+}
+
+/// Parse `for-each-ref` tab-separated output (one branch per line).
+/// Port of `parseBranches` in tui/model.ts.
+pub fn parse_branches(output: &str) -> Vec<BranchEntry> {
+    let mut out = Vec::new();
+    for line in output.split('\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = line.split('\t').collect();
+        let Some(name) = f.first() else { continue };
+        if name.is_empty() {
+            continue;
+        }
+        let get = |i: usize| f.get(i).copied().unwrap_or("");
+        out.push(BranchEntry {
+            name: name.to_string(),
+            sha: get(4).to_string(),
+            current: get(1) == "*",
+            upstream: {
+                let u = get(2);
+                if u.is_empty() { None } else { Some(u.to_string()) }
+            },
+            track: {
+                let t = get(3);
+                if t.is_empty() { None } else { Some(t.to_string()) }
+            },
+        });
+    }
+    out
+}
+
+/// Current HEAD sha; errors on unborn branches / failures.
+pub fn head_sha(repo_root: &Path, opts: &RunOptions) -> Result<String, GitError> {
+    Ok(git_ok(
+        repo_root,
+        &["rev-parse".into(), "HEAD".into()],
+        opts,
+    )?
+    .trim()
+    .to_string())
+}
+
+/// HEAD sha or null on unborn branches / any failure (never throws).
+pub fn head_sha_or_null(repo_root: &Path, opts: &RunOptions) -> Option<String> {
+    head_sha(repo_root, opts).ok()
+}
+
+/// Current branch name via `symbolic-ref` — correct on unborn branches
+/// where `rev-parse --abbrev-ref HEAD` reports "HEAD". Returns "HEAD"
+/// for detached HEAD, null when even symbolic-ref fails.
+pub fn current_branch_name(repo_root: &Path, opts: &RunOptions) -> Option<String> {
+    let sym = run_git(
+        repo_root,
+        &[
+            "symbolic-ref".into(),
+            "--short".into(),
+            "-q".into(),
+            "HEAD".into(),
+        ],
+        opts,
+    )
+    .ok()?;
+    if sym.code == 0 {
+        let name = sym.stdout.trim();
+        if !name.is_empty() {
+            return Some(name.to_string());
+        }
+    }
+    let head = run_git(
+        repo_root,
+        &["rev-parse".into(), "--abbrev-ref".into(), "HEAD".into()],
+        opts,
+    )
+    .ok()?;
+    if head.code == 0 {
+        let name = head.stdout.trim();
+        if !name.is_empty() {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+/// Bounded `git show` for a single commit (metadata + patch), used for
+/// the log detail view. Throws GitError("git_error") when the output
+/// exceeds the cap — callers show the honest error rather than a
+/// silently truncated patch.
+pub fn collect_commit_show(
+    repo_root: &Path,
+    sha: &str,
+    opts: &RunOptions,
+) -> Result<String, GitError> {
+    let valid = sha.len() >= 4
+        && sha.len() <= 64
+        && sha.chars().all(|c| c.is_ascii_hexdigit());
+    if !valid {
+        return Err(GitError::new(
+            GitErrorKind::GitError,
+            format!("invalid commit sha: {}", serde_json::to_string(sha).unwrap_or_default()),
+        ));
+    }
+    let mut o = opts.clone();
+    o.timeout_ms = Some(opts.timeout_ms.unwrap_or(10_000));
+    o.max_buffer = Some(opts.max_buffer.unwrap_or(512 * 1024));
+    let result = run_git(
+        repo_root,
+        &["show".into(), "--no-color".into(), "--format=fuller".into(), sha.to_string()],
+        &o,
+    )?;
+    if result.code != 0 {
+        let detail = {
+            let stderr = result.stderr.trim();
+            let stdout = result.stdout.trim();
+            if !stderr.is_empty() {
+                stderr.to_string()
+            } else if !stdout.is_empty() {
+                stdout.to_string()
+            } else {
+                format!("exit {}", result.code)
+            }
+        };
+        return Err(GitError::new(
+            GitErrorKind::GitError,
+            format!("git show {}: {}", &sha[..sha.len().min(12)], detail),
+        ));
+    }
+    Ok(result.stdout)
 }
