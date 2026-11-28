@@ -7,11 +7,11 @@
 //! text (ADR-0006). The child env is sanitized by `gitenv` (issue #96).
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -99,7 +99,6 @@ fn git_env(extra: &[(String, String)]) -> HashMap<String, String> {
     overrides.push(("LC_ALL".into(), "C".into()));
     gitenv::sanitized_child_env(&overrides, &[])
 }
-
 
 /// Spawn a child with a fully replaced (sanitized) environment, piped
 /// stdio, optional stdin payload, timeout, and an output byte cap.
@@ -223,7 +222,12 @@ pub fn run_git(cwd: &Path, args: &[String], opts: &RunOptions) -> GitResult {
         git_env(&opts.env),
         opts,
         opts.max_buffer.unwrap_or(DEFAULT_MAX_BUFFER),
-        |sub, ms| GitError::new(GitErrorKind::Timeout, format!("git {sub} timed out after {ms}ms")),
+        |sub, ms| {
+            GitError::new(
+                GitErrorKind::Timeout,
+                format!("git {sub} timed out after {ms}ms"),
+            )
+        },
         "git output exceeded buffer limit",
         "git executable not found on PATH",
     )
@@ -267,7 +271,9 @@ pub fn resolve_repo(cwd: &Path, opts: &RunOptions) -> Result<RepoInfo, GitError>
     let top = match git_ok(cwd, &["rev-parse".into(), "--show-toplevel".into()], opts) {
         Ok(s) => s.trim().to_string(),
         Err(e) => {
-            if e.kind == GitErrorKind::GitError && e.message.to_lowercase().contains("not a git repository") {
+            if e.kind == GitErrorKind::GitError
+                && e.message.to_lowercase().contains("not a git repository")
+            {
                 return Err(GitError::new(
                     GitErrorKind::NotARepo,
                     format!("no git work tree contains: {}", cwd.display()),
@@ -277,23 +283,28 @@ pub fn resolve_repo(cwd: &Path, opts: &RunOptions) -> Result<RepoInfo, GitError>
         }
     };
     let top_path = Path::new(&top);
-    let git_dir = git_ok(top_path, &["rev-parse".into(), "--absolute-git-dir".into()], opts)?
-        .trim()
-        .to_string();
-    let common_dir = git_ok(
-        top_path,
-        &[
-            "rev-parse".into(),
-            "--path-format=absolute".into(),
-            "--git-common-dir".into(),
-        ],
-        opts,
-    )?
-    .trim()
-    .to_string();
-    let bare = git_ok(top_path, &["rev-parse".into(), "--is-bare-repository".into()], opts)?
-        .trim()
-        == "true";
+    // Independent rev-parse probes run concurrently (the TS implementation
+    // used Promise.all); on large/dirty repos each spawn costs real time.
+    let git_dir_args = vec!["rev-parse".to_string(), "--absolute-git-dir".to_string()];
+    let common_args = vec![
+        "rev-parse".to_string(),
+        "--path-format=absolute".to_string(),
+        "--git-common-dir".to_string(),
+    ];
+    let bare_args = vec!["rev-parse".to_string(), "--is-bare-repository".to_string()];
+    let (git_dir_r, common_r, bare_r) = std::thread::scope(|scope| {
+        let git_dir = scope.spawn(|| git_ok(top_path, &git_dir_args, opts));
+        let common = scope.spawn(|| git_ok(top_path, &common_args, opts));
+        let bare = scope.spawn(|| git_ok(top_path, &bare_args, opts));
+        (
+            git_dir.join().expect("git_dir probe panicked"),
+            common.join().expect("common-dir probe panicked"),
+            bare.join().expect("bare probe panicked"),
+        )
+    });
+    let git_dir = git_dir_r?.trim().to_string();
+    let common_dir = common_r?.trim().to_string();
+    let bare = bare_r?.trim() == "true";
     if bare {
         return Err(GitError::new(
             GitErrorKind::BareRepo,
@@ -347,7 +358,10 @@ fn strip_git_suffix(s: &str) -> String {
 }
 
 /// Fetch URL of `origin` (falling back to the first remote), normalized.
-pub fn repo_remote_identity(repo_root: &Path, opts: &RunOptions) -> Result<Option<String>, GitError> {
+pub fn repo_remote_identity(
+    repo_root: &Path,
+    opts: &RunOptions,
+) -> Result<Option<String>, GitError> {
     let names_out = git_ok(repo_root, &["remote".into()], opts)?;
     let names: Vec<&str> = names_out
         .trim()
@@ -526,7 +540,11 @@ fn run_stream_bounded(
     let status = child.wait().ok();
     let code = status.and_then(|s| s.code()).unwrap_or(-1);
     let stderr = String::from_utf8_lossy(
-        stderr_shared.lock().map(|g| g.clone()).unwrap_or_default().as_slice(),
+        stderr_shared
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+            .as_slice(),
     )
     .to_string();
 
@@ -610,10 +628,7 @@ pub fn parse_porcelain(output: &str) -> ChangeCounts {
         if x == '!' && y == '!' {
             continue;
         }
-        let unmerged = x == 'U'
-            || y == 'U'
-            || (x == 'A' && y == 'A')
-            || (x == 'D' && y == 'D');
+        let unmerged = x == 'U' || y == 'U' || (x == 'A' && y == 'A') || (x == 'D' && y == 'D');
         if unmerged {
             counts.conflicted += 1;
             continue;
@@ -697,11 +712,7 @@ fn file_kind(x: char, y: char) -> FileChangeKind {
     if x == '!' && y == '!' {
         return FileChangeKind::Ignored;
     }
-    if x == 'U'
-        || y == 'U'
-        || (x == 'A' && y == 'A')
-        || (x == 'D' && y == 'D')
-    {
+    if x == 'U' || y == 'U' || (x == 'A' && y == 'A') || (x == 'D' && y == 'D') {
         return FileChangeKind::Conflicted;
     }
     if x == 'R' || y == 'R' {
@@ -738,11 +749,10 @@ pub fn parse_porcelain_z(output: &str) -> Vec<FileChange> {
         let y = chars[1];
         let path: String = chars[3..].iter().collect();
         let mut old_path: Option<String> = None;
-        if (x == 'R' || y == 'R' || x == 'C' || y == 'C')
-            && i < tokens.len() {
-                old_path = Some(tokens[i].to_string());
-                i += 1;
-            }
+        if (x == 'R' || y == 'R' || x == 'C' || y == 'C') && i < tokens.len() {
+            old_path = Some(tokens[i].to_string());
+            i += 1;
+        }
         let kind = file_kind(x, y);
         let tracked = !matches!(
             kind,
@@ -861,9 +871,13 @@ fn ahead_behind(repo_root: &Path, opts: &RunOptions) -> Option<(i64, i64)> {
 
 /// Collect branch name, detached state, upstream and ahead/behind counts.
 pub fn collect_branch(repo_root: &Path, opts: &RunOptions) -> Result<BranchInfo, GitError> {
-    let head = git_ok(repo_root, &["rev-parse".into(), "--abbrev-ref".into(), "HEAD".into()], opts)?
-        .trim()
-        .to_string();
+    let head = git_ok(
+        repo_root,
+        &["rev-parse".into(), "--abbrev-ref".into(), "HEAD".into()],
+        opts,
+    )?
+    .trim()
+    .to_string();
     let detached = head == "HEAD";
     let upstream = upstream_ref(repo_root, opts);
     let counts = if upstream.is_some() {
@@ -889,16 +903,24 @@ pub struct StatusReport {
 
 pub fn collect_status(cwd: &Path, opts: &RunOptions) -> Result<StatusReport, GitError> {
     let repo = resolve_repo(cwd, opts)?;
-    let branch = collect_branch(Path::new(&repo.root), opts)?;
-    let porcelain = git_ok(
-        Path::new(&repo.root),
-        &[
-            "status".into(),
-            "--porcelain=v1".into(),
-            "--untracked-files=normal".into(),
-        ],
-        opts,
-    )?;
+    let root = Path::new(&repo.root);
+    let porcelain_args = vec![
+        "status".to_string(),
+        "--porcelain=v1".to_string(),
+        "--untracked-files=normal".to_string(),
+    ];
+    // Branch probes and the porcelain scan are independent — run them
+    // concurrently like the TS Promise.all did.
+    let (branch_r, porcelain_r) = std::thread::scope(|scope| {
+        let branch = scope.spawn(|| collect_branch(root, opts));
+        let porcelain = scope.spawn(|| git_ok(root, &porcelain_args, opts));
+        (
+            branch.join().expect("branch probe panicked"),
+            porcelain.join().expect("porcelain probe panicked"),
+        )
+    });
+    let branch = branch_r?;
+    let porcelain = porcelain_r?;
     Ok(StatusReport {
         repo,
         branch,
@@ -927,24 +949,33 @@ pub fn collect_files(
         args.push("--".into());
         args.extend(pathspec.iter().cloned());
     }
-    let porcelain = git_ok(repo_root, &args, opts)?;
+    let unstaged_args = vec![
+        "diff".to_string(),
+        "--numstat".to_string(),
+        "-z".to_string(),
+    ];
+    let staged_args = vec![
+        "diff".to_string(),
+        "--numstat".to_string(),
+        "-z".to_string(),
+        "--cached".to_string(),
+    ];
+    // Porcelain scan and both numstat diffs are independent — the numstat
+    // passes dominate on large diffs, so overlap them (TS used Promise.all).
+    let (porcelain_r, unstaged_r, staged_r) = std::thread::scope(|scope| {
+        let porcelain = scope.spawn(|| git_ok(repo_root, &args, opts));
+        let unstaged = scope.spawn(|| git_ok(repo_root, &unstaged_args, opts));
+        let staged = scope.spawn(|| git_ok(repo_root, &staged_args, opts));
+        (
+            porcelain.join().expect("porcelain probe panicked"),
+            unstaged.join().expect("unstaged numstat panicked"),
+            staged.join().expect("staged numstat panicked"),
+        )
+    });
+    let porcelain = porcelain_r?;
+    let unstaged = unstaged_r?;
+    let staged = staged_r?;
     let mut files = parse_porcelain_z(&porcelain);
-
-    let unstaged = git_ok(
-        repo_root,
-        &["diff".into(), "--numstat".into(), "-z".into()],
-        opts,
-    )?;
-    let staged = git_ok(
-        repo_root,
-        &[
-            "diff".into(),
-            "--numstat".into(),
-            "-z".into(),
-            "--cached".into(),
-        ],
-        opts,
-    )?;
     let (bin_u, _) = parse_numstat_z(&unstaged);
     let (bin_s, _) = parse_numstat_z(&staged);
     let binary_paths: HashSet<String> = bin_u.union(&bin_s).cloned().collect();
@@ -1017,7 +1048,11 @@ pub fn parse_log_output(output: &str) -> Vec<LogCommit> {
         }
         commits.push(LogCommit {
             sha: f[0].to_string(),
-            parents: f[1].split(' ').filter(|p| !p.is_empty()).map(|s| s.to_string()).collect(),
+            parents: f[1]
+                .split(' ')
+                .filter(|p| !p.is_empty())
+                .map(|s| s.to_string())
+                .collect(),
             author_name: f[2].to_string(),
             author_email: f[3].to_string(),
             author_date: f[4].to_string(),
@@ -1049,7 +1084,11 @@ pub struct LogResult {
     pub has_more: bool,
 }
 
-pub fn collect_log(repo_root: &Path, request: &LogRequest, opts: &RunOptions) -> Result<LogResult, GitError> {
+pub fn collect_log(
+    repo_root: &Path,
+    request: &LogRequest,
+    opts: &RunOptions,
+) -> Result<LogResult, GitError> {
     let limit = request
         .limit
         .unwrap_or(LOG_DEFAULT_LIMIT)
@@ -1169,13 +1208,12 @@ pub fn collect_compare(
     let head = head.unwrap_or("HEAD").to_string();
     let base = match base {
         Some(b) => b.to_string(),
-        None => upstream_ref(repo_root, opts)
-            .ok_or_else(|| {
-                GitError::new(
-                    GitErrorKind::GitError,
-                    "no upstream configured; pass an explicit base revision",
-                )
-            })?,
+        None => upstream_ref(repo_root, opts).ok_or_else(|| {
+            GitError::new(
+                GitErrorKind::GitError,
+                "no upstream configured; pass an explicit base revision",
+            )
+        })?,
     };
     let merge_base = git_ok(
         repo_root,
@@ -1219,7 +1257,12 @@ pub fn collect_compare(
     )?;
     let stat = git_ok(
         repo_root,
-        &["diff".into(), "--stat".into(), merge_base.clone(), head.clone()],
+        &[
+            "diff".into(),
+            "--stat".into(),
+            merge_base.clone(),
+            head.clone(),
+        ],
         opts,
     )?;
     let patch = collect_diff(
@@ -1248,7 +1291,10 @@ pub fn assert_safe_git_arg(value: &str, what: &str) -> Result<(), GitError> {
     if value.is_empty() || value.starts_with('-') {
         return Err(GitError::new(
             GitErrorKind::GitError,
-            format!("invalid {what}: {}", serde_json::to_string(value).unwrap_or_default()),
+            format!(
+                "invalid {what}: {}",
+                serde_json::to_string(value).unwrap_or_default()
+            ),
         ));
     }
     Ok(())
@@ -1355,9 +1401,11 @@ pub fn collect_branch_switch(
     opts: &RunOptions,
 ) -> Result<String, GitError> {
     assert_safe_git_arg(name, "branch name")?;
-    Ok(git_ok(repo_root, &["switch".into(), name.to_string()], opts)?
-        .trim()
-        .to_string())
+    Ok(
+        git_ok(repo_root, &["switch".into(), name.to_string()], opts)?
+            .trim()
+            .to_string(),
+    )
 }
 
 pub fn collect_upstream(
@@ -1644,11 +1692,19 @@ pub fn parse_branches(output: &str) -> Vec<BranchEntry> {
             current: get(1) == "*",
             upstream: {
                 let u = get(2);
-                if u.is_empty() { None } else { Some(u.to_string()) }
+                if u.is_empty() {
+                    None
+                } else {
+                    Some(u.to_string())
+                }
             },
             track: {
                 let t = get(3);
-                if t.is_empty() { None } else { Some(t.to_string()) }
+                if t.is_empty() {
+                    None
+                } else {
+                    Some(t.to_string())
+                }
             },
         });
     }
@@ -1657,13 +1713,11 @@ pub fn parse_branches(output: &str) -> Vec<BranchEntry> {
 
 /// Current HEAD sha; errors on unborn branches / failures.
 pub fn head_sha(repo_root: &Path, opts: &RunOptions) -> Result<String, GitError> {
-    Ok(git_ok(
-        repo_root,
-        &["rev-parse".into(), "HEAD".into()],
-        opts,
-    )?
-    .trim()
-    .to_string())
+    Ok(
+        git_ok(repo_root, &["rev-parse".into(), "HEAD".into()], opts)?
+            .trim()
+            .to_string(),
+    )
 }
 
 /// HEAD sha or null on unborn branches / any failure (never throws).
@@ -1716,13 +1770,14 @@ pub fn collect_commit_show(
     sha: &str,
     opts: &RunOptions,
 ) -> Result<String, GitError> {
-    let valid = sha.len() >= 4
-        && sha.len() <= 64
-        && sha.chars().all(|c| c.is_ascii_hexdigit());
+    let valid = sha.len() >= 4 && sha.len() <= 64 && sha.chars().all(|c| c.is_ascii_hexdigit());
     if !valid {
         return Err(GitError::new(
             GitErrorKind::GitError,
-            format!("invalid commit sha: {}", serde_json::to_string(sha).unwrap_or_default()),
+            format!(
+                "invalid commit sha: {}",
+                serde_json::to_string(sha).unwrap_or_default()
+            ),
         ));
     }
     let mut o = opts.clone();
@@ -1730,7 +1785,12 @@ pub fn collect_commit_show(
     o.max_buffer = Some(opts.max_buffer.unwrap_or(512 * 1024));
     let result = run_git(
         repo_root,
-        &["show".into(), "--no-color".into(), "--format=fuller".into(), sha.to_string()],
+        &[
+            "show".into(),
+            "--no-color".into(),
+            "--format=fuller".into(),
+            sha.to_string(),
+        ],
         &o,
     )?;
     if result.code != 0 {

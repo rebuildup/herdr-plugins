@@ -19,6 +19,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { statSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import path from "node:path";
 import {
@@ -71,8 +72,11 @@ function defaultConfigDir(pluginId: string): string {
 
 async function isPluginRoot(dir: string, pluginId: string): Promise<boolean> {
   try {
-    const cli = await stat(path.join(dir, "src", "cli.ts"));
-    if (!cli.isFile()) return false;
+    // Native layout (ADR-0035): committed bin/<plugin>; legacy TS layout:
+    // src/cli.ts run under bun. Either marks a usable plugin root.
+    const nativeBin = await stat(path.join(dir, "bin", pluginDirName(pluginId))).catch(() => null);
+    const tsCli = await stat(path.join(dir, "src", "cli.ts")).catch(() => null);
+    if (nativeBin?.isFile() !== true && tsCli?.isFile() !== true) return false;
     const tomlPath = path.join(dir, "herdr-plugin.toml");
     const toml = await stat(tomlPath).catch(() => null);
     if (toml === null || !toml.isFile()) return true; // cli.ts is enough signal
@@ -179,7 +183,7 @@ export async function resolvePluginSource(pluginId: string): Promise<ResolvePlug
     ok: true,
     source: {
       plugin_root: root,
-      cli_path: path.join(root, "src", "cli.ts"),
+      cli_path: pluginCliPath(root, pluginId),
       state_dir: defaultStateDir(pluginId),
       config_dir: defaultConfigDir(pluginId),
       resolved_via: resolvedVia,
@@ -200,6 +204,17 @@ export interface RunPluginOptions {
   socketPath: string;
   /** Wall-clock budget for the child process (default 60s). */
   timeoutMs?: number | undefined;
+}
+
+/** Native plugins ship `bin/<name>`; legacy TS plugins `src/cli.ts`. */
+function pluginCliPath(root: string, pluginId: string): string {
+  const nativeBin = path.join(root, "bin", pluginDirName(pluginId));
+  try {
+    if (statSync(nativeBin).isFile()) return nativeBin;
+  } catch {
+    /* fall through to TS layout */
+  }
+  return path.join(root, "src", "cli.ts");
 }
 
 /**
@@ -242,12 +257,17 @@ export async function runPluginCli(
   const timeoutMs = options.timeoutMs ?? 60_000;
 
   const result = await new Promise<PluginCliResult>((resolvePromise, reject) => {
-    const child = spawn(process.execPath, [source.cli_path, ...cliArgs], {
-      cwd: source.plugin_root,
-      env,
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: timeoutMs + 10_000,
-    });
+    const isNative = source.cli_path.includes(`${path.sep}bin${path.sep}`);
+    const child = spawn(
+      isNative ? source.cli_path : process.execPath,
+      isNative ? cliArgs : [source.cli_path, ...cliArgs],
+      {
+        cwd: source.plugin_root,
+        env,
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: timeoutMs + 10_000,
+      },
+    );
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk: Buffer) => {
