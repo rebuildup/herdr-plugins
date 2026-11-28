@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { aggregateUsage } from "../plugins/usage/src/aggregate";
 import type { SessionCoverageEntry, UsageEventRecord } from "../plugins/usage/src/model";
-import { conversationsBinary } from "./helpers/conversations-bin";
+import { conversationsBinary, conversationsPluginRootFixture } from "./helpers/conversations-bin";
 import { herdrSocketEndpoint, testEnv } from "./helpers/test-env";
 
 /** Claude project-dir encoding (was plugins/conversations/src/claude.ts). */
@@ -49,7 +49,10 @@ afterAll(() => {
 
 const USAGE_CLI = path.join(__dirname, "..", "plugins", "usage", "src", "cli.ts");
 const CONV_CLI = conversationsBinary();
-const CONV_ROOT = path.join(__dirname, "..", "plugins", "conversations");
+// Runnable plugin root: the committed bin/ prebuilt is macOS-only,
+// so sibling resolution must point at a fixture linking the host binary
+// (same pattern as tests/helpers/inbox-bin.ts, Issue #291).
+const CONV_ROOT = conversationsPluginRootFixture();
 const DEAD_SOCKET = path.join(tempDir(), "no-such-herdr.sock");
 
 const CLAUDE_SESSION = "3bc481ff-60ac-491a-abd0-07c408c85e71";

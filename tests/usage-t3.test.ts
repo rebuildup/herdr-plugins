@@ -9,7 +9,7 @@ import { buildCacheTokens } from "../plugins/usage/src/aggregate";
 import { buildDivergence } from "../plugins/usage/src/divergence";
 import { hubBaseUrl } from "../plugins/usage/src/hub";
 import type { BreakdownEntry, QuotaProviderResult, QuotaWindow } from "../plugins/usage/src/model";
-import { conversationsBinary } from "./helpers/conversations-bin";
+import { conversationsBinary, conversationsPluginRootFixture } from "./helpers/conversations-bin";
 import { herdrSocketEndpoint, testEnv } from "./helpers/test-env";
 
 /** Claude project-dir encoding (was plugins/conversations/src/claude.ts). */
@@ -57,7 +57,10 @@ afterAll(() => {
 
 const USAGE_CLI = path.join(__dirname, "..", "plugins", "usage", "src", "cli.ts");
 const CONV_CLI = conversationsBinary();
-const CONV_ROOT = path.join(__dirname, "..", "plugins", "conversations");
+// Runnable plugin root: the committed bin/ prebuilt is macOS-only,
+// so sibling resolution must point at a fixture linking the host binary
+// (same pattern as tests/helpers/inbox-bin.ts, Issue #291).
+const CONV_ROOT = conversationsPluginRootFixture();
 
 // Fake credential material — must never appear in any CLI output.
 const CLAUDE_TOKEN = "claude-t3-quota-token-9d2f";
