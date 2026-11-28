@@ -115,10 +115,11 @@ current` resolves the attached session differently):
   only appears for real agent integrations, so end-to-end indexing was
   verified via the fake-socket contract suite and the np287 perf
   fixture instead.
-- Managed install `herdr plugin install … --ref 293` was **not** run:
-  it requires the branch pushed with `bin/conversations` committed;
-  tracked as a follow-up on the PR (same evidence level #291 reached
-  only after its binary commit landed).
+- `herdr plugin unlink` + `herdr plugin install
+  rebuildup/hoxay-plugins/plugins/conversations --ref 293 --yes` —
+  managed GitHub install resolved branch `293` → `4d6e08c`; the
+  installed `bin/conversations` ran `capability`/`sessions` against
+  the np293 session correctly.
 
 ## 5. Performance re-measurement (#287 baseline comparison)
 
@@ -185,8 +186,7 @@ Notes:
   a two-phase raw-line prefilter that respects JSON escaping.
 - First-build index cost (§5) — candidate for parallel per-session
   scans or cheaper event materialization.
-- Managed-install verification (`herdr plugin install --ref 293`)
-  pending the pushed binary commit.
+- ~~Managed-install verification~~ — done post-push (§4).
 - `state.rs` doc comment still references a planned `index.sqlite`
   search index (`indexdb.rs`) that the shipped design does not have —
   the derived-index experiment was dropped; JSONL+state.json remain
