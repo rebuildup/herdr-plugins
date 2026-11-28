@@ -229,10 +229,30 @@ describe("git native CLI: capability and failures", () => {
     }
   });
 
-  test("unknown pane is pane_not_found, not a crash", () => {
-    const { status, error } = runSync(["status", "w9:p9"]);
-    expect(status).toBe(1);
-    expect(error?.kind ?? error?.code).toBe("pane_not_found");
+  test("unknown pane is pane_not_found, not a crash", async () => {
+    // Deterministic across platforms: a fake herdr socket whose snapshot
+    // contains no w9:p9. (Without a socket env the CLI resolves the
+    // DEFAULT herdr socket — on a dev machine that is the live session,
+    // on CI it is absent; both outcomes are environment-dependent.)
+    const dir = mkdtempSync(
+      path.join(process.platform === "win32" ? tmpdir() : "/tmp", "git-native-pane-"),
+    );
+    const xdg = path.join(dir, "xdg");
+    const sockPath = path.join(xdg, "herdr", "sessions", "aaa", "herdr.sock");
+    mkdirSync(path.dirname(sockPath), { recursive: true });
+    const snap = snapshot(dir);
+    (snap.panes as unknown[]).length = 0;
+    const server = await startFakeHerdr(sockPath, snap);
+    try {
+      const { status, error } = await runCli(["status", "w9:p9", "--session", "aaa"], {
+        XDG_CONFIG_HOME: xdg,
+      });
+      expect(status).toBe(1);
+      expect(error?.kind ?? error?.code).toBe("pane_not_found");
+    } finally {
+      await server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("pane outside a git repo is not_a_repo", async () => {
